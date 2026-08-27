@@ -1035,6 +1035,8 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
         rollout_path: rollout_path.clone(),
         ordinal_state: RolloutOrdinalState::Legacy,
         last_logged_error: None,
+        sync_attempts: 0,
+        sync_failures_remaining: 0,
     };
     state.add_items(vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
         AgentMessageEvent {
@@ -1050,6 +1052,61 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
     assert!(
         text_after_retry.contains("queued-after-writer-error"),
         "flush should retry after reopening and write buffered items"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_barriers_sync_data_without_syncing_background_appends() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(&rollout_path)?;
+    let mut state = RolloutWriterState {
+        writer: Some(JsonlWriter {
+            file: tokio::fs::File::from_std(file),
+        }),
+        deferred_creation: false,
+        pending_items: Vec::new(),
+        meta: None,
+        cwd: home.path().to_path_buf(),
+        rollout_path: rollout_path.clone(),
+        ordinal_state: RolloutOrdinalState::Legacy,
+        last_logged_error: None,
+        sync_attempts: 0,
+        sync_failures_remaining: 0,
+    };
+    state.add_items(vec![agent_message_item("background append")]);
+
+    state.flush_if_materialized().await;
+
+    assert!(state.pending_items.is_empty());
+    assert_eq!(
+        state.sync_attempts, 0,
+        "ordinary background appends should not pay a durable barrier"
+    );
+
+    state.sync_failures_remaining = 2;
+    let err = state
+        .flush()
+        .await
+        .expect_err("both durable sync attempts should fail");
+    assert_eq!(err.to_string(), "injected rollout sync_data failure");
+    assert_eq!(state.sync_attempts, 2);
+    assert!(
+        state.writer.is_none(),
+        "a failed durable barrier should drop the handle before a later retry"
+    );
+
+    state.sync_failures_remaining = 0;
+    state.shutdown().await?;
+    assert_eq!(state.sync_attempts, 3);
+    assert!(
+        std::fs::read_to_string(&rollout_path)?.contains("background append"),
+        "a failed durable barrier must not lose already-written items"
     );
     Ok(())
 }

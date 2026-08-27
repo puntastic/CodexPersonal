@@ -912,6 +912,10 @@ impl RolloutRecorder {
                     rollout_path: path,
                     ordinal_state,
                     last_logged_error: None,
+                    #[cfg(test)]
+                    sync_attempts: 0,
+                    #[cfg(test)]
+                    sync_failures_remaining: 0,
                 }
             }
             RolloutRecorderParams::Resume { path } => {
@@ -925,6 +929,10 @@ impl RolloutRecorder {
                     rollout_path: path,
                     ordinal_state,
                     last_logged_error: None,
+                    #[cfg(test)]
+                    sync_attempts: 0,
+                    #[cfg(test)]
+                    sync_failures_remaining: 0,
                 }
             }
         };
@@ -1002,7 +1010,7 @@ impl RolloutRecorder {
         })?
     }
 
-    /// Flush all queued writes and wait until they are committed by the writer task.
+    /// Flush all queued writes and wait until the writer task has durably stored them.
     ///
     /// If the first writer attempt fails, the writer drops and reopens the file handle before
     /// retrying. This returns an error only when that retry also fails or the writer task is gone.
@@ -1698,6 +1706,16 @@ struct RolloutWriterState {
     rollout_path: PathBuf,
     ordinal_state: RolloutOrdinalState,
     last_logged_error: Option<String>,
+    #[cfg(test)]
+    sync_attempts: usize,
+    #[cfg(test)]
+    sync_failures_remaining: usize,
+}
+
+#[derive(Clone, Copy)]
+enum WriteDurability {
+    Buffered,
+    Durable,
 }
 
 impl RolloutWriterState {
@@ -1709,31 +1727,41 @@ impl RolloutWriterState {
         if self.is_deferred() {
             return;
         }
-        if let Err(err) = self.flush().await {
+        if let Err(err) = self
+            .write_pending_with_recovery("background flush", WriteDurability::Buffered)
+            .await
+        {
             self.enter_recovery_mode(&err);
         }
     }
 
     async fn persist(&mut self) -> std::io::Result<()> {
-        self.write_pending_with_recovery("persist").await
+        self.write_pending_with_recovery("persist", WriteDurability::Durable)
+            .await
     }
 
     async fn flush(&mut self) -> std::io::Result<()> {
         if self.is_deferred() && self.pending_items.is_empty() {
             return Ok(());
         }
-        self.write_pending_with_recovery("flush").await
+        self.write_pending_with_recovery("flush", WriteDurability::Durable)
+            .await
     }
 
     async fn shutdown(&mut self) -> std::io::Result<()> {
         if self.is_deferred() && self.pending_items.is_empty() {
             return Ok(());
         }
-        self.write_pending_with_recovery("shutdown").await
+        self.write_pending_with_recovery("shutdown", WriteDurability::Durable)
+            .await
     }
 
-    async fn write_pending_with_recovery(&mut self, operation: &str) -> std::io::Result<()> {
-        match self.write_pending_once().await {
+    async fn write_pending_with_recovery(
+        &mut self,
+        operation: &str,
+        durability: WriteDurability,
+    ) -> std::io::Result<()> {
+        match self.write_pending_once(durability).await {
             Ok(()) => {
                 self.last_logged_error = None;
                 Ok(())
@@ -1741,7 +1769,7 @@ impl RolloutWriterState {
             Err(first_err) => {
                 self.enter_recovery_mode(&first_err);
                 warn!("failed to {operation} rollout writer; reopening and retrying: {first_err}");
-                match self.write_pending_once().await {
+                match self.write_pending_once(durability).await {
                     Ok(()) => {
                         self.last_logged_error = None;
                         Ok(())
@@ -1806,7 +1834,7 @@ impl RolloutWriterState {
         Ok(())
     }
 
-    async fn write_pending_once(&mut self) -> std::io::Result<()> {
+    async fn write_pending_once(&mut self, durability: WriteDurability) -> std::io::Result<()> {
         self.ensure_writer_open().await?;
         self.write_session_meta_if_needed().await?;
 
@@ -1814,6 +1842,17 @@ impl RolloutWriterState {
 
         if let Some(writer) = self.writer.as_mut() {
             writer.file.flush().await?;
+            if matches!(durability, WriteDurability::Durable) {
+                #[cfg(test)]
+                {
+                    self.sync_attempts = self.sync_attempts.saturating_add(1);
+                    if self.sync_failures_remaining > 0 {
+                        self.sync_failures_remaining -= 1;
+                        return Err(IoError::other("injected rollout sync_data failure"));
+                    }
+                }
+                writer.file.sync_data().await?;
+            }
         }
         Ok(())
     }
