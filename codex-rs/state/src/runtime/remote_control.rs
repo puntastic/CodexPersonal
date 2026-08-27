@@ -156,7 +156,7 @@ mod tests {
     use super::RemoteControlEnrollmentRecord;
     use super::StateRuntime;
     use super::test_support::unique_temp_dir;
-    use crate::migrations::STATE_MIGRATOR;
+    use crate::migrations::runtime_state_migrator;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
     use sqlx::migrate::Migrator;
@@ -334,9 +334,10 @@ mod tests {
         tokio::fs::create_dir_all(&codex_home)
             .await
             .expect("create codex home");
+        let state_migrator = runtime_state_migrator();
         let old_state_migrator = Migrator {
             migrations: Cow::Owned(
-                STATE_MIGRATOR
+                state_migrator
                     .migrations
                     .iter()
                     .filter(|migration| migration.version <= 36)
@@ -346,8 +347,8 @@ mod tests {
             ignore_missing: false,
             locking: true,
             no_tx: false,
-            table_name: STATE_MIGRATOR.table_name.clone(),
-            create_schemas: STATE_MIGRATOR.create_schemas.clone(),
+            table_name: state_migrator.table_name.clone(),
+            create_schemas: state_migrator.create_schemas.clone(),
         };
         let sqlite = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs());
         let pool = sqlite
