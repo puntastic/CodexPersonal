@@ -10412,6 +10412,7 @@
           "$ref": "#/definitions/McpAuthStatus"
         },
         "error": {
+          "default": null,
           "description": "User-safe detail for the current thread-runtime startup failure, when one is retained.",
           "type": [
             "string",
@@ -10427,6 +10428,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "Typed recovery reason for the current thread-runtime startup failure, when known."
         },
         "name": {

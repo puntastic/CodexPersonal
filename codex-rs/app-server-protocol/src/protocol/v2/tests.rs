@@ -2575,6 +2575,8 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
             "data": [{
                 "name": "not-ready",
                 "runtimeStatus": null,
+                "error": null,
+                "failureReason": null,
                 "pluginId": null,
                 "serverInfo": null,
                 "tools": {},
@@ -2734,6 +2736,8 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
             "data": [{
                 "name": "initialized",
                 "runtimeStatus": null,
+                "error": null,
+                "failureReason": null,
                 "pluginId": "lookup@test",
                 "serverInfo": {
                     "name": "lookup-server",

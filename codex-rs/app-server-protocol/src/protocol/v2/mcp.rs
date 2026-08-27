@@ -77,12 +77,10 @@ pub struct McpServerStatus {
     /// Current thread-runtime connection state; null when unavailable or the configuration changed.
     pub runtime_status: Option<McpServerConnectionStatus>,
     /// User-safe detail for the current thread-runtime startup failure, when one is retained.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[serde(default)]
     pub error: Option<String>,
     /// Typed recovery reason for the current thread-runtime startup failure, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[serde(default)]
     pub failure_reason: Option<McpServerStartupFailureReason>,
     pub plugin_id: Option<String>,
     pub server_info: Option<McpServerInfo>,

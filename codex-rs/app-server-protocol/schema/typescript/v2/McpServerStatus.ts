@@ -17,8 +17,8 @@ runtimeStatus: McpServerConnectionStatus | null,
 /**
  * User-safe detail for the current thread-runtime startup failure, when one is retained.
  */
-error?: string,
+error: string | null,
 /**
  * Typed recovery reason for the current thread-runtime startup failure, when known.
  */
-failureReason?: McpServerStartupFailureReason, pluginId: string | null, serverInfo: McpServerInfo | null, tools: { [key in string]?: Tool }, resources: Array<Resource>, resourceTemplates: Array<ResourceTemplate>, authStatus: McpAuthStatus, };
+failureReason: McpServerStartupFailureReason | null, pluginId: string | null, serverInfo: McpServerInfo | null, tools: { [key in string]?: Tool }, resources: Array<Resource>, resourceTemplates: Array<ResourceTemplate>, authStatus: McpAuthStatus, };
