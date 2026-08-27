@@ -8,6 +8,8 @@ use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -906,6 +908,7 @@ impl RolloutRecorder {
                 RolloutWriterState {
                     writer: None,
                     deferred_creation: true,
+                    namespace_sync_directories: None,
                     pending_items: Vec::new(),
                     meta: Some(session_meta),
                     cwd: cwd.clone(),
@@ -916,6 +919,10 @@ impl RolloutRecorder {
                     sync_attempts: 0,
                     #[cfg(test)]
                     sync_failures_remaining: 0,
+                    #[cfg(test)]
+                    namespace_sync_attempts: 0,
+                    #[cfg(test)]
+                    namespace_sync_failures_remaining: 0,
                 }
             }
             RolloutRecorderParams::Resume { path } => {
@@ -923,6 +930,7 @@ impl RolloutRecorder {
                 RolloutWriterState {
                     writer: Some(JsonlWriter { file }),
                     deferred_creation: false,
+                    namespace_sync_directories: Some(Vec::new()),
                     pending_items: Vec::new(),
                     meta: None,
                     cwd: cwd.clone(),
@@ -933,6 +941,10 @@ impl RolloutRecorder {
                     sync_attempts: 0,
                     #[cfg(test)]
                     sync_failures_remaining: 0,
+                    #[cfg(test)]
+                    namespace_sync_attempts: 0,
+                    #[cfg(test)]
+                    namespace_sync_failures_remaining: 0,
                 }
             }
         };
@@ -1691,6 +1703,65 @@ fn open_log_file(path: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
+fn plan_rollout_namespace_sync(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut directory = path
+        .parent()
+        .ok_or_else(|| IoError::other("rollout path has no parent directory"))?
+        .to_path_buf();
+    let mut directories = Vec::new();
+    loop {
+        directories.push(directory.clone());
+        match fs::metadata(directory.as_path()) {
+            Ok(metadata) if metadata.is_dir() => return Ok(directories),
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        directory = directory.parent().map(Path::to_path_buf).ok_or_else(|| {
+            IoError::other(format!(
+                "rollout path has no existing directory ancestor: {}",
+                path.display()
+            ))
+        })?;
+    }
+}
+
+#[cfg(unix)]
+async fn sync_rollout_directories(directories: &[PathBuf]) -> std::io::Result<()> {
+    let directories = directories.to_vec();
+    tokio::task::spawn_blocking(move || {
+        for directory in directories {
+            std::fs::File::open(directory)?.sync_all()?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| IoError::other(format!("failed waiting for rollout directory sync: {err}")))?
+}
+
+#[cfg(windows)]
+async fn sync_rollout_directories(directories: &[PathBuf]) -> std::io::Result<()> {
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let directories = directories.to_vec();
+    tokio::task::spawn_blocking(move || {
+        for directory in directories {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(directory)?
+                .sync_all()?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|err| IoError::other(format!("failed waiting for rollout directory sync: {err}")))?
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn sync_rollout_directories(_directories: &[PathBuf]) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Mutable state owned by the background rollout writer.
 ///
 /// Items are first appended to `pending_items`; persist/flush/shutdown remove each item from that
@@ -1700,6 +1771,9 @@ struct RolloutWriterState {
     writer: Option<JsonlWriter>,
     /// True until a newly created rollout is first materialized.
     deferred_creation: bool,
+    /// Directories to sync, from the rollout parent through its nearest pre-existing ancestor.
+    /// `None` means a new rollout still needs this plan prepared before any path is created.
+    namespace_sync_directories: Option<Vec<PathBuf>>,
     pending_items: Vec<RolloutItem>,
     meta: Option<SessionMeta>,
     cwd: PathBuf,
@@ -1710,6 +1784,10 @@ struct RolloutWriterState {
     sync_attempts: usize,
     #[cfg(test)]
     sync_failures_remaining: usize,
+    #[cfg(test)]
+    namespace_sync_attempts: usize,
+    #[cfg(test)]
+    namespace_sync_failures_remaining: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -1811,6 +1889,10 @@ impl RolloutWriterState {
             return Ok(());
         }
 
+        if self.namespace_sync_directories.is_none() {
+            self.namespace_sync_directories =
+                Some(plan_rollout_namespace_sync(self.rollout_path.as_path())?);
+        }
         let file = open_log_file(self.rollout_path.as_path())?;
         self.writer = Some(JsonlWriter {
             file: tokio::fs::File::from_std(file),
@@ -1854,6 +1936,33 @@ impl RolloutWriterState {
                 writer.file.sync_data().await?;
             }
         }
+        if matches!(durability, WriteDurability::Durable) {
+            self.sync_namespace_if_needed().await?;
+        }
+        Ok(())
+    }
+
+    async fn sync_namespace_if_needed(&mut self) -> std::io::Result<()> {
+        let Some(directories) = self.namespace_sync_directories.as_ref() else {
+            return Err(IoError::other(
+                "rollout namespace sync plan was not prepared",
+            ));
+        };
+        if directories.is_empty() {
+            return Ok(());
+        }
+        #[cfg(test)]
+        {
+            self.namespace_sync_attempts = self.namespace_sync_attempts.saturating_add(1);
+            if self.namespace_sync_failures_remaining > 0 {
+                self.namespace_sync_failures_remaining -= 1;
+                return Err(IoError::other(
+                    "injected rollout parent directory sync failure",
+                ));
+            }
+        }
+        sync_rollout_directories(directories).await?;
+        self.namespace_sync_directories = Some(Vec::new());
         Ok(())
     }
 

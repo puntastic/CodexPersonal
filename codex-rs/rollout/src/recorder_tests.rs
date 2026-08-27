@@ -1029,6 +1029,7 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
             file: tokio::fs::File::from_std(read_only_file),
         }),
         deferred_creation: false,
+        namespace_sync_directories: Some(Vec::new()),
         pending_items: Vec::new(),
         meta: None,
         cwd: home.path().to_path_buf(),
@@ -1037,6 +1038,8 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
         last_logged_error: None,
         sync_attempts: 0,
         sync_failures_remaining: 0,
+        namespace_sync_attempts: 0,
+        namespace_sync_failures_remaining: 0,
     };
     state.add_items(vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
         AgentMessageEvent {
@@ -1070,6 +1073,7 @@ async fn explicit_barriers_sync_data_without_syncing_background_appends() -> std
             file: tokio::fs::File::from_std(file),
         }),
         deferred_creation: false,
+        namespace_sync_directories: Some(Vec::new()),
         pending_items: Vec::new(),
         meta: None,
         cwd: home.path().to_path_buf(),
@@ -1078,6 +1082,8 @@ async fn explicit_barriers_sync_data_without_syncing_background_appends() -> std
         last_logged_error: None,
         sync_attempts: 0,
         sync_failures_remaining: 0,
+        namespace_sync_attempts: 0,
+        namespace_sync_failures_remaining: 0,
     };
     state.add_items(vec![agent_message_item("background append")]);
 
@@ -1107,6 +1113,71 @@ async fn explicit_barriers_sync_data_without_syncing_background_appends() -> std
     assert!(
         std::fs::read_to_string(&rollout_path)?.contains("background append"),
         "a failed durable barrier must not lose already-written items"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn first_materialization_retries_directory_sync_before_reporting_durable()
+-> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("sessions").join("rollout.jsonl");
+    let mut state = RolloutWriterState {
+        writer: None,
+        deferred_creation: true,
+        namespace_sync_directories: None,
+        pending_items: Vec::new(),
+        meta: None,
+        cwd: home.path().to_path_buf(),
+        rollout_path: rollout_path.clone(),
+        ordinal_state: RolloutOrdinalState::Legacy,
+        last_logged_error: None,
+        sync_attempts: 0,
+        sync_failures_remaining: 0,
+        namespace_sync_attempts: 0,
+        namespace_sync_failures_remaining: 0,
+    };
+    state.add_items(vec![agent_message_item("first materialization")]);
+
+    state.flush_if_materialized().await;
+    assert!(!rollout_path.exists());
+    assert_eq!(state.sync_attempts, 0);
+    assert_eq!(state.namespace_sync_attempts, 0);
+
+    state.namespace_sync_failures_remaining = 2;
+    let err = state
+        .flush()
+        .await
+        .expect_err("both directory sync attempts should fail");
+    assert_eq!(
+        err.to_string(),
+        "injected rollout parent directory sync failure"
+    );
+    assert_eq!(state.sync_attempts, 2);
+    assert_eq!(state.namespace_sync_attempts, 2);
+    assert_eq!(
+        state.namespace_sync_directories.as_ref(),
+        Some(&vec![
+            rollout_path.parent().expect("rollout parent").to_path_buf(),
+            home.path().to_path_buf(),
+        ])
+    );
+    assert!(state.writer.is_none());
+
+    state.namespace_sync_failures_remaining = 0;
+    state.shutdown().await?;
+    assert_eq!(state.sync_attempts, 3);
+    assert_eq!(state.namespace_sync_attempts, 3);
+    assert_eq!(state.namespace_sync_directories, Some(Vec::new()));
+    assert!(
+        std::fs::read_to_string(&rollout_path)?.contains("first materialization"),
+        "directory-sync failure must not lose already-written items"
+    );
+
+    state.shutdown().await?;
+    assert_eq!(
+        state.namespace_sync_attempts, 3,
+        "the parent directory should be synced only for first materialization"
     );
     Ok(())
 }
