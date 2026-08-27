@@ -184,10 +184,7 @@ impl CompactedHistoryResolver {
     /// inline value from the checkpoint is indexed. A missing reference therefore leaves the
     /// resolver unchanged, and an inline entry can never satisfy a reference from its own
     /// checkpoint.
-    pub fn index_item(
-        &mut self,
-        rollout_item: &RolloutItem,
-    ) -> Result<(), Vec<String>> {
+    pub fn index_item(&mut self, rollout_item: &RolloutItem) -> Result<(), Vec<String>> {
         self.index_item_detailed(rollout_item)
             .map_err(|error| error.affected_item_ids())
     }
@@ -336,10 +333,7 @@ impl CompactedHistoryResolver {
     /// checkpoint remains entry-backed and contributes no sources when that happens.
     /// A successfully resolved checkpoint rebases the resolver to that complete current context;
     /// subsequent top-level items form its suffix.
-    pub fn materialize_item(
-        &mut self,
-        rollout_item: &mut RolloutItem,
-    ) -> Result<(), Vec<String>> {
+    pub fn materialize_item(&mut self, rollout_item: &mut RolloutItem) -> Result<(), Vec<String>> {
         self.materialize_item_detailed(rollout_item)
             .map_err(|error| error.affected_item_ids())
     }

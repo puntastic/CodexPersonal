@@ -626,8 +626,14 @@ mod tests {
             .expect("block state database path with a directory");
 
         let result = StateRuntime::init(sqlite, "test-provider".to_string()).await;
-        assert!(result.is_err(), "primary state failure must not degrade to memory");
-        assert!(state_path.is_dir(), "failed startup must not replace state path");
+        assert!(
+            result.is_err(),
+            "primary state failure must not degrade to memory"
+        );
+        assert!(
+            state_path.is_dir(),
+            "failed startup must not replace state path"
+        );
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
 

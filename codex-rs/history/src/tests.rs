@@ -657,13 +657,11 @@ fn v2_reference_survives_cold_reload_of_host_only_passthrough_fields() -> Result
     *internal_chat_message_metadata_passthrough = Some(
         codex_protocol::models::InternalChatMessageMetadataPassthrough {
             cell_id: Some("host-cell".to_string()),
-            executed_tool_calls: Some(vec![
-                codex_protocol::models::ExecutedToolCall::truncated(
-                    "oversized-tool".to_string(),
-                    4096,
-                    1024,
-                ),
-            ]),
+            executed_tool_calls: Some(vec![codex_protocol::models::ExecutedToolCall::truncated(
+                "oversized-tool".to_string(),
+                4096,
+                1024,
+            )]),
             tool_calls_complete: Some(true),
             ..Default::default()
         },
