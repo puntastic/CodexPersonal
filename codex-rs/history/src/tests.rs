@@ -498,8 +498,8 @@ fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<(
     let history_entry_variants = schema["definitions"]["CompactedHistoryEntry"]["oneOf"]
         .as_array()
         .expect("compacted history entry variants");
-    assert_eq!(history_entry_variants.len(), 2);
-    for entry_type in ["inline", "reference"] {
+    assert_eq!(history_entry_variants.len(), 3);
+    for entry_type in ["inline", "reference", "reference_v2"] {
         let variant = history_entry_variants
             .iter()
             .find(|variant| variant["properties"]["type"]["enum"] == json!([entry_type]))
@@ -562,6 +562,246 @@ fn entry_checkpoint(message: &str, entries: Vec<CompactedHistoryEntry>) -> Rollo
         previous_window_id: None,
         window_id: None,
     })
+}
+
+fn integrity_reference(envelope: &ResponseItemEnvelope) -> CompactedHistoryEntry {
+    let item_id = envelope
+        .item
+        .id()
+        .expect("integrity reference item id")
+        .as_str()
+        .to_string();
+    CompactedHistoryEntry::reference_v2(item_id, envelope)
+        .expect("test envelope should have a canonical digest")
+}
+
+#[test]
+fn v2_reference_round_trips_with_versioned_digest() -> Result<()> {
+    let mut source = identified_message("v2-wire", "complete envelope");
+    source.metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+    });
+    let reference = integrity_reference(&source);
+    let value = serde_json::to_value(&reference)?;
+
+    assert_eq!(value["type"], json!("reference_v2"));
+    assert_eq!(
+        value["item_id"],
+        json!(source.item.id().expect("source id").as_str())
+    );
+    assert!(
+        value["source_digest"]
+            .as_str()
+            .expect("digest string")
+            .starts_with("sha256-response-item-envelope-v1:")
+    );
+    assert_eq!(
+        serde_json::from_value::<CompactedHistoryEntry>(value)?,
+        reference
+    );
+    Ok(())
+}
+
+#[test]
+fn v2_reference_rejects_malformed_digest_before_resolution() {
+    let error = serde_json::from_value::<CompactedHistoryEntry>(json!({
+        "type": "reference_v2",
+        "item_id": "msg-malformed",
+        "source_digest": "sha256-response-item-envelope-v1:ABC",
+    }))
+    .expect_err("malformed digest must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("exactly 64 lowercase hexadecimal characters"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn v2_reference_resolves_exact_complete_envelope() {
+    let mut source = identified_message("v2-exact", "exact content");
+    source.metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+    });
+    let mut resolver = CompactedHistoryResolver::default();
+    resolver.index_explicit_sources(&RolloutItem::ResponseItem(source.clone()));
+    let RolloutItem::Compacted(checkpoint) =
+        entry_checkpoint("v2 exact", vec![integrity_reference(&source)])
+    else {
+        panic!("expected compacted checkpoint");
+    };
+
+    assert_eq!(
+        resolver
+            .resolve_compacted_item_detailed(&checkpoint)
+            .expect("exact V2 source should resolve"),
+        Some(vec![source])
+    );
+}
+
+#[test]
+fn v2_reference_survives_cold_reload_of_host_only_passthrough_fields() -> Result<()> {
+    let mut source = identified_message("v2-cold-reload", "durable envelope");
+    source.metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+    });
+    let ResponseItem::Message {
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = &mut source.item
+    else {
+        panic!("expected message source");
+    };
+    *internal_chat_message_metadata_passthrough = Some(
+        codex_protocol::models::InternalChatMessageMetadataPassthrough {
+            cell_id: Some("host-cell".to_string()),
+            executed_tool_calls: Some(vec![
+                codex_protocol::models::ExecutedToolCall::truncated(
+                    "oversized-tool".to_string(),
+                    4096,
+                    1024,
+                ),
+            ]),
+            tool_calls_complete: Some(true),
+            ..Default::default()
+        },
+    );
+    let reference = integrity_reference(&source);
+    let serialized_source = serde_json::to_value(RolloutItem::ResponseItem(source))?;
+    let RolloutItem::ResponseItem(reloaded_source) =
+        serde_json::from_value::<RolloutItem>(serialized_source)?
+    else {
+        panic!("expected reloaded response item");
+    };
+    let ResponseItem::Message {
+        internal_chat_message_metadata_passthrough: Some(reloaded_passthrough),
+        ..
+    } = &reloaded_source.item
+    else {
+        panic!("expected reloaded message passthrough");
+    };
+    assert_eq!(reloaded_passthrough.cell_id, None);
+    assert_eq!(reloaded_passthrough.executed_tool_calls, None);
+    assert_eq!(reloaded_passthrough.tool_calls_complete, None);
+    assert_eq!(
+        reloaded_source.metadata,
+        Some(CodexHarnessMetadata {
+            client_authored: true
+        })
+    );
+
+    let mut resolver = CompactedHistoryResolver::default();
+    resolver.index_explicit_sources(&RolloutItem::ResponseItem(reloaded_source.clone()));
+    let serialized_checkpoint =
+        serde_json::to_value(entry_checkpoint("v2 cold reload", vec![reference]))?;
+    let RolloutItem::Compacted(checkpoint) =
+        serde_json::from_value::<RolloutItem>(serialized_checkpoint)?
+    else {
+        panic!("expected reloaded compacted checkpoint");
+    };
+    assert_eq!(
+        resolver
+            .resolve_compacted_item_detailed(&checkpoint)
+            .expect("durably identical cold source should resolve"),
+        Some(vec![reloaded_source])
+    );
+    Ok(())
+}
+
+#[test]
+fn v2_reference_rejects_same_id_content_substitution_as_digest_mismatch() {
+    let expected = identified_message("v2-content", "original content");
+    let reference = integrity_reference(&expected);
+    let substituted = identified_message("v2-content", "substituted content");
+    let actual_digest =
+        CompactedHistoryDigest::from_envelope(&substituted).expect("substitute should encode");
+    let mut resolver = CompactedHistoryResolver::default();
+    resolver.index_explicit_sources(&RolloutItem::ResponseItem(substituted));
+    let RolloutItem::Compacted(checkpoint) = entry_checkpoint("v2 changed", vec![reference]) else {
+        panic!("expected compacted checkpoint");
+    };
+
+    let error = resolver
+        .resolve_compacted_item_detailed(&checkpoint)
+        .expect_err("same ID with changed content must fail closed");
+    assert!(error.missing_item_ids().is_empty());
+    let [mismatch] = error.digest_mismatches() else {
+        panic!("expected exactly one digest mismatch: {error}");
+    };
+    assert_eq!(
+        mismatch.item_id(),
+        expected.item.id().expect("expected id").as_str()
+    );
+    assert_eq!(mismatch.actual(), &actual_digest);
+    assert_ne!(mismatch.expected(), mismatch.actual());
+}
+
+#[test]
+fn v2_reference_rejects_same_item_metadata_substitution_as_digest_mismatch() {
+    let expected = identified_message("v2-metadata", "same content");
+    let reference = integrity_reference(&expected);
+    let mut substituted = expected.clone();
+    substituted.metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+    });
+    let mut resolver = CompactedHistoryResolver::default();
+    resolver.index_explicit_sources(&RolloutItem::ResponseItem(substituted));
+    let RolloutItem::Compacted(checkpoint) = entry_checkpoint("v2 metadata", vec![reference])
+    else {
+        panic!("expected compacted checkpoint");
+    };
+
+    let error = resolver
+        .resolve_compacted_item_detailed(&checkpoint)
+        .expect_err("metadata-only substitution must fail closed");
+    assert!(error.missing_item_ids().is_empty());
+    assert_eq!(error.digest_mismatches().len(), 1);
+}
+
+#[test]
+fn v2_reference_reports_missing_source_separately_from_digest_mismatch() {
+    let source = identified_message("v2-missing", "not persisted");
+    let RolloutItem::Compacted(checkpoint) =
+        entry_checkpoint("v2 missing", vec![integrity_reference(&source)])
+    else {
+        panic!("expected compacted checkpoint");
+    };
+
+    let error = CompactedHistoryResolver::default()
+        .resolve_compacted_item_detailed(&checkpoint)
+        .expect_err("missing V2 source must fail closed");
+    assert_eq!(
+        error.missing_item_ids(),
+        &[source.item.id().expect("source id").as_str().to_string()]
+    );
+    assert!(error.digest_mismatches().is_empty());
+}
+
+#[test]
+fn v2_checkpoint_resolution_ignores_large_irrelevant_sources() {
+    const IRRELEVANT_SOURCE_COUNT: usize = 64;
+    const IRRELEVANT_PAYLOAD_BYTES: usize = 16 * 1024;
+
+    let target = identified_message("v2-bounded-target", "selected source");
+    let mut rollout = vec![RolloutItem::ResponseItem(target.clone())];
+    rollout.extend((0..IRRELEVANT_SOURCE_COUNT).map(|index| {
+        RolloutItem::ResponseItem(identified_message(
+            &format!("v2-irrelevant-{index}"),
+            &format!("{index}:{}", "x".repeat(IRRELEVANT_PAYLOAD_BYTES)),
+        ))
+    }));
+    rollout.push(entry_checkpoint(
+        "selected V2 checkpoint",
+        vec![integrity_reference(&target)],
+    ));
+
+    assert_eq!(
+        resolve_checkpoint_at_detailed(&rollout, rollout.len() - 1)
+            .expect("target should resolve through the irrelevant prefix"),
+        Some(vec![target])
+    );
 }
 
 #[test]
@@ -880,12 +1120,10 @@ fn materialize_rebases_sources_to_current_checkpoint_and_suffix() {
             item_id: abandoned_id.clone(),
         }],
     );
-    assert_eq!(
-        resolver
-            .materialize_item(&mut invalid_future)
-            .expect_err("a source dropped by the current checkpoint must not leak forward"),
-        vec![abandoned_id]
-    );
+    let error = resolver
+        .materialize_item(&mut invalid_future)
+        .expect_err("a source dropped by the current checkpoint must not leak forward");
+    assert_eq!(error, vec![abandoned_id]);
     assert!(resolver.knows_exact_envelope(&current));
     assert!(resolver.knows_exact_envelope(&suffix));
 }

@@ -91,6 +91,10 @@ fn public_paginated_history_mode_maps_to_reference_gated_storage() {
         ThreadHistoryMode::from(codex_protocol::protocol::ThreadHistoryMode::Paginated),
         ThreadHistoryMode::Paginated
     );
+    assert_eq!(
+        ThreadHistoryMode::from(codex_protocol::protocol::ThreadHistoryMode::PaginatedRefsV2),
+        ThreadHistoryMode::Paginated
+    );
 }
 
 #[test]

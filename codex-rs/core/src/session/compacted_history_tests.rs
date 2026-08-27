@@ -65,6 +65,49 @@ fn exact_persisted_items_are_referenced_and_new_items_stay_inline() {
 }
 
 #[test]
+fn v2_mode_emits_complete_envelope_digest_without_changing_v1_shape() {
+    let mut persisted = message("persisted-v2", "digest-bound source");
+    persisted.metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+    });
+    let item_id = persisted.item.id().expect("item id").as_str().to_string();
+    let persisted_items = HashMap::from([(item_id.clone(), persisted.clone())]);
+
+    let encoded_v2 = encode_replacement_history(
+        std::slice::from_ref(&persisted),
+        &persisted_items,
+        ThreadHistoryMode::PaginatedRefsV2,
+    );
+    let Some(
+        [
+            CompactedHistoryEntry::ReferenceV2 {
+                item_id: encoded_id,
+                source_digest,
+            },
+        ],
+    ) = encoded_v2.entries.as_deref()
+    else {
+        panic!("V2 mode must emit exactly one integrity reference");
+    };
+    assert_eq!(encoded_id, &item_id);
+    assert_eq!(
+        source_digest,
+        &codex_history::CompactedHistoryDigest::from_envelope(&persisted)
+            .expect("persisted envelope should encode")
+    );
+
+    let encoded_v1 = encode_replacement_history(
+        std::slice::from_ref(&persisted),
+        &persisted_items,
+        ThreadHistoryMode::PaginatedRefsV1,
+    );
+    assert_eq!(
+        encoded_v1.entries,
+        Some(vec![CompactedHistoryEntry::Reference { item_id }])
+    );
+}
+
+#[test]
 fn changed_or_not_yet_persisted_items_are_not_referenced() {
     let persisted = message("same-id", "before");
     let changed = message("same-id", "after");

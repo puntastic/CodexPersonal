@@ -311,7 +311,10 @@ impl RollbackPlanner {
                         .unwrap_or_default()
                         .iter()
                         .filter_map(|entry| match entry {
-                            CompactedHistoryEntry::Reference { item_id } => Some(item_id.clone()),
+                            CompactedHistoryEntry::Reference { item_id }
+                            | CompactedHistoryEntry::ReferenceV2 { item_id, .. } => {
+                                Some(item_id.clone())
+                            }
                             CompactedHistoryEntry::Inline { .. } => None,
                         })
                         .collect(),

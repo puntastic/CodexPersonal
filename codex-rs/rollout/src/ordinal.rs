@@ -27,7 +27,9 @@ impl RolloutOrdinalState {
     ) -> Self {
         match history_mode {
             ThreadHistoryMode::Legacy => Self::Legacy,
-            ThreadHistoryMode::Paginated | ThreadHistoryMode::PaginatedRefsV1 => Self::Paginated {
+            ThreadHistoryMode::Paginated
+            | ThreadHistoryMode::PaginatedRefsV1
+            | ThreadHistoryMode::PaginatedRefsV2 => Self::Paginated {
                 next: Some(history_base.map_or(0, |base| base.end_ordinal_exclusive)),
             },
         }

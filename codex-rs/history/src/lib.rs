@@ -1,9 +1,11 @@
 //! Model-history and persisted-rollout domain types.
 
 use std::borrow::Borrow;
+use std::fmt;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use codex_protocol::ThreadId;
@@ -31,12 +33,17 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 use serde::de::Error as _;
+use sha2::Digest as _;
+use sha2::Sha256;
 
 mod compacted_history;
+pub use compacted_history::CompactedHistoryDigestMismatch;
+pub use compacted_history::CompactedHistoryReferenceError;
 pub use compacted_history::CompactedHistoryResolver;
 pub use compacted_history::MaterializedCompactedHistories;
 pub use compacted_history::materialize_compacted_histories;
 pub use compacted_history::resolve_checkpoint_at;
+pub use compacted_history::resolve_checkpoint_at_detailed;
 
 /// A model-history item with room for history-only metadata.
 ///
@@ -54,6 +61,137 @@ pub struct CodexHarnessMetadata {
     /// Whether a developer message was supplied by an app-server client.
     #[serde(default)]
     pub client_authored: bool,
+}
+
+const COMPACTED_HISTORY_DIGEST_PREFIX: &str = "sha256-response-item-envelope-v1:";
+
+/// A versioned digest over the complete durable response-item envelope.
+///
+/// The digest includes the response item and harness-owned metadata exactly as they survive a
+/// persistence round trip. Host-only passthrough fields that intentionally skip deserialization
+/// are excluded so a legitimate cold reload cannot invalidate its own reference. The versioned
+/// prefix makes this durable projection and canonical encoding part of the persisted contract.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
+#[schemars(transparent)]
+pub struct CompactedHistoryDigest(String);
+
+impl CompactedHistoryDigest {
+    /// Computes the V2 compacted-reference digest for an envelope.
+    pub fn from_envelope(
+        envelope: &ResponseItemEnvelope,
+    ) -> Result<Self, CompactedHistoryDigestEncodingError> {
+        // Project through the actual rollout wire before hashing. Response items contain a small
+        // set of trusted host-only passthrough fields that serialize for provider use but
+        // deliberately skip deserialization at the persistence trust boundary.
+        let serialized = serde_json::to_value(RolloutItem::ResponseItem(envelope.clone()))
+            .map_err(CompactedHistoryDigestEncodingError::from)?;
+        let durable = serde_json::from_value::<RolloutItem>(serialized)
+            .map_err(CompactedHistoryDigestEncodingError::from)?;
+        let mut value =
+            serde_json::to_value(durable).map_err(CompactedHistoryDigestEncodingError::from)?;
+        canonicalize_json_value(&mut value);
+        let bytes =
+            serde_json::to_vec(&value).map_err(CompactedHistoryDigestEncodingError::from)?;
+        let hash = Sha256::digest(bytes);
+        Ok(Self(format!("{COMPACTED_HISTORY_DIGEST_PREFIX}{hash:x}")))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CompactedHistoryDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for CompactedHistoryDigest {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let Some(hex) = value.strip_prefix(COMPACTED_HISTORY_DIGEST_PREFIX) else {
+            return Err(format!(
+                "compacted history digest must start with `{COMPACTED_HISTORY_DIGEST_PREFIX}`"
+            ));
+        };
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(
+                "compacted history digest must contain exactly 64 lowercase hexadecimal characters"
+                    .to_string(),
+            );
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+
+impl Serialize for CompactedHistoryDigest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactedHistoryDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(D::Error::custom)
+    }
+}
+
+/// Failure to encode an otherwise in-memory envelope for a V2 integrity reference.
+#[derive(Debug)]
+pub struct CompactedHistoryDigestEncodingError(serde_json::Error);
+
+impl fmt::Display for CompactedHistoryDigestEncodingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "could not encode response-item envelope: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for CompactedHistoryDigestEncodingError {}
+
+impl From<serde_json::Error> for CompactedHistoryDigestEncodingError {
+    fn from(error: serde_json::Error) -> Self {
+        Self(error)
+    }
+}
+
+fn canonicalize_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                canonicalize_json_value(item);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for child in object.values_mut() {
+                canonicalize_json_value(child);
+            }
+            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            object.extend(entries);
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
 }
 
 impl ResponseItemEnvelope {
@@ -161,6 +299,11 @@ pub enum CompactedHistoryEntry {
     Reference {
         item_id: String,
     },
+    /// A V2 backward reference that binds the complete source envelope, including metadata.
+    ReferenceV2 {
+        item_id: String,
+        source_digest: CompactedHistoryDigest,
+    },
 }
 
 impl CompactedHistoryEntry {
@@ -171,8 +314,19 @@ impl CompactedHistoryEntry {
                 item: *item,
                 metadata,
             }),
-            Self::Reference { .. } => None,
+            Self::Reference { .. } | Self::ReferenceV2 { .. } => None,
         }
+    }
+
+    /// Creates a V2 reference bound to the supplied envelope's complete durable projection.
+    pub fn reference_v2(
+        item_id: String,
+        envelope: &ResponseItemEnvelope,
+    ) -> Result<Self, CompactedHistoryDigestEncodingError> {
+        Ok(Self::ReferenceV2 {
+            item_id,
+            source_digest: CompactedHistoryDigest::from_envelope(envelope)?,
+        })
     }
 }
 

@@ -765,6 +765,11 @@ pub enum ThreadHistoryMode {
     #[serde(rename = "paginated_refs_v1")]
     #[ts(rename = "paginated_refs_v1")]
     PaginatedRefsV1,
+    /// Experimental paginated history whose compacted references bind the complete source
+    /// envelope with a versioned canonical digest. No public/default mode selects this value yet.
+    #[serde(rename = "paginated_refs_v2")]
+    #[ts(rename = "paginated_refs_v2")]
+    PaginatedRefsV2,
 }
 
 impl ThreadHistoryMode {
@@ -773,17 +778,26 @@ impl ThreadHistoryMode {
             Self::Legacy => "legacy",
             Self::Paginated => "paginated",
             Self::PaginatedRefsV1 => "paginated_refs_v1",
+            Self::PaginatedRefsV2 => "paginated_refs_v2",
         }
     }
 
     /// Whether this mode uses paginated rollout storage and replay semantics.
     pub const fn is_paginated(self) -> bool {
-        matches!(self, Self::Paginated | Self::PaginatedRefsV1)
+        matches!(
+            self,
+            Self::Paginated | Self::PaginatedRefsV1 | Self::PaginatedRefsV2
+        )
     }
 
     /// Whether compacted histories may be persisted using backward item references.
     pub const fn supports_compacted_history_references(self) -> bool {
-        matches!(self, Self::PaginatedRefsV1)
+        matches!(self, Self::PaginatedRefsV1 | Self::PaginatedRefsV2)
+    }
+
+    /// Whether new compacted references must carry and verify complete-envelope digests.
+    pub const fn supports_compacted_history_integrity(self) -> bool {
+        matches!(self, Self::PaginatedRefsV2)
     }
 }
 
@@ -795,6 +809,7 @@ impl FromStr for ThreadHistoryMode {
             "legacy" => Ok(Self::Legacy),
             "paginated" => Ok(Self::Paginated),
             "paginated_refs_v1" => Ok(Self::PaginatedRefsV1),
+            "paginated_refs_v2" => Ok(Self::PaginatedRefsV2),
             _ => Err(format!("unknown thread history mode `{value}`")),
         }
     }
@@ -5919,6 +5934,23 @@ mod tests {
         let mut unknown = serialized;
         unknown["history_mode"] = json!("future");
         assert!(serde_json::from_value::<SessionMeta>(unknown).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn integrity_reference_history_mode_has_distinct_fail_closed_wire_value() -> Result<()> {
+        let mode: ThreadHistoryMode = serde_json::from_value(json!("paginated_refs_v2"))?;
+
+        assert_eq!(mode, ThreadHistoryMode::PaginatedRefsV2);
+        assert_eq!(mode.as_str(), "paginated_refs_v2");
+        assert!(mode.is_paginated());
+        assert!(mode.supports_compacted_history_references());
+        assert!(mode.supports_compacted_history_integrity());
+        assert_eq!(
+            "paginated_refs_v2".parse::<ThreadHistoryMode>(),
+            Ok(ThreadHistoryMode::PaginatedRefsV2)
+        );
+        assert_eq!(serde_json::to_value(mode)?, json!("paginated_refs_v2"));
         Ok(())
     }
 

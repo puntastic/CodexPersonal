@@ -12,9 +12,9 @@ use std::sync::atomic::Ordering;
 fn sqlite_history_mode_family(history_mode: ThreadHistoryMode) -> &'static str {
     match history_mode {
         ThreadHistoryMode::Legacy => ThreadHistoryMode::Legacy.as_str(),
-        ThreadHistoryMode::Paginated | ThreadHistoryMode::PaginatedRefsV1 => {
-            ThreadHistoryMode::Paginated.as_str()
-        }
+        ThreadHistoryMode::Paginated
+        | ThreadHistoryMode::PaginatedRefsV1
+        | ThreadHistoryMode::PaginatedRefsV2 => ThreadHistoryMode::Paginated.as_str(),
     }
 }
 
@@ -955,7 +955,7 @@ ON CONFLICT(id) DO UPDATE SET
     -- Paginated history is a one-way family promotion. SQLite intentionally does not expose the
     -- exact rollout generation to older readers.
     history_mode = CASE
-        WHEN threads.history_mode IN ('paginated', 'paginated_refs_v1') THEN 'paginated'
+        WHEN threads.history_mode IN ('paginated', 'paginated_refs_v1', 'paginated_refs_v2') THEN 'paginated'
         ELSE excluded.history_mode
     END,
     thread_source = excluded.thread_source,

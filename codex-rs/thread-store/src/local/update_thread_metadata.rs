@@ -502,7 +502,9 @@ async fn apply_metadata_update(
                             .update_thread_title(thread_id, name.as_deref().unwrap_or_default())
                             .await
                     }
-                    ThreadHistoryMode::Paginated | ThreadHistoryMode::PaginatedRefsV1 => {
+                    ThreadHistoryMode::Paginated
+                    | ThreadHistoryMode::PaginatedRefsV1
+                    | ThreadHistoryMode::PaginatedRefsV2 => {
                         state_db
                             .update_thread_name(thread_id, name.as_deref())
                             .await

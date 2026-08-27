@@ -2720,11 +2720,13 @@ fn collect_response_item_ids(item: &RolloutItem, item_ids: &mut HashSet<String>)
                             }
                         }
                         codex_rollout::CompactedHistoryEntry::Reference { item_id }
+                        | codex_rollout::CompactedHistoryEntry::ReferenceV2 { item_id, .. }
                             if !item_id.is_empty() =>
                         {
                             item_ids.insert(item_id.clone());
                         }
-                        codex_rollout::CompactedHistoryEntry::Reference { .. } => {}
+                        codex_rollout::CompactedHistoryEntry::Reference { .. }
+                        | codex_rollout::CompactedHistoryEntry::ReferenceV2 { .. } => {}
                     }
                 }
             }

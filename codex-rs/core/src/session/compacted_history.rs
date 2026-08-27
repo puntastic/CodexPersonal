@@ -49,9 +49,21 @@ pub(super) fn encode_replacement_history(
                 && !conflicting_item_ids.contains(item_id)
                 && persisted_items.get(item_id) == Some(&envelope)
             {
-                has_reference = true;
-                CompactedHistoryEntry::Reference {
-                    item_id: item_id.to_string(),
+                if history_mode.supports_compacted_history_integrity() {
+                    match CompactedHistoryEntry::reference_v2(item_id.to_string(), &envelope) {
+                        Ok(reference) => {
+                            has_reference = true;
+                            reference
+                        }
+                        // A source whose durable projection cannot be encoded stays self-contained;
+                        // never downgrade a V2 write to an ID-only V1 reference.
+                        Err(_) => CompactedHistoryEntry::from(envelope),
+                    }
+                } else {
+                    has_reference = true;
+                    CompactedHistoryEntry::Reference {
+                        item_id: item_id.to_string(),
+                    }
                 }
             } else {
                 CompactedHistoryEntry::from(envelope)
@@ -113,7 +125,8 @@ pub(super) fn retained_checkpoint_reference_item_ids(
         })
         .flatten()
         .filter_map(|entry| match entry {
-            CompactedHistoryEntry::Reference { item_id } => Some(item_id.clone()),
+            CompactedHistoryEntry::Reference { item_id }
+            | CompactedHistoryEntry::ReferenceV2 { item_id, .. } => Some(item_id.clone()),
             CompactedHistoryEntry::Inline { .. } => None,
         })
         .collect()
@@ -161,9 +174,15 @@ pub(super) fn normalize_copied_fork_rollout(
                 compacted.replacement_history_entries = None;
             }
             if history_mode.supports_compacted_history_references() {
-                destination_resolver
-                    .reencode_item_with_backward_references(&mut item)
-                    .map_err(copied_fork_reference_error)?;
+                if history_mode.supports_compacted_history_integrity() {
+                    destination_resolver
+                        .reencode_item_with_integrity_references(&mut item)
+                        .map_err(copied_fork_integrity_reference_error)?;
+                } else {
+                    destination_resolver
+                        .reencode_item_with_backward_references(&mut item)
+                        .map_err(copied_fork_reference_error)?;
+                }
             }
         } else if codex_rollout::is_persisted_rollout_item(&item, history_mode) {
             destination_resolver.index_explicit_sources(&item);
@@ -180,5 +199,13 @@ fn copied_fork_reference_error(mut missing: Vec<String>) -> CodexErr {
     CodexErr::Fatal(format!(
         "cannot copy fork with unresolved compacted history references: {}",
         missing.join(", ")
+    ))
+}
+
+fn copied_fork_integrity_reference_error(
+    error: codex_history::CompactedHistoryReferenceError,
+) -> CodexErr {
+    CodexErr::Fatal(format!(
+        "cannot copy fork with unresolved compacted history references: {error}"
     ))
 }

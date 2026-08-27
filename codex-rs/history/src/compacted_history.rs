@@ -1,10 +1,140 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt;
 
+use crate::CompactedHistoryDigest;
 use crate::CompactedHistoryEntry;
 use crate::ResponseItemEnvelope;
 use crate::RolloutItem;
+
+/// One V2 reference whose addressed source exists but does not match its persisted digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactedHistoryDigestMismatch {
+    item_id: String,
+    expected: CompactedHistoryDigest,
+    actual: CompactedHistoryDigest,
+}
+
+impl CompactedHistoryDigestMismatch {
+    pub fn item_id(&self) -> &str {
+        &self.item_id
+    }
+
+    pub fn expected(&self) -> &CompactedHistoryDigest {
+        &self.expected
+    }
+
+    pub fn actual(&self) -> &CompactedHistoryDigest {
+        &self.actual
+    }
+}
+
+/// Typed failure for resolving a compacted-history reference set.
+///
+/// Missing sources and same-ID substitutions are kept in separate buckets so callers can choose
+/// recovery for absence without accidentally treating an integrity failure as ordinary absence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactedHistoryReferenceError {
+    missing_item_ids: Vec<String>,
+    digest_mismatches: Vec<CompactedHistoryDigestMismatch>,
+    digest_encoding_failure_item_ids: Vec<String>,
+}
+
+impl CompactedHistoryReferenceError {
+    pub fn missing_item_ids(&self) -> &[String] {
+        &self.missing_item_ids
+    }
+
+    pub fn digest_mismatches(&self) -> &[CompactedHistoryDigestMismatch] {
+        &self.digest_mismatches
+    }
+
+    pub fn digest_encoding_failure_item_ids(&self) -> &[String] {
+        &self.digest_encoding_failure_item_ids
+    }
+
+    /// IDs affected by any resolution failure, retained for V1-oriented diagnostics.
+    pub fn affected_item_ids(&self) -> Vec<String> {
+        let mut item_ids = self.missing_item_ids.clone();
+        item_ids.extend(
+            self.digest_mismatches
+                .iter()
+                .map(|mismatch| mismatch.item_id.clone()),
+        );
+        item_ids.extend(self.digest_encoding_failure_item_ids.iter().cloned());
+        item_ids.sort_unstable();
+        item_ids.dedup();
+        item_ids
+    }
+
+    fn empty() -> Self {
+        Self {
+            missing_item_ids: Vec::new(),
+            digest_mismatches: Vec::new(),
+            digest_encoding_failure_item_ids: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.missing_item_ids.is_empty()
+            && self.digest_mismatches.is_empty()
+            && self.digest_encoding_failure_item_ids.is_empty()
+    }
+
+    fn normalize(&mut self) {
+        self.missing_item_ids.sort_unstable();
+        self.missing_item_ids.dedup();
+        self.digest_mismatches.sort_unstable_by(|left, right| {
+            left.item_id
+                .cmp(&right.item_id)
+                .then_with(|| left.expected.as_str().cmp(right.expected.as_str()))
+                .then_with(|| left.actual.as_str().cmp(right.actual.as_str()))
+        });
+        self.digest_mismatches.dedup();
+        self.digest_encoding_failure_item_ids.sort_unstable();
+        self.digest_encoding_failure_item_ids.dedup();
+    }
+
+    fn normalized(mut self) -> Self {
+        self.normalize();
+        self
+    }
+}
+
+impl fmt::Display for CompactedHistoryReferenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut parts = Vec::new();
+        if !self.missing_item_ids.is_empty() {
+            parts.push(format!(
+                "missing sources: {}",
+                self.missing_item_ids.join(", ")
+            ));
+        }
+        if !self.digest_mismatches.is_empty() {
+            parts.push(format!(
+                "digest mismatches: {}",
+                self.digest_mismatches
+                    .iter()
+                    .map(|mismatch| format!(
+                        "{} (expected {}, actual {})",
+                        mismatch.item_id, mismatch.expected, mismatch.actual
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.digest_encoding_failure_item_ids.is_empty() {
+            parts.push(format!(
+                "sources that could not be canonically encoded: {}",
+                self.digest_encoding_failure_item_ids.join(", ")
+            ));
+        }
+        formatter.write_str(&parts.join("; "))
+    }
+}
+
+impl std::error::Error for CompactedHistoryReferenceError {}
 
 /// A rollout view whose reference-backed compaction checkpoints have been resolved when possible.
 pub struct MaterializedCompactedHistories<'a> {
@@ -54,7 +184,19 @@ impl CompactedHistoryResolver {
     /// inline value from the checkpoint is indexed. A missing reference therefore leaves the
     /// resolver unchanged, and an inline entry can never satisfy a reference from its own
     /// checkpoint.
-    pub fn index_item(&mut self, rollout_item: &RolloutItem) -> Result<(), Vec<String>> {
+    pub fn index_item(
+        &mut self,
+        rollout_item: &RolloutItem,
+    ) -> Result<(), Vec<String>> {
+        self.index_item_detailed(rollout_item)
+            .map_err(|error| error.affected_item_ids())
+    }
+
+    /// Typed form of [`Self::index_item`] for integrity-aware callers.
+    pub fn index_item_detailed(
+        &mut self,
+        rollout_item: &RolloutItem,
+    ) -> Result<(), CompactedHistoryReferenceError> {
         if let RolloutItem::Compacted(compacted) = rollout_item {
             validate_compacted_history_references(&self.known_items, compacted)?;
         }
@@ -164,6 +306,15 @@ impl CompactedHistoryResolver {
         &self,
         compacted: &crate::CompactedItem,
     ) -> Result<Option<Vec<ResponseItemEnvelope>>, Vec<String>> {
+        self.resolve_compacted_item_detailed(compacted)
+            .map_err(|error| error.affected_item_ids())
+    }
+
+    /// Typed form of [`Self::resolve_compacted_item`] for integrity-aware callers.
+    pub fn resolve_compacted_item_detailed(
+        &self,
+        compacted: &crate::CompactedItem,
+    ) -> Result<Option<Vec<ResponseItemEnvelope>>, CompactedHistoryReferenceError> {
         resolve_compacted_history(&self.known_items, compacted)
     }
 
@@ -185,7 +336,19 @@ impl CompactedHistoryResolver {
     /// checkpoint remains entry-backed and contributes no sources when that happens.
     /// A successfully resolved checkpoint rebases the resolver to that complete current context;
     /// subsequent top-level items form its suffix.
-    pub fn materialize_item(&mut self, rollout_item: &mut RolloutItem) -> Result<(), Vec<String>> {
+    pub fn materialize_item(
+        &mut self,
+        rollout_item: &mut RolloutItem,
+    ) -> Result<(), Vec<String>> {
+        self.materialize_item_detailed(rollout_item)
+            .map_err(|error| error.affected_item_ids())
+    }
+
+    /// Typed form of [`Self::materialize_item`] for integrity-aware callers.
+    pub fn materialize_item_detailed(
+        &mut self,
+        rollout_item: &mut RolloutItem,
+    ) -> Result<(), CompactedHistoryReferenceError> {
         match rollout_item {
             RolloutItem::ResponseItem(envelope) => {
                 note_known_item(&mut self.known_items, envelope);
@@ -229,6 +392,23 @@ impl CompactedHistoryResolver {
         &mut self,
         rollout_item: &mut RolloutItem,
     ) -> Result<(), Vec<String>> {
+        self.reencode_item_with_references(rollout_item, false)
+            .map_err(|error| error.affected_item_ids())
+    }
+
+    /// Re-encodes exact older sources as V2 digest-bound references.
+    pub fn reencode_item_with_integrity_references(
+        &mut self,
+        rollout_item: &mut RolloutItem,
+    ) -> Result<(), CompactedHistoryReferenceError> {
+        self.reencode_item_with_references(rollout_item, true)
+    }
+
+    fn reencode_item_with_references(
+        &mut self,
+        rollout_item: &mut RolloutItem,
+        integrity_bound: bool,
+    ) -> Result<(), CompactedHistoryReferenceError> {
         match rollout_item {
             RolloutItem::ResponseItem(envelope) => {
                 note_known_item(&mut self.known_items, envelope);
@@ -260,8 +440,20 @@ impl CompactedHistoryResolver {
                         });
 
                         if let Some(item_id) = exact_older_item_id {
-                            has_reference = true;
-                            CompactedHistoryEntry::Reference { item_id }
+                            if integrity_bound {
+                                match CompactedHistoryEntry::reference_v2(item_id, &envelope) {
+                                    Ok(reference) => {
+                                        has_reference = true;
+                                        reference
+                                    }
+                                    // Durable-projection failure cannot justify a weaker reference.
+                                    // Keep the complete envelope inline instead.
+                                    Err(_) => CompactedHistoryEntry::from(envelope),
+                                }
+                            } else {
+                                has_reference = true;
+                                CompactedHistoryEntry::Reference { item_id }
+                            }
                         } else {
                             CompactedHistoryEntry::from(envelope)
                         }
@@ -302,6 +494,15 @@ pub fn resolve_checkpoint_at(
     rollout_items: &[RolloutItem],
     checkpoint_index: usize,
 ) -> Result<Option<Vec<ResponseItemEnvelope>>, Vec<String>> {
+    resolve_checkpoint_at_detailed(rollout_items, checkpoint_index)
+        .map_err(|error| error.affected_item_ids())
+}
+
+/// Typed form of [`resolve_checkpoint_at`] for integrity-aware callers.
+pub fn resolve_checkpoint_at_detailed(
+    rollout_items: &[RolloutItem],
+    checkpoint_index: usize,
+) -> Result<Option<Vec<ResponseItemEnvelope>>, CompactedHistoryReferenceError> {
     let Some(RolloutItem::Compacted(compacted)) = rollout_items.get(checkpoint_index) else {
         return Ok(None);
     };
@@ -316,7 +517,8 @@ pub fn resolve_checkpoint_at(
     let requested_item_ids = entries
         .iter()
         .filter_map(|entry| match entry {
-            CompactedHistoryEntry::Reference { item_id } => Some(item_id.clone()),
+            CompactedHistoryEntry::Reference { item_id }
+            | CompactedHistoryEntry::ReferenceV2 { item_id, .. } => Some(item_id.clone()),
             CompactedHistoryEntry::Inline { .. } => None,
         })
         .collect::<HashSet<_>>();
@@ -488,7 +690,7 @@ fn note_requested_item(
 fn resolve_compacted_history(
     known_items: &HashMap<String, ResponseItemEnvelope>,
     compacted: &crate::CompactedItem,
-) -> Result<Option<Vec<ResponseItemEnvelope>>, Vec<String>> {
+) -> Result<Option<Vec<ResponseItemEnvelope>>, CompactedHistoryReferenceError> {
     if let Some(replacement_history) = &compacted.replacement_history {
         return Ok(Some(replacement_history.clone()));
     }
@@ -497,7 +699,7 @@ fn resolve_compacted_history(
     };
 
     let mut history = Vec::with_capacity(entries.len());
-    let mut missing = Vec::new();
+    let mut errors = CompactedHistoryReferenceError::empty();
     for entry in entries {
         match entry {
             CompactedHistoryEntry::Inline { item, metadata } => {
@@ -510,43 +712,79 @@ fn resolve_compacted_history(
                 if let Some(envelope) = known_items.get(item_id) {
                     history.push(envelope.clone());
                 } else {
-                    missing.push(item_id.clone());
+                    errors.missing_item_ids.push(item_id.clone());
                 }
             }
+            CompactedHistoryEntry::ReferenceV2 {
+                item_id,
+                source_digest,
+            } => match known_items.get(item_id) {
+                None => errors.missing_item_ids.push(item_id.clone()),
+                Some(envelope) => match CompactedHistoryDigest::from_envelope(envelope) {
+                    Ok(actual) if actual == *source_digest => history.push(envelope.clone()),
+                    Ok(actual) => errors
+                        .digest_mismatches
+                        .push(CompactedHistoryDigestMismatch {
+                            item_id: item_id.clone(),
+                            expected: source_digest.clone(),
+                            actual,
+                        }),
+                    Err(_) => errors
+                        .digest_encoding_failure_item_ids
+                        .push(item_id.clone()),
+                },
+            },
         }
     }
 
-    if missing.is_empty() {
+    if errors.is_empty() {
         Ok(Some(history))
     } else {
-        missing.sort_unstable();
-        missing.dedup();
-        Err(missing)
+        Err(errors.normalized())
     }
 }
 
 fn validate_compacted_history_references(
     known_items: &HashMap<String, ResponseItemEnvelope>,
     compacted: &crate::CompactedItem,
-) -> Result<(), Vec<String>> {
+) -> Result<(), CompactedHistoryReferenceError> {
     let Some(entries) = &compacted.replacement_history_entries else {
         return Ok(());
     };
 
-    let mut missing = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            CompactedHistoryEntry::Reference { item_id } if !known_items.contains_key(item_id) => {
-                Some(item_id.clone())
+    let mut errors = CompactedHistoryReferenceError::empty();
+    for entry in entries {
+        match entry {
+            CompactedHistoryEntry::Reference { item_id } => {
+                if !known_items.contains_key(item_id) {
+                    errors.missing_item_ids.push(item_id.clone());
+                }
             }
-            CompactedHistoryEntry::Inline { .. } | CompactedHistoryEntry::Reference { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
+            CompactedHistoryEntry::ReferenceV2 {
+                item_id,
+                source_digest,
+            } => match known_items.get(item_id) {
+                None => errors.missing_item_ids.push(item_id.clone()),
+                Some(envelope) => match CompactedHistoryDigest::from_envelope(envelope) {
+                    Ok(actual) if actual == *source_digest => {}
+                    Ok(actual) => errors
+                        .digest_mismatches
+                        .push(CompactedHistoryDigestMismatch {
+                            item_id: item_id.clone(),
+                            expected: source_digest.clone(),
+                            actual,
+                        }),
+                    Err(_) => errors
+                        .digest_encoding_failure_item_ids
+                        .push(item_id.clone()),
+                },
+            },
+            CompactedHistoryEntry::Inline { .. } => {}
+        }
+    }
+    if errors.is_empty() {
         Ok(())
     } else {
-        missing.sort_unstable();
-        missing.dedup();
-        Err(missing)
+        Err(errors.normalized())
     }
 }

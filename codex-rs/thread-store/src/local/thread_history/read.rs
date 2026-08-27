@@ -199,7 +199,9 @@ pub(super) async fn validate_thread_for_paginated_reads(
     }
     match metadata.history_mode {
         ThreadHistoryMode::Legacy => Err(ThreadStoreError::Unsupported { operation }),
-        ThreadHistoryMode::Paginated | ThreadHistoryMode::PaginatedRefsV1 => Ok(()),
+        ThreadHistoryMode::Paginated
+        | ThreadHistoryMode::PaginatedRefsV1
+        | ThreadHistoryMode::PaginatedRefsV2 => Ok(()),
     }
 }
 

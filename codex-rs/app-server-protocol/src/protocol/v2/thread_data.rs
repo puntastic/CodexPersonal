@@ -83,9 +83,9 @@ impl From<CoreThreadHistoryMode> for ThreadHistoryMode {
     fn from(value: CoreThreadHistoryMode) -> Self {
         match value {
             CoreThreadHistoryMode::Legacy => Self::Legacy,
-            CoreThreadHistoryMode::Paginated | CoreThreadHistoryMode::PaginatedRefsV1 => {
-                Self::Paginated
-            }
+            CoreThreadHistoryMode::Paginated
+            | CoreThreadHistoryMode::PaginatedRefsV1
+            | CoreThreadHistoryMode::PaginatedRefsV2 => Self::Paginated,
         }
     }
 }

@@ -119,7 +119,10 @@ pub(super) fn retained_checkpoint_reference_item_ids(
         })
         .flatten()
         .filter_map(|entry| match entry {
-            codex_history::CompactedHistoryEntry::Reference { item_id } => Some(item_id.clone()),
+            codex_history::CompactedHistoryEntry::Reference { item_id }
+            | codex_history::CompactedHistoryEntry::ReferenceV2 { item_id, .. } => {
+                Some(item_id.clone())
+            }
             codex_history::CompactedHistoryEntry::Inline { .. } => None,
         })
         .collect()
@@ -163,7 +166,9 @@ async fn load_agent_model_context(
             .await?
             .history
             .map(|history| history.items)),
-        ThreadHistoryMode::Paginated | ThreadHistoryMode::PaginatedRefsV1 => Ok(Some(
+        ThreadHistoryMode::Paginated
+        | ThreadHistoryMode::PaginatedRefsV1
+        | ThreadHistoryMode::PaginatedRefsV2 => Ok(Some(
             state
                 .load_latest_model_context(LoadThreadHistoryParams {
                     thread_id,
@@ -1083,16 +1088,28 @@ impl AgentControl {
                     if destination_history_mode
                         .is_some_and(ThreadHistoryMode::supports_compacted_history_references)
                     {
-                        destination_resolver
-                            .reencode_item_with_backward_references(&mut item)
-                            .map_err(|mut missing| {
-                                missing.sort_unstable();
-                                missing.dedup();
-                                CodexErr::Fatal(format!(
-                                    "cannot persist fork with unresolved compacted history references: {}",
-                                    missing.join(", ")
-                                ))
-                            })?;
+                        if destination_history_mode
+                            .is_some_and(ThreadHistoryMode::supports_compacted_history_integrity)
+                        {
+                            destination_resolver
+                                .reencode_item_with_integrity_references(&mut item)
+                                .map_err(|error| {
+                                    CodexErr::Fatal(format!(
+                                        "cannot persist fork with unresolved compacted history references: {error}"
+                                    ))
+                                })?;
+                        } else {
+                            destination_resolver
+                                .reencode_item_with_backward_references(&mut item)
+                                .map_err(|mut missing| {
+                                    missing.sort_unstable();
+                                    missing.dedup();
+                                    CodexErr::Fatal(format!(
+                                        "cannot persist fork with unresolved compacted history references: {}",
+                                        missing.join(", ")
+                                    ))
+                                })?;
+                        }
                     }
                     true
                 }

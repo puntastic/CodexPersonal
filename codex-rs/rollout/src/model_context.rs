@@ -150,7 +150,9 @@ impl ModelContextScan {
                         // inline entry in that same checkpoint is not an older explicit source.
                         if let Some(entries) = &compacted.replacement_history_entries {
                             for entry in entries {
-                                if let CompactedHistoryEntry::Reference { item_id } = entry {
+                                if let CompactedHistoryEntry::Reference { item_id }
+                                | CompactedHistoryEntry::ReferenceV2 { item_id, .. } = entry
+                                {
                                     self.unresolved_reference_ids.insert(item_id.clone());
                                 }
                             }
