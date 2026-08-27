@@ -785,22 +785,29 @@ fn follow_up_request_view(body: &Value) -> Value {
 
 fn replacement_history_from_rollout(path: &Path) -> Result<Value> {
     let rollout_text = fs::read_to_string(path)?;
-    let mut replacement_history = None;
-    for line in rollout_text
+    let rollout_items = rollout_text
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-    {
-        let Ok(entry) = serde_json::from_str::<RolloutLine>(line) else {
-            continue;
-        };
-        if let RolloutItem::Compacted(compacted) = entry.item
+        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
+        .map(|line| line.item)
+        .collect::<Vec<_>>();
+    let materialized = codex_history::materialize_compacted_histories(&rollout_items);
+    if !materialized.unresolved_item_ids.is_empty() {
+        return Err(anyhow::anyhow!(
+            "unresolved compacted history references: {}",
+            materialized.unresolved_item_ids.join(", ")
+        ));
+    }
+    let mut replacement_history = None;
+    for item in materialized.rollout_items.iter() {
+        if let RolloutItem::Compacted(compacted) = item
             && compacted.message.is_empty()
-            && let Some(items) = compacted.replacement_history
+            && let Some(items) = compacted.replacement_history.as_ref()
         {
             let values = items
-                .into_iter()
-                .map(|item| serde_json::to_value(item.item).expect("serialize replacement item"))
+                .iter()
+                .map(|item| serde_json::to_value(&item.item).expect("serialize replacement item"))
                 .collect::<Vec<_>>();
             replacement_history = Some(Value::Array(values));
         }

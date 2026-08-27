@@ -7,7 +7,7 @@ pub type ThreadStoreResult<T> = Result<T, ThreadStoreError>;
 pub(crate) fn reject_paginated_history_mode(
     history_mode: ThreadHistoryMode,
 ) -> ThreadStoreResult<()> {
-    if matches!(history_mode, ThreadHistoryMode::Paginated) {
+    if history_mode.is_paginated() {
         return Err(ThreadStoreError::Unsupported {
             operation: "paginated_threads",
         });

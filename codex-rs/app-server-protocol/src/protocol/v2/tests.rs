@@ -75,6 +75,25 @@ fn test_absolute_path() -> AbsolutePathBuf {
 }
 
 #[test]
+fn public_paginated_history_mode_maps_to_reference_gated_storage() {
+    let core_mode: codex_protocol::protocol::ThreadHistoryMode =
+        ThreadHistoryMode::Paginated.into();
+
+    assert_eq!(
+        core_mode,
+        codex_protocol::protocol::ThreadHistoryMode::PaginatedRefsV1
+    );
+    assert_eq!(
+        ThreadHistoryMode::from(core_mode),
+        ThreadHistoryMode::Paginated
+    );
+    assert_eq!(
+        ThreadHistoryMode::from(codex_protocol::protocol::ThreadHistoryMode::Paginated),
+        ThreadHistoryMode::Paginated
+    );
+}
+
+#[test]
 fn managed_hooks_requirements_default_interrupt_to_empty() {
     let value = json!({
         "managedDir": null,

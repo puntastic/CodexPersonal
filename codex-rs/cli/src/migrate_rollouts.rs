@@ -11,6 +11,8 @@ use codex_core::config::ConfigBuilder;
 use codex_protocol::ThreadId;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
+use codex_thread_store::PreservedSourceRetirementReport;
+use codex_thread_store::PreservedSourceRetirementStatus;
 use codex_thread_store::RolloutMigrationMode;
 use codex_thread_store::RolloutMigrationOptions;
 use codex_thread_store::RolloutMigrationProgress;
@@ -20,9 +22,15 @@ use codex_utils_cli::CliConfigOverrides;
 
 #[derive(Debug, Parser)]
 pub(crate) struct MigrateRolloutsCommand {
-    /// Publish the migration. Without this flag the command only reports eligible sessions.
+    /// Publish the migration. Close older Codex processes first; byte-exact sources remain
+    /// preserved until an explicit confirmed-quiescence retirement pass.
     #[arg(long)]
     apply: bool,
+
+    /// Release byte-exact legacy recovery sources after confirming every older Codex writer is
+    /// stopped. Refuses sources with late bytes or without the gated paginated format.
+    #[arg(long, conflicts_with = "apply", conflicts_with = "max_mib_per_second")]
+    retire_preserved_sources_after_confirmed_quiescence: bool,
 
     /// Restrict inspection or migration to one or more thread IDs.
     #[arg(long, value_name = "THREAD_ID", value_parser = ThreadId::from_string)]
@@ -67,6 +75,46 @@ pub(crate) async fn run(
         None
     });
     codex_core::otel_init::record_process_start(otel.as_ref(), "codex_migrate_rollouts");
+    if command.retire_preserved_sources_after_confirmed_quiescence {
+        let thread_history_db_path = config.sqlite.thread_history_db_path();
+        let storage_before = if command.json {
+            None
+        } else {
+            thread_storage_bytes(
+                config.codex_home.as_path(),
+                thread_history_db_path.as_path(),
+            )
+            .await
+            .ok()
+        };
+        let store = LocalThreadStore::new(LocalThreadStoreConfig::from_config(&config), None);
+        let report = store
+            .retire_preserved_rollout_sources_after_confirmed_quiescence(command.thread)
+            .await?;
+        let storage = match storage_before {
+            Some(before) => thread_storage_bytes(
+                config.codex_home.as_path(),
+                thread_history_db_path.as_path(),
+            )
+            .await
+            .ok()
+            .map(|after| (before, after)),
+            None => None,
+        };
+        if command.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_retirement_report(&report, storage);
+        }
+        if report
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.status == PreservedSourceRetirementStatus::Refused)
+        {
+            anyhow::bail!("one or more preserved rollout sources were not retired");
+        }
+        return Ok(());
+    }
     let mode = if command.apply {
         RolloutMigrationMode::Apply
     } else {
@@ -95,6 +143,11 @@ pub(crate) async fn run(
         None
     };
     let store = LocalThreadStore::new(LocalThreadStoreConfig::from_config(&config), state_db);
+    if mode == RolloutMigrationMode::Apply {
+        eprintln!(
+            "Close older Codex processes before migration. Byte-exact source files are retained until explicit confirmed-quiescence retirement."
+        );
+    }
     let mut progress = MigrationProgress::new(mode, json);
     progress.begin();
     let result = store
@@ -126,12 +179,24 @@ pub(crate) async fn run(
         print_human_report(&report, mode, verbose, progress.elapsed(), thread_storage);
     }
 
-    if report
+    let failed = report
         .outcomes
         .iter()
-        .any(|outcome| outcome.status == RolloutMigrationStatus::Failed)
-    {
-        anyhow::bail!("one or more rollout migrations failed");
+        .any(|outcome| outcome.status == RolloutMigrationStatus::Failed);
+    let skipped_busy = mode == RolloutMigrationMode::Apply
+        && report
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.status == RolloutMigrationStatus::SkippedBusy);
+    match (failed, skipped_busy) {
+        (true, true) => anyhow::bail!(
+            "one or more rollout migrations failed and one or more were skipped because active writers made the apply pass incomplete"
+        ),
+        (true, false) => anyhow::bail!("one or more rollout migrations failed"),
+        (false, true) => anyhow::bail!(
+            "one or more rollout migrations were skipped because active writers made the apply pass incomplete"
+        ),
+        (false, false) => {}
     }
     Ok(())
 }
@@ -302,6 +367,9 @@ fn print_human_report(
     }
     let completion = match mode {
         RolloutMigrationMode::DryRun => "Scan complete",
+        RolloutMigrationMode::Apply if counts.failed > 0 || counts.skipped_busy > 0 => {
+            "Migration pass incomplete"
+        }
         RolloutMigrationMode::Apply => "Migration complete",
     };
     println!("{completion} in {}.", format_elapsed(elapsed));
@@ -337,6 +405,39 @@ fn print_human_report(
     if mode == RolloutMigrationMode::DryRun && counts.eligible > 0 {
         println!("Run `codex migrate-rollouts --apply` to migrate eligible sessions.");
     }
+    if mode == RolloutMigrationMode::Apply {
+        let preserved = report
+            .outcomes
+            .iter()
+            .filter_map(|outcome| {
+                outcome
+                    .preserved_source_path
+                    .as_ref()
+                    .map(|path| (outcome.thread_id, path))
+            })
+            .collect::<Vec<_>>();
+        if !preserved.is_empty() {
+            println!();
+            println!(
+                "Retained {} byte-exact source file(s) for late-writer recovery:",
+                preserved.len()
+            );
+            for (thread_id, path) in preserved.iter().take(MAX_EXCEPTION_DETAILS) {
+                let thread_id = thread_id
+                    .map_or_else(|| "unknown".to_string(), |thread_id| thread_id.to_string());
+                println!("preserved\t{thread_id}\t{}", path.display());
+            }
+            if preserved.len() > MAX_EXCEPTION_DETAILS {
+                println!(
+                    "... and {} more; rerun with --json for the complete report.",
+                    preserved.len() - MAX_EXCEPTION_DETAILS
+                );
+            }
+            println!(
+                "After closing every older Codex writer, release unchanged sources with `codex migrate-rollouts --retire-preserved-sources-after-confirmed-quiescence`. If retirement refuses late bytes, preserve and reconcile that file before retrying."
+            );
+        }
+    }
 
     if verbose {
         for outcome in &report.outcomes {
@@ -364,6 +465,44 @@ fn print_human_report(
             "... and {} more; rerun with --json for the complete report.",
             exception_count - MAX_EXCEPTION_DETAILS
         );
+    }
+}
+
+fn print_retirement_report(
+    report: &PreservedSourceRetirementReport,
+    thread_storage: Option<(u64, u64)>,
+) {
+    let retired = report
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.status == PreservedSourceRetirementStatus::Retired)
+        .count();
+    let refused = report.outcomes.len().saturating_sub(retired);
+    println!("Preserved-source retirement complete: {retired} retired, {refused} refused.");
+    if let Some((before, after)) = thread_storage {
+        println!(
+            "Disk used for thread storage: {} -> {}",
+            format_bytes(before),
+            format_bytes(after)
+        );
+    }
+    for outcome in &report.outcomes {
+        let status = match outcome.status {
+            PreservedSourceRetirementStatus::Retired => "retired",
+            PreservedSourceRetirementStatus::Refused => "refused",
+        };
+        match &outcome.message {
+            Some(message) => println!(
+                "{status}\t{}\t{}\t{message}",
+                outcome.thread_id,
+                outcome.preserved_source_path.display()
+            ),
+            None => println!(
+                "{status}\t{}\t{}",
+                outcome.thread_id,
+                outcome.preserved_source_path.display()
+            ),
+        }
     }
 }
 

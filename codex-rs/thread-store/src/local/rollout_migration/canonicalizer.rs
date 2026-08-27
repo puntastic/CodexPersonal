@@ -20,6 +20,7 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_rollout::CompactedHistoryResolver;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use std::collections::HashSet;
@@ -29,6 +30,7 @@ use tokio::io::BufWriter;
 
 use super::legacy_event;
 use super::migration_error;
+use super::occurrence_ids::MigrationOccurrenceIds;
 use crate::ThreadStoreResult;
 
 #[derive(Clone)]
@@ -43,6 +45,19 @@ enum ReasoningTextKind {
     Raw,
 }
 
+/// How one source compaction should participate in reference validation.
+#[derive(Clone, Copy)]
+pub(super) enum CompactionResolution {
+    /// No rollback plan is active. The newest history checkpoint is selected, so an unresolved
+    /// checkpoint may be preserved provisionally and superseded by a newer valid checkpoint.
+    InferSelected,
+    /// This checkpoint is the rollback-aware replay base or must be edited. Resolve it now.
+    Strict,
+    /// This checkpoint is retained for historical/fork fidelity but is not the replay base.
+    /// Re-encode it when possible; preserve unresolved references when not.
+    PreserveSuperseded,
+}
+
 pub(super) struct LegacyRolloutCanonicalizer {
     thread_id: ThreadId,
     next_ordinal: u64,
@@ -53,10 +68,17 @@ pub(super) struct LegacyRolloutCanonicalizer {
     active_turn: Option<ActiveTurn>,
     known_turn_ids: HashSet<String>,
     reasoning: Option<ReasoningItem>,
+    compacted_history: CompactedHistoryResolver,
+    occurrence_ids: MigrationOccurrenceIds,
+    unresolved_selected_compaction: Option<Vec<String>>,
 }
 
 impl LegacyRolloutCanonicalizer {
-    pub(super) fn new(thread_id: ThreadId) -> Self {
+    pub(super) fn new(
+        thread_id: ThreadId,
+        rollout_id: ThreadId,
+        reserved_response_item_ids: HashSet<String>,
+    ) -> Self {
         Self {
             thread_id,
             next_ordinal: 0,
@@ -67,6 +89,9 @@ impl LegacyRolloutCanonicalizer {
             active_turn: None,
             known_turn_ids: HashSet::new(),
             reasoning: None,
+            compacted_history: CompactedHistoryResolver::default(),
+            occurrence_ids: MigrationOccurrenceIds::new(rollout_id, reserved_response_item_ids),
+            unresolved_selected_compaction: None,
         }
     }
 
@@ -90,7 +115,7 @@ impl LegacyRolloutCanonicalizer {
         if metadata.meta.id != self.thread_id {
             return Err(migration_error("rollout metadata thread id changed"));
         }
-        metadata.meta.history_mode = ThreadHistoryMode::Paginated;
+        metadata.meta.history_mode = ThreadHistoryMode::PaginatedRefsV1;
         metadata.meta.history_base = None;
         metadata.meta.subagent_history_start_ordinal = None;
 
@@ -104,6 +129,7 @@ impl LegacyRolloutCanonicalizer {
         &mut self,
         line: RolloutLine,
         writer: &mut BufWriter<File>,
+        compaction_resolution: CompactionResolution,
     ) -> ThreadStoreResult<u64> {
         let source_index = self.source_line_index;
         self.source_line_index = self
@@ -278,8 +304,10 @@ impl LegacyRolloutCanonicalizer {
                     }
                 } else {
                     let item = RolloutItem::EventMsg(event);
-                    if codex_rollout::is_persisted_rollout_item(&item, ThreadHistoryMode::Paginated)
-                    {
+                    if codex_rollout::is_persisted_rollout_item(
+                        &item,
+                        ThreadHistoryMode::PaginatedRefsV1,
+                    ) {
                         self.write_item(writer, &timestamp, item).await?;
                     }
                 }
@@ -288,7 +316,13 @@ impl LegacyRolloutCanonicalizer {
                 self.write_item(writer, &timestamp, item).await?;
             }
             item @ RolloutItem::Compacted(_) => {
-                self.write_item(writer, &timestamp, item).await?;
+                self.write_item_with_compaction_resolution(
+                    writer,
+                    &timestamp,
+                    item,
+                    compaction_resolution,
+                )
+                .await?;
             }
             item @ (RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
@@ -307,6 +341,12 @@ impl LegacyRolloutCanonicalizer {
         writer: &mut BufWriter<File>,
         timestamp: &str,
     ) -> ThreadStoreResult<u64> {
+        if let Some(missing) = self.unresolved_selected_compaction.take() {
+            return Err(migration_error(format!(
+                "selected compacted history references could not be resolved during migration canonicalization: {}",
+                missing.join(", ")
+            )));
+        }
         let bytes_before = self.bytes_written;
         self.finish_implicit_turn(writer, timestamp).await?;
         Ok(self.bytes_written - bytes_before)
@@ -463,6 +503,76 @@ impl LegacyRolloutCanonicalizer {
         timestamp: &str,
         item: RolloutItem,
     ) -> ThreadStoreResult<()> {
+        self.write_item_with_compaction_resolution(
+            writer,
+            timestamp,
+            item,
+            CompactionResolution::InferSelected,
+        )
+        .await
+    }
+
+    async fn write_item_with_compaction_resolution(
+        &mut self,
+        writer: &mut BufWriter<File>,
+        timestamp: &str,
+        mut item: RolloutItem,
+        compaction_resolution: CompactionResolution,
+    ) -> ThreadStoreResult<()> {
+        let is_history_checkpoint = matches!(
+            &item,
+            RolloutItem::Compacted(compacted)
+                if compacted.replacement_history.is_some()
+                    || compacted.replacement_history_entries.is_some()
+        );
+        let occurrence_preparation = self.occurrence_ids.prepare_item(
+            &mut item,
+            &self.compacted_history,
+            self.next_ordinal,
+        )?;
+        let reencode_result = self
+            .compacted_history
+            .reencode_item_with_backward_references(&mut item);
+        self.occurrence_ids
+            .finish_item(occurrence_preparation, reencode_result.is_ok());
+        match reencode_result {
+            Ok(()) => {
+                if is_history_checkpoint
+                    && matches!(compaction_resolution, CompactionResolution::InferSelected)
+                {
+                    self.unresolved_selected_compaction = None;
+                }
+            }
+            Err(missing)
+                if is_history_checkpoint
+                    && matches!(compaction_resolution, CompactionResolution::InferSelected) =>
+            {
+                // Cold resume selects the newest retained history checkpoint. Preserve an older
+                // unresolved checkpoint byte-for-byte and keep its inline values available as
+                // sources; a newer valid checkpoint supersedes the deferred error. If no such
+                // checkpoint arrives, finish fails closed before this staged file is published.
+                self.compacted_history.index_explicit_sources(&item);
+                self.unresolved_selected_compaction = Some(missing);
+            }
+            Err(_)
+                if matches!(
+                    compaction_resolution,
+                    CompactionResolution::PreserveSuperseded
+                ) =>
+            {
+                // The rollback plan has already materialized every selected or mutated
+                // checkpoint from its candidate-bounded source index. This encoded checkpoint is
+                // retained only as historical source text, so recruiting all of its inline values
+                // here would recreate the multi-checkpoint RAM amplification the two-pass plan
+                // avoids. A later strict checkpoint remains self-contained after planning.
+            }
+            Err(missing) => {
+                return Err(migration_error(format!(
+                    "compacted history references could not be resolved during migration canonicalization: {}",
+                    missing.join(", ")
+                )));
+            }
+        }
         let mut bytes = serde_json::to_vec(&RolloutLine {
             timestamp: timestamp.to_string(),
             ordinal: Some(self.next_ordinal),

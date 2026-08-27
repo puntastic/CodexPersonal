@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use super::CodexHarnessMetadata;
+use super::CompactedHistoryEntry;
 use super::CompactedItem;
 use super::EventMsg;
 use super::InterAgentCommunication;
@@ -140,6 +141,8 @@ pub(super) struct CompactedItemWire<'a> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replacement_history_metadata: Option<Vec<Cow<'a, CodexHarnessMetadata>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    replacement_history_entries: Option<Vec<Cow<'a, CompactedHistoryEntry>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     mcp_resource_origins: Option<Cow<'a, McpResourceOriginCheckpoint>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window_number: Option<u64>,
@@ -177,6 +180,10 @@ impl<'a> From<&'a CompactedItem> for CompactedItemWire<'a> {
                     .collect()
             }),
             replacement_history_metadata,
+            replacement_history_entries: item
+                .replacement_history_entries
+                .as_ref()
+                .map(|entries| entries.iter().map(Cow::Borrowed).collect()),
             mcp_resource_origins: item.mcp_resource_origins.as_ref().map(Cow::Borrowed),
             window_number: item.window_number,
             first_window_id: item.first_window_id.as_deref().map(Cow::Borrowed),
@@ -193,6 +200,13 @@ impl TryFrom<CompactedItemWire<'_>> for CompactedItem {
     type Error = String;
 
     fn try_from(item: CompactedItemWire<'_>) -> Result<Self, Self::Error> {
+        if item.replacement_history.is_some() && item.replacement_history_entries.is_some() {
+            return Err(
+                "replacement_history and replacement_history_entries are mutually exclusive"
+                    .to_string(),
+            );
+        }
+
         let replacement_history = match (
             item.replacement_history,
             item.replacement_history_metadata,
@@ -227,6 +241,9 @@ impl TryFrom<CompactedItemWire<'_>> for CompactedItem {
             }
             (None, None) => None,
         };
+        let replacement_history_entries = item
+            .replacement_history_entries
+            .map(|entries| entries.into_iter().map(Cow::into_owned).collect());
 
         let mut window_number = item.window_number;
         let window_id = match item.window_id {
@@ -241,6 +258,7 @@ impl TryFrom<CompactedItemWire<'_>> for CompactedItem {
         Ok(Self {
             message: item.message.into_owned(),
             replacement_history,
+            replacement_history_entries,
             mcp_resource_origins: item.mcp_resource_origins.map(Cow::into_owned),
             window_number,
             first_window_id: item.first_window_id.map(Cow::into_owned),

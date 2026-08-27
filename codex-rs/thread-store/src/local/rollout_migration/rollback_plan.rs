@@ -7,15 +7,19 @@
 //! before the writer makes its second streaming pass.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::UserMessageEvent;
-use codex_rollout::CompactedItem;
+use codex_rollout::CompactedHistoryEntry;
+use codex_rollout::CompactedHistoryResolver;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 
+use super::canonicalizer::CompactionResolution;
 use super::migration_error;
 use super::rollback;
 use super::rollback_replay::ModelReplayPlanner;
@@ -26,7 +30,15 @@ struct CompactionFrame {
     record_index: usize,
     boundary_depth: usize,
     owner: Option<usize>,
-    item: CompactedItem,
+    has_replacement_history: bool,
+    referenced_item_ids: Vec<String>,
+    drop_last_n_user_turns: u32,
+}
+
+#[derive(Clone, Copy)]
+enum CompactionRewrite {
+    EmptyReplayAnchor,
+    DropLastNUserTurns(u32),
 }
 
 #[derive(Clone)]
@@ -39,12 +51,25 @@ struct PendingUserResponse {
 pub(super) struct RollbackPlan {
     record_boundaries: Vec<Option<usize>>,
     boundary_alive: Vec<bool>,
-    compacted_items: HashMap<usize, CompactedItem>,
+    compaction_rewrites: HashMap<usize, CompactionRewrite>,
+    selected_compaction: Option<usize>,
+    requested_item_ids: HashSet<String>,
+    compacted_history: Mutex<CompactedHistoryResolver>,
 }
 
 impl RollbackPlan {
     pub(super) fn record_count(&self) -> usize {
         self.record_boundaries.len()
+    }
+
+    pub(super) fn compaction_resolution(&self, record_index: usize) -> CompactionResolution {
+        if self.selected_compaction == Some(record_index)
+            || self.compaction_rewrites.contains_key(&record_index)
+        {
+            CompactionResolution::Strict
+        } else {
+            CompactionResolution::PreserveSuperseded
+        }
     }
 
     pub(super) fn apply(
@@ -62,14 +87,86 @@ impl RollbackPlan {
         ) {
             return Ok(None);
         }
-        // A rolled-back turn can still own the empty checkpoint that keeps cold resume from
-        // replaying older history.
-        if let Some(compacted) = self.compacted_items.get(&record_index) {
-            line.item = RolloutItem::Compacted(compacted.clone());
+
+        let rewrite = self.compaction_rewrites.get(&record_index).copied();
+        let boundary_is_dead = boundary.is_some_and(|boundary| !self.boundary_alive[boundary]);
+        let mut compacted_history = self
+            .compacted_history
+            .lock()
+            .map_err(|_| migration_error("rollback compaction resolver lock is poisoned"))?;
+
+        // The second pass still indexes explicit source values from records removed by rollback.
+        // A surviving checkpoint can legitimately reference one of those legacy records; once
+        // materialized, the canonical writer will inline the source because it is absent from the
+        // output prefix. Dead checkpoints themselves are not resolved, so an unrelated dangling
+        // reference cannot abort migration.
+        if boundary_is_dead && !matches!(rewrite, Some(CompactionRewrite::EmptyReplayAnchor)) {
+            compacted_history.index_explicit_sources_for_ids(&line.item, &self.requested_item_ids);
+            return Ok(None);
+        }
+
+        if matches!(rewrite, Some(CompactionRewrite::EmptyReplayAnchor)) {
+            compacted_history.index_explicit_sources_for_ids(&line.item, &self.requested_item_ids);
+            let RolloutItem::Compacted(compacted) = &mut line.item else {
+                return Err(migration_error(
+                    "rollback replay anchor no longer identifies a compaction",
+                ));
+            };
+            compacted.replacement_history = Some(Vec::new());
+            compacted.replacement_history_entries = None;
+            compacted.mcp_resource_origins = None;
             return Ok(Some(line));
         }
-        if boundary.is_some_and(|boundary| !self.boundary_alive[boundary]) {
-            return Ok(None);
+
+        let materialize_compaction = self.selected_compaction == Some(record_index)
+            || matches!(rewrite, Some(CompactionRewrite::DropLastNUserTurns(_)));
+        if matches!(&line.item, RolloutItem::Compacted(_)) && !materialize_compaction {
+            // An older retained checkpoint is not the rollback-aware replay base. Keep its
+            // encoded history intact and expose only its explicit source values for later
+            // checkpoints. In particular, do not reject a dangling reference that cold resume
+            // will never select.
+            compacted_history.index_explicit_sources_for_ids(&line.item, &self.requested_item_ids);
+            return Ok(Some(line));
+        }
+
+        if !matches!(&line.item, RolloutItem::Compacted(_)) {
+            compacted_history.index_explicit_sources_for_ids(&line.item, &self.requested_item_ids);
+            return Ok(Some(line));
+        }
+
+        // Strictly resolve the rollback-aware replay base and every checkpoint whose history must
+        // be edited. The plan never owns their payloads, so peak checkpoint memory is bounded to
+        // the current source record rather than the sum of historical replacement histories.
+        let RolloutItem::Compacted(compacted) = &mut line.item else {
+            return Err(migration_error(
+                "strict rollback checkpoint no longer identifies a compaction",
+            ));
+        };
+        if compacted.replacement_history.is_none()
+            && let Some(resolved) = compacted_history
+                .resolve_compacted_item(compacted)
+                .map_err(|missing| {
+                    migration_error(format!(
+                        "compacted history references could not be resolved during rollback replay: {}",
+                        missing.join(", ")
+                    ))
+                })?
+        {
+            compacted.replacement_history = Some(resolved);
+            compacted.replacement_history_entries = None;
+        }
+        compacted_history.index_explicit_sources_for_ids(&line.item, &self.requested_item_ids);
+        if let Some(CompactionRewrite::DropLastNUserTurns(num_turns)) = rewrite {
+            let RolloutItem::Compacted(compacted) = &mut line.item else {
+                return Err(migration_error(
+                    "rollback history rewrite no longer identifies a compaction",
+                ));
+            };
+            compacted.mcp_resource_origins = None;
+            let replacement_history = compacted.replacement_history.as_mut().ok_or_else(|| {
+                migration_error("legacy rollback crosses a compaction without replacement history")
+            })?;
+            rollback::drop_last_n_user_turns(replacement_history, num_turns);
         }
         Ok(Some(line))
     }
@@ -206,7 +303,19 @@ impl RollbackPlanner {
                     record_index: index,
                     boundary_depth: self.boundary_stack.len(),
                     owner,
-                    item: item.clone(),
+                    has_replacement_history: item.replacement_history.is_some()
+                        || item.replacement_history_entries.is_some(),
+                    referenced_item_ids: item
+                        .replacement_history_entries
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            CompactedHistoryEntry::Reference { item_id } => Some(item_id.clone()),
+                            CompactedHistoryEntry::Inline { .. } => None,
+                        })
+                        .collect(),
+                    drop_last_n_user_turns: 0,
                 });
             }
             RolloutItem::TurnContext(_) => {
@@ -234,25 +343,38 @@ impl RollbackPlanner {
             model_replay,
             ..
         } = self;
-        let replay_anchor = model_replay.finish().empty_replacement_history_compaction;
-        let compacted_items = compactions
+        let replay_plan = model_replay.finish();
+        let replay_anchor = replay_plan.empty_replacement_history_compaction;
+        let requested_item_ids = compactions
+            .iter()
+            .filter(|frame| {
+                replay_plan.selected_compaction == Some(frame.record_index)
+                    || (frame.drop_last_n_user_turns > 0
+                        && frame.owner.is_none_or(|boundary| boundary_alive[boundary]))
+            })
+            .flat_map(|frame| frame.referenced_item_ids.iter().cloned())
+            .collect::<HashSet<_>>();
+        let compaction_rewrites = compactions
             .into_iter()
-            .filter_map(|mut frame| {
+            .filter_map(|frame| {
                 if Some(frame.record_index) == replay_anchor {
-                    frame.item.replacement_history = Some(Vec::new());
-                    frame.item.mcp_resource_origins = None;
-                    return Some((frame.record_index, frame.item));
+                    return Some((frame.record_index, CompactionRewrite::EmptyReplayAnchor));
                 }
-                frame
-                    .owner
-                    .is_none_or(|boundary| boundary_alive[boundary])
-                    .then_some((frame.record_index, frame.item))
+                (frame.drop_last_n_user_turns > 0
+                    && frame.owner.is_none_or(|boundary| boundary_alive[boundary]))
+                .then_some((
+                    frame.record_index,
+                    CompactionRewrite::DropLastNUserTurns(frame.drop_last_n_user_turns),
+                ))
             })
             .collect::<HashMap<_, _>>();
         RollbackPlan {
             record_boundaries,
             boundary_alive,
-            compacted_items,
+            compaction_rewrites,
+            selected_compaction: replay_plan.selected_compaction,
+            requested_item_ids,
+            compacted_history: Mutex::new(CompactedHistoryResolver::default()),
         }
     }
 
@@ -317,17 +439,14 @@ impl RollbackPlanner {
             let post_compaction_turns = depth_before.saturating_sub(frame.boundary_depth);
             let remaining = count.saturating_sub(post_compaction_turns);
             if remaining > 0 {
-                frame.item.mcp_resource_origins = None;
-                let replacement_history =
-                    frame.item.replacement_history.as_mut().ok_or_else(|| {
-                        migration_error(
-                            "legacy rollback crosses a compaction without replacement history",
-                        )
-                    })?;
-                rollback::drop_last_n_user_turns(
-                    replacement_history,
-                    u32::try_from(remaining).unwrap_or(u32::MAX),
-                );
+                if !frame.has_replacement_history {
+                    return Err(migration_error(
+                        "legacy rollback crosses a compaction without replacement history",
+                    ));
+                }
+                frame.drop_last_n_user_turns = frame
+                    .drop_last_n_user_turns
+                    .saturating_add(u32::try_from(remaining).unwrap_or(u32::MAX));
             }
         }
         self.active_turn_id = None;

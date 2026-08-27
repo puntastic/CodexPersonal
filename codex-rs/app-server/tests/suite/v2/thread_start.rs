@@ -45,6 +45,9 @@ use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
+use codex_rollout::read_session_meta_line;
+use core_test_support::fs_wait;
 use core_test_support::stdio_server_bin;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -499,6 +502,25 @@ async fn thread_start_history_mode_accepts_legacy_and_paginated() -> Result<()> 
         .await?;
 
     assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+    mcp.start_turn_and_wait_for_completion(TurnStartParams {
+        thread_id: thread.id.clone(),
+        input: vec![V2UserInput::Text {
+            text: "materialize the paginated rollout".to_string(),
+            text_elements: Vec::new(),
+        }],
+        ..Default::default()
+    })
+    .await?;
+    let paginated_path = thread
+        .path
+        .as_ref()
+        .expect("persistent paginated thread path");
+    fs_wait::wait_for_path_exists(paginated_path, DEFAULT_READ_TIMEOUT).await?;
+    let session_meta = read_session_meta_line(paginated_path).await?;
+    assert_eq!(
+        session_meta.meta.history_mode,
+        CoreThreadHistoryMode::PaginatedRefsV1
+    );
     Ok(())
 }
 

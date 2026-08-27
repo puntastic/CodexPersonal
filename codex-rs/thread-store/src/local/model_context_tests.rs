@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::items::TurnItem;
@@ -16,10 +17,12 @@ use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::CompactedHistoryEntry;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
@@ -79,6 +82,59 @@ async fn loads_latest_checkpoint_with_required_turn_metadata() {
     assert!(context.items.iter().any(|item| {
         matches!(item, RolloutItem::TurnContext(context) if context.turn_id.as_deref() == Some("turn-2"))
     }));
+}
+
+#[tokio::test]
+async fn loads_model_context_from_the_exact_resolved_rollout() {
+    let home = TempDir::new().expect("temp dir");
+    let thread_uuid = Uuid::from_u128(/*v*/ 1011);
+    let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
+    let exact_rollout_uuid = Uuid::from_u128(/*v*/ 1012);
+    let exact_rollout_id =
+        ThreadId::from_string(&exact_rollout_uuid.to_string()).expect("rollout id");
+    let initial_path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-00-10",
+        thread_uuid,
+        ThreadHistoryMode::Paginated,
+    )
+    .expect("write exact session file");
+    let exact_path = initial_path.with_file_name(format!(
+        "rollout-2025-01-03T13-00-10-{exact_rollout_uuid}.jsonl"
+    ));
+    std::fs::rename(initial_path, exact_path.as_path()).expect("rename exact rollout");
+    append_items(
+        exact_path.as_path(),
+        [user_message("exact selected rollout")],
+    );
+
+    let current_path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-00-11",
+        thread_uuid,
+        ThreadHistoryMode::Paginated,
+    )
+    .expect("write competing current session file");
+    append_items(
+        current_path.as_path(),
+        [user_message("independently resolved rollout")],
+    );
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context =
+        load_latest_model_context_from_rollout(&store, thread_id, exact_rollout_id, exact_path)
+            .await
+            .expect("load exact rollout model context");
+    let serialized = serde_json::to_string(&context.items).expect("serialize model context");
+
+    assert!(
+        serialized.contains("exact selected rollout"),
+        "{serialized}"
+    );
+    assert!(
+        !serialized.contains("independently resolved rollout"),
+        "{serialized}"
+    );
 }
 
 #[tokio::test]
@@ -202,6 +258,123 @@ async fn returns_scanned_full_history_at_bof_without_checkpoint() {
             completed_user_message("turn-1", "turn"),
             turn_context(home.path(), "turn-1"),
             turn_complete("turn-1"),
+        ],
+    );
+
+    assert_reverse_scan_matches_full_history(home.path(), path.as_path()).await;
+}
+
+#[tokio::test]
+async fn bounded_context_drops_large_unrelated_pre_base_payloads() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1008);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-00-07",
+        uuid,
+        ThreadHistoryMode::PaginatedRefsV1,
+    )
+    .expect("write reference-backed session file");
+    append_items(
+        path.as_path(),
+        [source_response("selected-source", "source")],
+    );
+    append_item_vec(
+        path.as_path(),
+        (0..128)
+            .map(|index| source_response(&format!("unrelated-{index}"), &"x".repeat(32 * 1024)))
+            .collect(),
+    );
+    let selected = entry_compacted(
+        "selected checkpoint",
+        vec![CompactedHistoryEntry::Reference {
+            item_id: "selected-source".to_string(),
+        }],
+    );
+    let suffix = source_response("suffix", "newer suffix");
+    append_items(
+        path.as_path(),
+        [
+            turn_started("turn-1"),
+            user_message("metadata turn"),
+            completed_user_message("turn-1", "metadata turn"),
+            turn_context(home.path(), "turn-1"),
+            selected.clone(),
+            suffix.clone(),
+        ],
+    );
+    let session_meta = codex_rollout::read_session_meta_line(path.as_path())
+        .await
+        .expect("read session metadata");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load bounded model context");
+
+    let expected = vec![
+        RolloutItem::SessionMeta(session_meta),
+        source_response("selected-source", "source"),
+        turn_started("turn-1"),
+        user_message("metadata turn"),
+        turn_context(home.path(), "turn-1"),
+        selected,
+        suffix,
+    ];
+    assert_eq!(
+        serde_json::to_value(context.items).expect("serialize bounded context"),
+        serde_json::to_value(expected).expect("serialize expected context")
+    );
+}
+
+#[tokio::test]
+async fn unresolved_reference_rereads_exact_full_history() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1009);
+    let path = write_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-00-08",
+        uuid,
+        [
+            source_response("unrelated", "large unrelated payload"),
+            turn_started("turn-1"),
+            user_message("turn"),
+            completed_user_message("turn-1", "turn"),
+            turn_context(home.path(), "turn-1"),
+            entry_compacted(
+                "unresolved checkpoint",
+                vec![CompactedHistoryEntry::Reference {
+                    item_id: "missing-source".to_string(),
+                }],
+            ),
+        ],
+    );
+
+    assert_reverse_scan_matches_full_history(home.path(), path.as_path()).await;
+}
+
+#[tokio::test]
+async fn rollback_after_selected_checkpoint_rereads_exact_full_history() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1010);
+    let path = write_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-00-09",
+        uuid,
+        [
+            turn_started("turn-1"),
+            user_message("turn"),
+            completed_user_message("turn-1", "turn"),
+            turn_context(home.path(), "turn-1"),
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            compacted("selected checkpoint", Some(Vec::new())),
         ],
     );
 
@@ -499,6 +672,10 @@ async fn assert_reverse_scan_matches_full_history(home: &Path, path: &Path) {
 }
 
 fn append_items<const N: usize>(path: &Path, items: [RolloutItem; N]) {
+    append_item_vec(path, items.into_iter().collect());
+}
+
+fn append_item_vec(path: &Path, items: Vec<RolloutItem>) {
     let mut file = OpenOptions::new()
         .append(true)
         .open(path)
@@ -516,6 +693,34 @@ fn append_items<const N: usize>(path: &Path, items: [RolloutItem; N]) {
         )
         .expect("append rollout line");
     }
+}
+
+fn source_response(item_id: &str, text: &str) -> RolloutItem {
+    RolloutItem::ResponseItem(
+        ResponseItem::Message {
+            id: Some(ResponseItemId::from_server(item_id.to_string())),
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+        .into(),
+    )
+}
+
+fn entry_compacted(message: &str, entries: Vec<CompactedHistoryEntry>) -> RolloutItem {
+    RolloutItem::Compacted(CompactedItem {
+        message: message.to_string(),
+        replacement_history: None,
+        replacement_history_entries: Some(entries),
+        mcp_resource_origins: None,
+        window_number: Some(1),
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    })
 }
 
 fn turn_started(turn_id: &str) -> RolloutItem {
@@ -624,6 +829,7 @@ fn compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> R
         message: message.to_string(),
         replacement_history: replacement_history
             .map(|items| items.into_iter().map(Into::into).collect()),
+        replacement_history_entries: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,

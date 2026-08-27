@@ -1148,7 +1148,12 @@ pub(crate) fn reject_unknown_thread_history_mode(value: &Value) -> std::io::Resu
         .map_err(|err| IoError::other(format!("invalid session metadata history_mode: {err}")))
 }
 
-fn strip_legacy_ghost_snapshot_rollout_line(value: &mut Value) -> bool {
+/// Removes retired `ghost_snapshot` response items from top-level and compacted rollout shapes.
+///
+/// Returns `true` when the whole top-level record should be skipped. Callers that deserialize
+/// historical rollout values should share this normalizer so nested history and metadata remain
+/// aligned across loading, migration, and recovery paths.
+pub fn strip_legacy_ghost_snapshot_rollout_line(value: &mut Value) -> bool {
     match value.get("type").and_then(Value::as_str) {
         Some("response_item") => value
             .get("payload")
@@ -1157,6 +1162,17 @@ fn strip_legacy_ghost_snapshot_rollout_line(value: &mut Value) -> bool {
             let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
                 return false;
             };
+            if let Some(entries) = payload
+                .get_mut("replacement_history_entries")
+                .and_then(Value::as_array_mut)
+            {
+                entries.retain(|entry| {
+                    entry.get("type").and_then(Value::as_str) != Some("inline")
+                        || !entry
+                            .get("item")
+                            .is_some_and(is_legacy_ghost_snapshot_response_item)
+                });
+            }
             let Some(replacement_history) =
                 payload.get("replacement_history").and_then(Value::as_array)
             else {

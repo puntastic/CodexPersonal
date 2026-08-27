@@ -104,7 +104,7 @@ async fn resolve(
                         return resolve_path_in_scope(store, thread_id, path, scope).await;
                     }
                 }
-                if metadata.history_mode == ThreadHistoryMode::Paginated {
+                if metadata.history_mode.is_paginated() {
                     return Ok(None);
                 }
             }
@@ -202,7 +202,7 @@ pub(super) fn rollout_id_from_path_or_legacy_thread_id(
     Ok(match codex_rollout::rollout_id_from_path(path) {
         Some(rollout_id) => rollout_id,
         None => {
-            if history_mode == ThreadHistoryMode::Paginated {
+            if history_mode.is_paginated() {
                 return Err(ThreadStoreError::InvalidRequest {
                     message: format!(
                         "paginated rollout path `{}` does not have a canonical rollout filename",

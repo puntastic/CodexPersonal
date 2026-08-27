@@ -6,7 +6,6 @@ use crate::realtime_history::RealtimeEventEffects;
 use codex_app_server_protocol::ThreadQueueChangedNotification;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::config_types::MultiAgentMode;
-use codex_protocol::protocol::ThreadHistoryMode;
 
 pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
 
@@ -247,8 +246,7 @@ pub(super) async fn ensure_listener_task_running(
         )
         .await;
     let config_snapshot = conversation.config_snapshot().await;
-    let realtime_history_enabled =
-        matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated);
+    let realtime_history_enabled = config_snapshot.history_mode.is_paginated();
     let thread_settings_baseline = thread_settings_from_config_snapshot(&config_snapshot);
     let (mut listener_command_rx, listener_generation) = {
         let mut thread_state = thread_state.lock().await;

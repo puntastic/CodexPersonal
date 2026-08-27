@@ -20,6 +20,9 @@ use codex_rollout::remove_thread_name_entries;
 use super::LocalThreadStore;
 use super::helpers::scoped_rollout_path;
 use super::helpers::validated_rollout_file_name;
+use super::rollout_migration::PreparedThreadDeleteMigrationArtifacts;
+use super::rollout_migration::prepare_thread_delete_migration_artifacts;
+use super::rollout_migration::remove_thread_delete_migration_artifacts;
 use crate::DeleteThreadParams;
 use crate::DeleteThreadsParams;
 use crate::ThreadStoreError;
@@ -44,6 +47,10 @@ impl ThreadRollouts {
                 path.to_path_buf()
             })
             .collect();
+        // Keep the stable thread/initial-rollout identity in the deletion set even when the
+        // visible source vanished during a prior partial hard-delete. Descendant references must
+        // still block removal of any retained migration source on retry.
+        rollout_ids.insert(thread_id);
         Self {
             thread_id,
             rollout_ids,
@@ -66,33 +73,48 @@ pub(super) async fn delete_thread(
     params: DeleteThreadParams,
 ) -> ThreadStoreResult<()> {
     let thread_id = params.thread_id;
+    let _maintenance_guard =
+        codex_rollout::try_acquire_rollout_maintenance_lock(&store.config.codex_home)
+            .map_err(delete_migration_error)?
+            .ok_or_else(migration_delete_conflict)?;
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
     let reference_index = scan_reference_index(store).await?;
     let thread_rollouts = ThreadRollouts::from_index(&reference_index, thread_id);
     ensure_no_external_references(&reference_index, std::slice::from_ref(&thread_rollouts))?;
     let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
-    delete_thread_after_reference_check(store, thread_rollouts, &mut writer_guards).await
+    let migration_artifacts =
+        prepare_thread_delete_migration_artifacts(&store.config.codex_home, thread_id).await?;
+    delete_thread_after_reference_check(
+        store,
+        thread_rollouts,
+        migration_artifacts,
+        &mut writer_guards,
+    )
+    .await
 }
 
 pub(super) async fn delete_threads(
     store: &LocalThreadStore,
     params: DeleteThreadsParams,
 ) -> ThreadStoreResult<()> {
-    let thread_ids = params.thread_ids;
+    let mut thread_ids = params.thread_ids;
     if thread_ids.is_empty() {
         return Ok(());
     }
 
-    let mut lock_thread_ids = thread_ids.clone();
-    lock_thread_ids.sort_unstable_by_key(ToString::to_string);
-    lock_thread_ids.dedup();
-    let mut _lifecycle_guards = Vec::with_capacity(lock_thread_ids.len());
-    for thread_id in &lock_thread_ids {
+    let _maintenance_guard =
+        codex_rollout::try_acquire_rollout_maintenance_lock(&store.config.codex_home)
+            .map_err(delete_migration_error)?
+            .ok_or_else(migration_delete_conflict)?;
+    thread_ids.sort_unstable_by_key(ToString::to_string);
+    thread_ids.dedup();
+    let mut _lifecycle_guards = Vec::with_capacity(thread_ids.len());
+    for thread_id in &thread_ids {
         _lifecycle_guards.push(store.live_writer_locks.lock_lifecycle(*thread_id).await);
     }
-    let mut _live_writer_guards = Vec::with_capacity(lock_thread_ids.len());
-    for &thread_id in &lock_thread_ids {
+    let mut _live_writer_guards = Vec::with_capacity(thread_ids.len());
+    for &thread_id in &thread_ids {
         _live_writer_guards.push(store.live_writer_locks.lock(thread_id).await);
     }
 
@@ -103,9 +125,27 @@ pub(super) async fn delete_threads(
         .collect::<Vec<_>>();
     ensure_no_external_references(&reference_index, thread_rollouts.as_slice())?;
 
-    let mut writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
+    let mut writer_guards = store.acquire_writer_locks(&thread_ids).await?;
+    // Qualify every recovery record before removing any source from a batch. A pending or
+    // malformed migration must fail the whole operation without partially deleting another
+    // thread's retained transcript.
+    let mut prepared_deletions = Vec::with_capacity(thread_rollouts.len());
     for thread_rollouts in thread_rollouts {
-        match delete_thread_after_reference_check(store, thread_rollouts, &mut writer_guards).await
+        let migration_artifacts = prepare_thread_delete_migration_artifacts(
+            &store.config.codex_home,
+            thread_rollouts.thread_id,
+        )
+        .await?;
+        prepared_deletions.push((thread_rollouts, migration_artifacts));
+    }
+    for (thread_rollouts, migration_artifacts) in prepared_deletions {
+        match delete_thread_after_reference_check(
+            store,
+            thread_rollouts,
+            migration_artifacts,
+            &mut writer_guards,
+        )
+        .await
         {
             Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
             Err(err) => return Err(err),
@@ -166,6 +206,7 @@ fn referenced_thread_error(thread_id: codex_protocol::ThreadId) -> ThreadStoreEr
 async fn delete_thread_after_reference_check(
     store: &LocalThreadStore,
     mut thread_rollouts: ThreadRollouts,
+    migration_artifacts: PreparedThreadDeleteMigrationArtifacts,
     writer_guards: &mut Vec<super::writer_lock::WriterLockGuard>,
 ) -> ThreadStoreResult<()> {
     let thread_id = thread_rollouts.thread_id;
@@ -201,16 +242,22 @@ async fn delete_thread_after_reference_check(
             });
         }
     }
-    thread_rollouts.rollout_ids.insert(thread_id);
     for rollout_id in thread_rollouts.rollout_ids {
         super::thread_history::delete_thread(store, rollout_id).await?;
     }
+
+    // The reference check and all recovery validation have completed. Remove the retained source
+    // before visible files so a successful hard-delete cannot leave a byte-exact transcript. If a
+    // later visible-file deletion fails, retry sees the ordinary rollout rather than an orphaned
+    // hidden source.
+    let removed_migration_artifacts =
+        remove_thread_delete_migration_artifacts(migration_artifacts).await?;
 
     // Drop the recorder before removing files, but retain its writer lock until cleanup finishes.
     if let Some(entry) = store.live_recorders.lock().await.remove(&thread_id) {
         writer_guards.push(entry.writer_lock);
     }
-    let found_rollout_path = !thread_rollouts.paths.is_empty();
+    let found_rollout_path = !thread_rollouts.paths.is_empty() || removed_migration_artifacts;
     for rollout_path in thread_rollouts.paths {
         delete_rollout_file(store, rollout_path.as_path())?;
     }
@@ -225,6 +272,19 @@ async fn delete_thread_after_reference_check(
     }
 
     Ok(())
+}
+
+fn delete_migration_error(error: std::io::Error) -> ThreadStoreError {
+    ThreadStoreError::Internal {
+        message: format!("failed to acquire rollout maintenance lock for thread deletion: {error}"),
+    }
+}
+
+fn migration_delete_conflict() -> ThreadStoreError {
+    ThreadStoreError::Conflict {
+        message: "rollout compression or migration is already running; retry thread deletion after it finishes"
+            .to_string(),
+    }
 }
 
 fn delete_rollout_file(store: &LocalThreadStore, rollout_path: &Path) -> ThreadStoreResult<bool> {
@@ -271,6 +331,7 @@ mod tests {
     use codex_protocol::protocol::HistoryPosition;
     use codex_protocol::protocol::ThreadHistoryMode;
     use codex_protocol::protocol::ThreadMemoryMode;
+    use codex_rollout::RolloutConfig;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
@@ -278,6 +339,9 @@ mod tests {
 
     use super::*;
     use crate::ResumeThreadParams;
+    use crate::RolloutMigrationMode;
+    use crate::RolloutMigrationOptions;
+    use crate::RolloutMigrationStatus;
     use crate::ThreadPersistenceMetadata;
     use crate::ThreadStore;
     use crate::local::LocalThreadStore;
@@ -355,6 +419,14 @@ mod tests {
                     .len(),
             },
         );
+        let pending_journal = pending_migration_path(home.path(), source_thread_id);
+        std::fs::create_dir_all(
+            pending_journal
+                .parent()
+                .expect("pending migration directory"),
+        )
+        .expect("create migration journal directory");
+        std::fs::write(&pending_journal, b"").expect("write pending migration marker");
 
         let err = store
             .delete_thread(DeleteThreadParams {
@@ -370,6 +442,7 @@ mod tests {
             )
         );
         assert!(source_path.exists());
+        assert!(pending_journal.exists());
     }
 
     #[tokio::test]
@@ -795,6 +868,157 @@ SELECT
     }
 
     #[tokio::test]
+    async fn delete_thread_removes_unretired_migration_source_and_journal() {
+        let home = TempDir::new().expect("temp dir");
+        let uuid = Uuid::from_u128(340);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+        let rollout_path = write_migratable_session(home.path(), uuid);
+        let store = indexed_store(home.path()).await;
+
+        let report = store
+            .migrate_rollouts(apply_migration_options(thread_id))
+            .await
+            .expect("migrate rollout before deletion");
+        let outcome = report
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.thread_id == Some(thread_id))
+            .expect("migration outcome");
+        assert_eq!(outcome.status, RolloutMigrationStatus::Migrated);
+        let preserved_source = outcome
+            .preserved_source_path
+            .clone()
+            .expect("preserved migration source");
+        let retained_journal = retained_migration_path(home.path(), thread_id);
+        assert!(rollout_path.exists());
+        assert!(preserved_source.exists());
+        assert!(retained_journal.exists());
+
+        store
+            .delete_thread(DeleteThreadParams { thread_id })
+            .await
+            .expect("hard-delete migrated thread");
+
+        assert!(!rollout_path.exists());
+        assert!(!preserved_source.exists());
+        assert!(!retained_journal.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_threads_deduplicates_migrated_thread_ids_before_removal() {
+        let home = TempDir::new().expect("temp dir");
+        let uuid = Uuid::from_u128(344);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+        let rollout_path = write_migratable_session(home.path(), uuid);
+        let store = indexed_store(home.path()).await;
+
+        let report = store
+            .migrate_rollouts(apply_migration_options(thread_id))
+            .await
+            .expect("migrate rollout before duplicate batch deletion");
+        let preserved_source = report
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.thread_id == Some(thread_id))
+            .and_then(|outcome| outcome.preserved_source_path.clone())
+            .expect("preserved migration source");
+        let retained_journal = retained_migration_path(home.path(), thread_id);
+
+        store
+            .delete_threads(DeleteThreadsParams {
+                thread_ids: vec![thread_id, thread_id],
+            })
+            .await
+            .expect("duplicate migrated thread ids should be deleted once");
+
+        assert!(!rollout_path.exists());
+        assert!(!preserved_source.exists());
+        assert!(!retained_journal.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_thread_accepts_already_retired_migration_recovery() {
+        let home = TempDir::new().expect("temp dir");
+        let uuid = Uuid::from_u128(341);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+        let rollout_path = write_migratable_session(home.path(), uuid);
+        let store = indexed_store(home.path()).await;
+
+        let report = store
+            .migrate_rollouts(apply_migration_options(thread_id))
+            .await
+            .expect("migrate rollout before retirement");
+        let preserved_source = report
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.thread_id == Some(thread_id))
+            .and_then(|outcome| outcome.preserved_source_path.clone())
+            .expect("preserved migration source");
+        store
+            .retire_preserved_rollout_sources_after_confirmed_quiescence(vec![thread_id])
+            .await
+            .expect("retire migration source");
+        assert!(!preserved_source.exists());
+        assert!(!retained_migration_path(home.path(), thread_id).exists());
+
+        store
+            .delete_thread(DeleteThreadParams { thread_id })
+            .await
+            .expect("hard-delete migrated thread after retirement");
+
+        assert!(!rollout_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_thread_rejects_pending_migration_before_removing_visible_rollout() {
+        let home = TempDir::new().expect("temp dir");
+        let uuid = Uuid::from_u128(342);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+        let rollout_path =
+            write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
+        let pending_journal = pending_migration_path(home.path(), thread_id);
+        std::fs::create_dir_all(
+            pending_journal
+                .parent()
+                .expect("pending migration directory"),
+        )
+        .expect("create migration journal directory");
+        std::fs::write(&pending_journal, b"").expect("write pending migration marker");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+        let error = store
+            .delete_thread(DeleteThreadParams { thread_id })
+            .await
+            .expect_err("pending migration must block hard-delete");
+
+        assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+        assert!(rollout_path.exists());
+        assert!(pending_journal.exists());
+    }
+
+    #[tokio::test]
+    async fn ordinary_delete_is_retryable_without_creating_migration_artifacts() {
+        let home = TempDir::new().expect("temp dir");
+        let uuid = Uuid::from_u128(343);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+        write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+        store
+            .delete_thread(DeleteThreadParams { thread_id })
+            .await
+            .expect("delete ordinary thread");
+        assert!(!home.path().join("rollout-migrations").exists());
+
+        let error = store
+            .delete_thread(DeleteThreadParams { thread_id })
+            .await
+            .expect_err("ordinary delete retry reports missing thread");
+        assert!(matches!(error, ThreadStoreError::ThreadNotFound { .. }));
+        assert!(!home.path().join("rollout-migrations").exists());
+    }
+
+    #[tokio::test]
     async fn delete_thread_reports_missing_thread() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
@@ -809,6 +1033,49 @@ SELECT
             err.to_string(),
             "thread 00000000-0000-0000-0000-000000000304 not found"
         );
+    }
+
+    async fn indexed_store(home: &Path) -> LocalThreadStore {
+        let config = test_config(home);
+        let rollout_config = RolloutConfig {
+            codex_home: config.codex_home.clone(),
+            sqlite: config.sqlite.clone(),
+            cwd: home.to_path_buf(),
+            model_provider_id: config.default_model_provider_id.clone(),
+            generate_memories: false,
+        };
+        let state_db = codex_rollout::state_db::try_init(&rollout_config)
+            .await
+            .expect("backfill legacy thread metadata");
+        LocalThreadStore::new(config, Some(state_db))
+    }
+
+    fn write_migratable_session(home: &Path, uuid: Uuid) -> PathBuf {
+        let wire_timestamp = "2025-01-03T12-00-00";
+        let path = write_session_file(home, wire_timestamp, uuid).expect("legacy session file");
+        let contents = std::fs::read_to_string(&path)
+            .expect("read legacy session")
+            .replace(wire_timestamp, "2025-01-03T12:00:00Z");
+        std::fs::write(&path, contents).expect("write migratable timestamps");
+        path
+    }
+
+    fn apply_migration_options(thread_id: ThreadId) -> RolloutMigrationOptions {
+        RolloutMigrationOptions {
+            mode: RolloutMigrationMode::Apply,
+            thread_ids: vec![thread_id],
+            max_mib_per_second: Some(1024),
+        }
+    }
+
+    fn pending_migration_path(home: &Path, thread_id: ThreadId) -> PathBuf {
+        home.join("rollout-migrations")
+            .join(format!("{thread_id}.pending"))
+    }
+
+    fn retained_migration_path(home: &Path, thread_id: ThreadId) -> PathBuf {
+        home.join("rollout-migrations")
+            .join(format!("{thread_id}.retained"))
     }
 
     fn set_history_base(path: &Path, history_base: HistoryPosition) {

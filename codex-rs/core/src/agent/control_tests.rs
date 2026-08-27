@@ -20,6 +20,7 @@ use assert_matches::assert_matches;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
+use codex_history::CompactedHistoryEntry;
 use codex_history::CompactedItem;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
@@ -124,6 +125,34 @@ fn captured_op_matches(actual: &(ThreadId, Op), expected: &(ThreadId, Op)) -> bo
 
 fn rollout_response_item(item: ResponseItem) -> RolloutItem {
     RolloutItem::ResponseItem(item.into())
+}
+
+#[test]
+fn fork_source_demand_excludes_truncated_and_superseded_checkpoint_references() {
+    let compacted = |item_id: &str| {
+        RolloutItem::Compacted(CompactedItem {
+            message: String::new(),
+            replacement_history: None,
+            replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
+                item_id: item_id.to_string(),
+            }]),
+            mcp_resource_origins: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+        })
+    };
+    let items = vec![
+        compacted("turn-truncated"),
+        compacted("superseded-in-retained-turns"),
+        compacted("selected"),
+    ];
+
+    assert_eq!(
+        super::spawn::retained_checkpoint_reference_item_ids(&items, 1, Some(2)),
+        std::collections::HashSet::from(["selected".to_string()])
+    );
 }
 
 fn user_message(text: &str) -> ResponseItem {
@@ -1403,6 +1432,7 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
                     }
                     .into(),
                 ]),
+                replacement_history_entries: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -1452,6 +1482,181 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
         .shutdown_live_agent(clamped_child_thread_id)
         .await
         .expect("clamped child shutdown should submit");
+    let _ = parent_thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("parent shutdown should submit");
+}
+
+#[tokio::test]
+async fn spawn_agent_last_n_fork_inlines_truncated_compaction_sources_without_dangling_refs() {
+    let harness = AgentControlHarness::new().await;
+    let new_thread = harness
+        .manager
+        .start_thread(StartThreadOptions {
+            history_mode: Some(ThreadHistoryMode::PaginatedRefsV1),
+            environments: Some(Vec::new()),
+            ..StartThreadOptions::new(harness.config.clone())
+        })
+        .await
+        .expect("start reference-backed parent thread");
+    let parent_thread_id = new_thread.thread_id;
+    let parent_thread = new_thread.thread;
+    let truncated_item_id = ResponseItemId::with_suffix("msg", "fork-truncated-source");
+    let retained_item_id = ResponseItemId::with_suffix("msg", "fork-retained-source");
+    let truncated_item = ResponseItem::Message {
+        id: Some(truncated_item_id.clone()),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "older compacted source".to_string(),
+        }],
+        phase: Some(MessagePhase::FinalAnswer),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let retained_item = ResponseItem::Message {
+        id: Some(retained_item_id.clone()),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "recent compacted source".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let parent_spawn_call_id = "spawn-call-entry-backed-last-n".to_string();
+    parent_thread
+        .session
+        .persist_rollout_items(&[
+            rollout_response_item(truncated_item.clone()),
+            rollout_response_item(retained_item.clone()),
+            RolloutItem::Compacted(CompactedItem {
+                message: String::new(),
+                replacement_history: None,
+                replacement_history_entries: Some(vec![
+                    CompactedHistoryEntry::Reference {
+                        item_id: truncated_item_id.to_string(),
+                    },
+                    CompactedHistoryEntry::Reference {
+                        item_id: retained_item_id.to_string(),
+                    },
+                ]),
+                mcp_resource_origins: None,
+                window_number: None,
+                first_window_id: None,
+                previous_window_id: None,
+                window_id: None,
+            }),
+            rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
+        ])
+        .await;
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
+
+    let child_thread_id = harness
+        .spawn_anonymous_child(
+            parent_thread_id,
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_mode: Some(SpawnAgentForkMode::LastNTurns(1)),
+                ..Default::default()
+            },
+        )
+        .await;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should be registered");
+    child_thread.ensure_rollout_materialized().await;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("child rollout should flush");
+    let child_rollout_path = child_thread
+        .rollout_path()
+        .expect("child rollout should exist");
+    let child_rollout_items = std::fs::read_to_string(child_rollout_path)
+        .expect("read child rollout")
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<RolloutLine>(line)
+                .expect("parse child rollout line")
+                .item
+        })
+        .collect::<Vec<_>>();
+    let checkpoint = child_rollout_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .expect("child rollout should retain the compacted checkpoint");
+    let entries = checkpoint
+        .replacement_history_entries
+        .as_ref()
+        .expect("mixed child checkpoint should use reference-backed entries");
+    assert!(
+        !child_rollout_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::ResponseItem(envelope)
+                if envelope.item.id() == Some(&truncated_item_id)
+        )),
+        "last-N truncation should remove the older top-level source"
+    );
+    assert!(
+        child_rollout_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::ResponseItem(envelope)
+                if envelope.item.id() == Some(&retained_item_id)
+        )),
+        "last-N truncation should retain the recent source used by the safe reference"
+    );
+    assert_matches!(
+        entries.as_slice(),
+        [
+            CompactedHistoryEntry::Inline { item, .. },
+            CompactedHistoryEntry::Reference { item_id }
+        ] if item.as_ref() == &truncated_item && item_id.as_str() == retained_item_id.as_ref()
+    );
+
+    let materialized = codex_history::materialize_compacted_histories(&child_rollout_items);
+    assert_eq!(
+        materialized.unresolved_item_ids,
+        Vec::<String>::new(),
+        "last-N fork must not persist references to sources removed by truncation"
+    );
+    let materialized_checkpoint = materialized
+        .rollout_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .expect("materialized child rollout should retain the checkpoint");
+    let materialized_history = materialized_checkpoint
+        .replacement_history
+        .as_ref()
+        .expect("materialized checkpoint should expose replacement history")
+        .iter()
+        .map(|envelope| envelope.item.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        materialized_history,
+        vec![truncated_item, retained_item],
+        "inlining the lost source must preserve the checkpoint's exact model-visible history"
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
     let _ = parent_thread
         .submit(Op::Shutdown {})
         .await
@@ -1899,6 +2104,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
                 replacement_history: Some(
                     replacement_history.into_iter().map(Into::into).collect(),
                 ),
+                replacement_history_entries: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -2012,6 +2218,235 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
         .expect("parent shutdown should submit");
 }
 
+#[tokio::test]
+async fn spawn_agent_full_fork_reencodes_sanitized_entry_history_without_dangling_refs() {
+    let harness = AgentControlHarness::new().await;
+    let mut parent_config = harness.config.clone();
+    let _ = parent_config.features.enable(Feature::MultiAgentV2);
+    parent_config.developer_instructions = Some("Parent developer instructions.".to_string());
+    parent_config.multi_agent_v2.root_agent_usage_hint_text =
+        Some("Parent root guidance.".to_string());
+    let mut child_config = harness.config.clone();
+    let _ = child_config.features.enable(Feature::MultiAgentV2);
+    child_config.developer_instructions = Some("Child developer instructions.".to_string());
+    child_config.multi_agent_v2.subagent_developer_instructions =
+        Some("Child developer instructions.".to_string());
+    child_config.multi_agent_v2.subagent_usage_hint_text = Some(String::new());
+    let new_thread = harness
+        .manager
+        .start_thread(StartThreadOptions {
+            history_mode: Some(ThreadHistoryMode::PaginatedRefsV1),
+            environments: Some(Vec::new()),
+            ..StartThreadOptions::new(parent_config)
+        })
+        .await
+        .expect("start parent thread");
+    let parent_thread_id = new_thread.thread_id;
+    let parent_thread = new_thread.thread;
+    let retained_user_id = ResponseItemId::with_suffix("msg", "fork-sanitized-user");
+    let removed_hint_id = ResponseItemId::with_suffix("msg", "fork-sanitized-hint");
+    let rewritten_developer_id = ResponseItemId::with_suffix("msg", "fork-sanitized-developer");
+    let retained_user = ResponseItem::Message {
+        id: Some(retained_user_id.clone()),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "entry-backed parent context".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let removed_hint = ResponseItem::Message {
+        id: Some(removed_hint_id.clone()),
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "Parent root guidance.".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let parent_developer = ResponseItem::Message {
+        id: Some(rewritten_developer_id.clone()),
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "Before.\nParent developer instructions.\nAfter.".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let expected_child_developer = ResponseItem::Message {
+        id: Some(rewritten_developer_id.clone()),
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "Before.\nChild developer instructions.\nAfter.".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+            ..Default::default()
+        }),
+    };
+    let parent_spawn_call_id = "spawn-call-sanitized-entry-history".to_string();
+    let turn_context = parent_thread.session.new_default_turn().await;
+    parent_thread
+        .session
+        .persist_rollout_items(&[
+            rollout_response_item(retained_user.clone()),
+            rollout_response_item(removed_hint),
+            rollout_response_item(parent_developer),
+            RolloutItem::Compacted(CompactedItem {
+                message: String::new(),
+                replacement_history: None,
+                replacement_history_entries: Some(vec![
+                    CompactedHistoryEntry::Reference {
+                        item_id: retained_user_id.to_string(),
+                    },
+                    CompactedHistoryEntry::Reference {
+                        item_id: removed_hint_id.to_string(),
+                    },
+                    CompactedHistoryEntry::Reference {
+                        item_id: rewritten_developer_id.to_string(),
+                    },
+                ]),
+                mcp_resource_origins: None,
+                window_number: None,
+                first_window_id: None,
+                previous_window_id: None,
+                window_id: None,
+            }),
+            RolloutItem::TurnContext(turn_context.to_turn_context_item()),
+            rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
+        ])
+        .await;
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
+
+    let child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            child_config,
+            text_input("child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("full fork should sanitize entry-backed history")
+        .thread_id;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should be registered");
+    child_thread.ensure_rollout_materialized().await;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("child rollout should flush");
+    let child_rollout_path = child_thread
+        .rollout_path()
+        .expect("child rollout should exist");
+    let child_rollout_items = std::fs::read_to_string(child_rollout_path)
+        .expect("read child rollout")
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<RolloutLine>(line)
+                .expect("parse child rollout line")
+                .item
+        })
+        .collect::<Vec<_>>();
+    let checkpoint = child_rollout_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .expect("child rollout should retain the compacted checkpoint");
+    let entries = checkpoint
+        .replacement_history_entries
+        .as_ref()
+        .expect("sanitized checkpoint should retain reference-backed storage");
+    assert_matches!(
+        entries.as_slice(),
+        [
+            CompactedHistoryEntry::Reference { item_id: user_id },
+            CompactedHistoryEntry::Reference {
+                item_id: developer_id
+            }
+        ] if user_id.as_str() == retained_user_id.as_ref()
+            && developer_id.as_str() == rewritten_developer_id.as_ref()
+    );
+
+    let materialized = codex_history::materialize_compacted_histories(&child_rollout_items);
+    assert_eq!(
+        materialized.unresolved_item_ids,
+        Vec::<String>::new(),
+        "full-fork sanitization must not leave references to removed parent items"
+    );
+    let materialized_checkpoint = materialized
+        .rollout_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .expect("materialized child rollout should retain the checkpoint");
+    let materialized_history = materialized_checkpoint
+        .replacement_history
+        .as_ref()
+        .expect("materialized checkpoint should expose replacement history")
+        .iter()
+        .map(|envelope| envelope.item.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        materialized_history,
+        vec![retained_user, expected_child_developer],
+        "entry-backed full fork must preserve the exact sanitized model-visible history"
+    );
+    let child_history = child_thread.session.clone_history().await;
+    assert!(
+        history_contains_text(child_history.raw_items(), "entry-backed parent context"),
+        "sanitized compacted context should remain model-visible"
+    );
+    assert!(
+        history_contains_text(
+            child_history.raw_items(),
+            "Before.\nChild developer instructions.\nAfter."
+        ),
+        "child instructions should replace parent instructions in model-visible compacted history"
+    );
+    assert!(
+        !history_contains_text(child_history.raw_items(), "Parent root guidance.")
+            && !history_contains_text(child_history.raw_items(), "Parent developer instructions."),
+        "sanitized model-visible history must not retain parent-only guidance"
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
+    let _ = parent_thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("parent shutdown should submit");
+}
+
 /// Full-history forks must restore child instructions when compaction discarded
 /// the only matching parent instruction fragment from effective history.
 #[tokio::test]
@@ -2081,6 +2516,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                 replacement_history: Some(
                     replacement_history.into_iter().map(Into::into).collect(),
                 ),
+                replacement_history_entries: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -2234,6 +2670,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             RolloutItem::Compacted(CompactedItem {
                 message: "legacy compacted summary".to_string(),
                 replacement_history: None,
+                replacement_history_entries: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,

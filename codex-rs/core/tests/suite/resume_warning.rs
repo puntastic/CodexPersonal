@@ -12,11 +12,14 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::SessionMeta;
+use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::protocol::WarningEvent;
+use codex_rollout::RolloutLine;
 use core::time::Duration;
 use core_test_support::load_default_config_for_test;
 use core_test_support::wait_for_event;
@@ -28,6 +31,17 @@ fn resume_history(
     rollout_path: &std::path::Path,
 ) -> InitialHistory {
     let turn_id = "resume-warning-seed-turn".to_string();
+    let thread_id = ThreadId::default();
+    let session_meta = SessionMetaLine {
+        meta: SessionMeta {
+            session_id: thread_id.into(),
+            id: thread_id,
+            cwd: config.cwd.to_path_buf(),
+            model_provider: Some(config.model_provider_id.clone()),
+            ..Default::default()
+        },
+        git: None,
+    };
     let turn_ctx = TurnContextItem {
         turn_id: Some(turn_id.clone()),
         cwd: config.cwd.clone(),
@@ -56,8 +70,9 @@ fn resume_history(
     };
 
     InitialHistory::Resumed(ResumedHistory {
-        conversation_id: ThreadId::default(),
+        conversation_id: thread_id,
         history: Arc::new(vec![
+            RolloutItem::SessionMeta(session_meta),
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: turn_id.clone(),
                 trace_id: None,
@@ -98,9 +113,25 @@ async fn emits_warning_when_resumed_model_differs() {
     assert!(config.cwd.is_absolute());
 
     let rollout_path = home.path().join("rollout.jsonl");
-    std::fs::write(&rollout_path, "").expect("create rollout placeholder");
-
     let initial_history = resume_history(&config, "previous-model", &rollout_path);
+    let InitialHistory::Resumed(resumed) = &initial_history else {
+        panic!("resume fixture should be resumed history");
+    };
+    let serialized = resumed
+        .history
+        .iter()
+        .enumerate()
+        .map(|(ordinal, item)| {
+            serde_json::to_string(&RolloutLine {
+                timestamp: String::new(),
+                ordinal: Some(u64::try_from(ordinal).expect("fixture ordinal should fit")),
+                item: item.clone(),
+            })
+            .expect("serialize rollout line")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&rollout_path, format!("{serialized}\n")).expect("write rollout fixture");
 
     let thread_manager = codex_core::test_support::thread_manager_with_models_provider(
         CodexAuth::from_api_key("test"),

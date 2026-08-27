@@ -16,7 +16,11 @@ use codex_core::TurnInputRequest;
 use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::config::Config;
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
+use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
+use codex_history::CompactedHistoryEntry;
+use codex_history::InitialHistory;
+use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_protocol::config_types::CollaborationMode;
@@ -27,9 +31,18 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::ForkBoundary;
+use codex_thread_store::ListTurnsParams;
+use codex_thread_store::LoadThreadHistoryParams;
+use codex_thread_store::PrepareForkParams;
+use codex_thread_store::ReadThreadByRolloutPathParams;
+use codex_thread_store::SortDirection;
+use codex_thread_store::StoredTurnItemsView;
+use codex_thread_store::ThreadStore;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::context_snapshot::ContextSnapshotRenderMode;
@@ -71,6 +84,137 @@ fn json_fragment(text: &str) -> String {
         .to_string()
 }
 
+fn materialize_rollout_lines(lines: &mut [RolloutLine]) -> Result<()> {
+    let rollout_items = lines
+        .iter()
+        .map(|line| line.item.clone())
+        .collect::<Vec<_>>();
+    let materialized = codex_history::materialize_compacted_histories(&rollout_items);
+    if !materialized.unresolved_item_ids.is_empty() {
+        return Err(anyhow::anyhow!(
+            "unresolved compacted history references: {}",
+            materialized.unresolved_item_ids.join(", ")
+        ));
+    }
+    for (line, item) in lines
+        .iter_mut()
+        .zip(materialized.rollout_items.into_owned())
+    {
+        line.item = item;
+    }
+    Ok(())
+}
+
+fn assert_reference_backed_rollout(path: &Path) {
+    let lines = std::fs::read_to_string(path)
+        .expect("read reference-backed rollout")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<RolloutLine>(line).expect("parse rollout line"))
+        .collect::<Vec<_>>();
+    let history_mode = lines.iter().find_map(|line| match &line.item {
+        RolloutItem::SessionMeta(meta) => Some(meta.meta.history_mode),
+        _ => None,
+    });
+    assert_eq!(
+        history_mode,
+        Some(ThreadHistoryMode::PaginatedRefsV1),
+        "model-level compaction scenario must persist the RefsV1 wire gate"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            matches!(
+                &line.item,
+                RolloutItem::Compacted(compacted)
+                    if compacted.replacement_history_entries.as_ref().is_some_and(|entries| {
+                        entries.iter().any(|entry| {
+                            matches!(entry, CompactedHistoryEntry::Reference { .. })
+                        })
+                    })
+            )
+        }),
+        "model-level compaction fixture must contain a backward item reference"
+    );
+}
+
+fn seed_reference_backed_checkpoint(path: &Path, retained_text: &str) -> Result<()> {
+    let mut lines = std::fs::read_to_string(path)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let (checkpoint_index, retained_envelope) = lines
+        .iter()
+        .enumerate()
+        .find_map(|(index, line)| match &line.item {
+            RolloutItem::Compacted(compacted) => compacted
+                .replacement_history
+                .as_ref()?
+                .iter()
+                .find(|envelope| response_message_contains_text(&envelope.item, retained_text))
+                .cloned()
+                .map(|envelope| (index, envelope)),
+            _ => None,
+        })
+        .context("compacted checkpoint missing retained user message")?;
+    let retained_item_id = retained_envelope
+        .item
+        .id()
+        .context("retained checkpoint item missing stable ID")?
+        .as_str()
+        .to_string();
+    let source_index = lines[..checkpoint_index]
+        .iter()
+        .position(|line| {
+            matches!(
+                &line.item,
+                RolloutItem::ResponseItem(envelope)
+                    if response_message_contains_text(&envelope.item, retained_text)
+            )
+        })
+        .context("rollout missing older explicit source for retained user message")?;
+
+    // The production compactor rebuilds text user messages, so its first checkpoint has fresh
+    // item IDs even in RefsV1 mode. Rebase the matching older source to that exact envelope before
+    // encoding the checkpoint as a backward reference. Model-visible content stays unchanged,
+    // while resume and fork now have a real reference to resolve end to end.
+    lines[source_index].item = RolloutItem::ResponseItem(retained_envelope.clone());
+    let RolloutItem::Compacted(compacted) = &mut lines[checkpoint_index].item else {
+        unreachable!("checkpoint index was selected from a compacted item");
+    };
+    let replacement_history = compacted
+        .replacement_history
+        .take()
+        .context("selected checkpoint lost replacement history")?;
+    let mut replaced = false;
+    compacted.replacement_history_entries = Some(
+        replacement_history
+            .into_iter()
+            .map(|envelope| {
+                if !replaced && envelope == retained_envelope {
+                    replaced = true;
+                    CompactedHistoryEntry::Reference {
+                        item_id: retained_item_id.clone(),
+                    }
+                } else {
+                    CompactedHistoryEntry::from(envelope)
+                }
+            })
+            .collect(),
+    );
+    if !replaced {
+        anyhow::bail!("selected checkpoint did not contain the retained envelope");
+    }
+
+    let rewritten = lines
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    std::fs::write(path, format!("{rewritten}\n"))?;
+    Ok(())
+}
+
 fn normalize_line_endings_str(text: &str) -> String {
     if text.contains('\r') {
         text.replace("\r\n", "\n").replace('\r', "\n")
@@ -96,6 +240,7 @@ fn seed_first_checkpoint_harness_metadata(path: &Path, retained_text: &str) -> R
         .filter(|line| !line.trim().is_empty())
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<Result<Vec<_>, _>>()?;
+    materialize_rollout_lines(&mut lines)?;
     let replacement_history = lines
         .iter_mut()
         .find_map(|line| match &mut line.item {
@@ -124,11 +269,13 @@ fn assert_latest_checkpoint_retains_harness_metadata(
     path: &Path,
     retained_text: &str,
 ) -> Result<()> {
-    let replacement_history = std::fs::read_to_string(path)?
+    let mut lines = std::fs::read_to_string(path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(serde_json::from_str::<RolloutLine>)
-        .collect::<Result<Vec<_>, _>>()?
+        .collect::<Result<Vec<_>, _>>()?;
+    materialize_rollout_lines(&mut lines)?;
+    let replacement_history = lines
         .into_iter()
         .rev()
         .find_map(|line| match line.item {
@@ -215,20 +362,35 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
     let request_log = mount_initial_flow(&server).await;
     let expected_model = "gpt-5.4";
     // 2. Start a new conversation and drive it through the compact/resume/fork steps.
-    let (_home, config, manager, base) =
-        start_test_conversation(&server, Some(expected_model)).await;
+    let (_home, config, manager, thread_store, base) = start_test_conversation_with_history_mode(
+        &server,
+        Some(expected_model),
+        ThreadHistoryMode::PaginatedRefsV1,
+    )
+    .await;
 
     user_turn(&base, "hello world").await;
     compact_conversation(&base).await;
     user_turn(&base, "AFTER_COMPACT").await;
     let base_path = fetch_conversation_path(&base);
+    let base_thread_id = base.session_configured().thread_id;
+    let state_db = base.state_db().expect("state database");
     assert!(
         base_path.exists(),
         "compact+resume test expects base path {base_path:?} to exist",
     );
 
     shutdown_conversation(&base).await;
-    let resumed = resume_conversation(&manager, &config, base_path).await;
+    seed_reference_backed_checkpoint(&base_path, "hello world")
+        .expect("seed a reference-backed checkpoint fixture");
+    assert_reference_backed_rollout(&base_path);
+    let stored_metadata = state_db
+        .get_thread(base_thread_id)
+        .await
+        .expect("read RefsV1 thread metadata")
+        .expect("RefsV1 thread metadata should exist");
+    assert!(stored_metadata.history_mode.is_paginated());
+    let resumed = resume_paginated_conversation(&manager, &thread_store, &config, base_path).await;
     user_turn(&resumed, "AFTER_RESUME").await;
     let resumed_path = fetch_conversation_path(&resumed);
     assert!(
@@ -236,7 +398,14 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         "compact+resume test expects resumed path {resumed_path:?} to exist",
     );
 
-    let forked = fork_thread(&manager, &config, resumed_path, /*nth_user_message*/ 2).await;
+    let forked = fork_paginated_thread(
+        &manager,
+        &thread_store,
+        &config,
+        resumed_path,
+        /*nth_user_message*/ 2,
+    )
+    .await;
     user_turn(&forked, "AFTER_FORK").await;
 
     // 3. Capture the requests to the model and validate the history slices.
@@ -372,7 +541,12 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
     let request_log = mount_second_compact_sequence(&server).await;
 
     // 2. Drive the conversation through compact -> resume -> fork -> compact -> resume.
-    let (_home, config, manager, base) = start_test_conversation(&server, /*model*/ None).await;
+    let (_home, config, manager, thread_store, base) = start_test_conversation_with_history_mode(
+        &server,
+        /*model*/ None,
+        ThreadHistoryMode::PaginatedRefsV1,
+    )
+    .await;
 
     user_turn(&base, "hello world").await;
     compact_conversation(&base).await;
@@ -385,7 +559,9 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
 
     shutdown_conversation(&base).await;
     seed_first_checkpoint_harness_metadata(&base_path, "hello world")?;
-    let resumed = resume_conversation(&manager, &config, base_path).await;
+    seed_reference_backed_checkpoint(&base_path, "hello world")?;
+    assert_reference_backed_rollout(&base_path);
+    let resumed = resume_paginated_conversation(&manager, &thread_store, &config, base_path).await;
     user_turn(&resumed, "AFTER_RESUME").await;
     let resumed_path = fetch_conversation_path(&resumed);
     assert!(
@@ -393,7 +569,14 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
         "second compact test expects resumed path {resumed_path:?} to exist",
     );
 
-    let forked = fork_thread(&manager, &config, resumed_path, /*nth_user_message*/ 3).await;
+    let forked = fork_paginated_thread(
+        &manager,
+        &thread_store,
+        &config,
+        resumed_path,
+        /*nth_user_message*/ 3,
+    )
+    .await;
     user_turn(&forked, "AFTER_FORK").await;
 
     compact_conversation(&forked).await;
@@ -406,7 +589,8 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
 
     shutdown_conversation(&forked).await;
     assert_latest_checkpoint_retains_harness_metadata(&forked_path, "hello world")?;
-    let resumed_again = resume_conversation(&manager, &config, forked_path).await;
+    let resumed_again =
+        resume_paginated_conversation(&manager, &thread_store, &config, forked_path).await;
     user_turn(&resumed_again, AFTER_SECOND_RESUME).await;
 
     let mut requests = request_log
@@ -535,7 +719,8 @@ async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Resu
 
     let request_log = mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
 
-    let (_home, _config, _manager, base) = start_test_conversation(&server, /*model*/ None).await;
+    let (_home, _config, _manager, _thread_store, base) =
+        start_test_conversation(&server, /*model*/ None).await;
 
     user_turn(&base, "hello world").await;
     compact_conversation(&base).await;
@@ -629,7 +814,7 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     )
     .await;
 
-    let (_home, config, _manager, conversation) =
+    let (_home, config, _manager, _thread_store, conversation) =
         start_test_conversation(&server, Some(MODEL)).await;
 
     user_turn(&conversation, TURN_ONE_USER).await;
@@ -842,21 +1027,57 @@ async fn mount_second_compact_sequence(server: &MockServer) -> ResponseMock {
 async fn start_test_conversation(
     server: &MockServer,
     model: Option<&str>,
-) -> (Arc<TempDir>, Config, Arc<ThreadManager>, Arc<CodexThread>) {
+) -> (
+    Arc<TempDir>,
+    Config,
+    Arc<ThreadManager>,
+    Arc<dyn ThreadStore>,
+    Arc<CodexThread>,
+) {
+    start_test_conversation_with_history_mode(server, model, ThreadHistoryMode::Legacy).await
+}
+
+async fn start_test_conversation_with_history_mode(
+    server: &MockServer,
+    model: Option<&str>,
+    history_mode: ThreadHistoryMode,
+) -> (
+    Arc<TempDir>,
+    Config,
+    Arc<ThreadManager>,
+    Arc<dyn ThreadStore>,
+    Arc<CodexThread>,
+) {
     let base_url = format!("{}/v1", server.uri());
     let model = model.map(str::to_string);
-    let mut builder = test_codex().with_config(move |config| {
-        config.model_provider.name = "Non-OpenAI Model provider".to_string();
-        config.model_provider.base_url = Some(base_url);
-        config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
-        if let Some(model) = model {
-            config.model = Some(model);
-        }
-    });
+    let mut builder = test_codex()
+        .with_history_mode(history_mode)
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::Sqlite)
+                .expect("RefsV1 integration tests require the thread-history database");
+            config.model_provider.name = "Non-OpenAI Model provider".to_string();
+            config.model_provider.base_url = Some(base_url);
+            config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
+            if let Some(model) = model {
+                config.model = Some(model);
+            }
+        });
     let test = Box::pin(builder.build(server))
         .await
         .expect("create conversation");
-    (test.home, test.config, test.thread_manager, test.codex)
+    assert!(
+        test.codex.state_db().is_some(),
+        "RefsV1 integration fixture must initialize the state database"
+    );
+    (
+        test.home,
+        test.config,
+        test.thread_manager,
+        test.thread_store,
+        test.codex,
+    )
 }
 
 async fn user_turn(conversation: &Arc<CodexThread>, text: &str) {
@@ -900,17 +1121,37 @@ async fn shutdown_conversation(conversation: &Arc<CodexThread>) {
         .expect("shutdown conversation");
 }
 
-async fn resume_conversation(
+async fn resume_paginated_conversation(
     manager: &ThreadManager,
+    thread_store: &Arc<dyn ThreadStore>,
     config: &Config,
     path: std::path::PathBuf,
 ) -> Arc<CodexThread> {
+    let stored_thread = thread_store
+        .read_thread_by_rollout_path(ReadThreadByRolloutPathParams {
+            rollout_path: path.clone(),
+            include_archived: true,
+            include_history: false,
+        })
+        .await
+        .expect("read paginated resume source");
+    let model_context = thread_store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: stored_thread.thread_id,
+            include_archived: true,
+        })
+        .await
+        .expect("load bounded paginated model context");
     let auth_manager = codex_core::test_support::auth_manager_from_auth(
         codex_login::CodexAuth::from_api_key("dummy"),
     );
-    Box::pin(manager.resume_thread_from_rollout(
+    Box::pin(manager.resume_thread_with_history(
         config.clone(),
-        path,
+        InitialHistory::Resumed(ResumedHistory {
+            conversation_id: model_context.thread_id,
+            history: Arc::new(model_context.items),
+            rollout_path: Some(path),
+        }),
         auth_manager,
         /*parent_trace*/ None,
         ClientMcpExtensions::default(),
@@ -921,18 +1162,70 @@ async fn resume_conversation(
 }
 
 #[cfg(test)]
-async fn fork_thread(
+async fn fork_paginated_thread(
     manager: &ThreadManager,
+    thread_store: &Arc<dyn ThreadStore>,
     config: &Config,
     path: std::path::PathBuf,
     nth_user_message: usize,
 ) -> Arc<CodexThread> {
-    Box::pin(manager.fork_thread(
-        nth_user_message,
+    let stored_thread = thread_store
+        .read_thread_by_rollout_path(ReadThreadByRolloutPathParams {
+            rollout_path: path,
+            include_archived: true,
+            include_history: false,
+        })
+        .await
+        .expect("read paginated fork source");
+    let turn_page = thread_store
+        .list_turns(ListTurnsParams {
+            thread_id: stored_thread.thread_id,
+            include_archived: true,
+            cursor: None,
+            page_size: 100,
+            sort_direction: SortDirection::Asc,
+            items_view: StoredTurnItemsView::Summary,
+        })
+        .await
+        .expect("list paginated fork-source turns");
+    assert!(
+        turn_page.next_cursor.is_none(),
+        "test fixture should fit one turn page"
+    );
+    let user_turns = turn_page
+        .turns
+        .iter()
+        .filter(|turn| {
+            turn.items.iter().any(|item| {
+                serde_json::from_slice::<Value>(&item.item_json)
+                    .ok()
+                    .and_then(|item| item.get("type").and_then(Value::as_str).map(str::to_owned))
+                    .as_deref()
+                    == Some("userMessage")
+            })
+        })
+        .collect::<Vec<_>>();
+    let boundary = if nth_user_message >= user_turns.len() {
+        ForkBoundary::Latest
+    } else if nth_user_message == 0 {
+        ForkBoundary::BeforeTurn(user_turns[0].turn_id.clone())
+    } else {
+        ForkBoundary::ThroughTurn(user_turns[nth_user_message - 1].turn_id.clone())
+    };
+    let prepared = thread_store
+        .prepare_fork(PrepareForkParams {
+            thread_id: stored_thread.thread_id,
+            boundary,
+        })
+        .await
+        .expect("prepare bounded paginated fork");
+    Box::pin(manager.fork_prepared_thread(
         config.clone(),
-        path,
+        prepared,
         /*thread_source*/ None,
         /*parent_trace*/ None,
+        ClientMcpExtensions::default(),
+        /*reserved_thread_id*/ None,
     ))
     .await
     .expect("fork conversation")

@@ -756,6 +756,15 @@ pub enum ThreadHistoryMode {
     #[default]
     Legacy,
     Paginated,
+    /// Paginated history whose persisted compaction checkpoints may contain backward item
+    /// references.
+    ///
+    /// Keep this as a distinct wire value so binaries predating reference-backed checkpoints fail
+    /// closed while reading `SessionMeta` instead of silently treating those checkpoints as legacy
+    /// history-less compactions.
+    #[serde(rename = "paginated_refs_v1")]
+    #[ts(rename = "paginated_refs_v1")]
+    PaginatedRefsV1,
 }
 
 impl ThreadHistoryMode {
@@ -763,7 +772,18 @@ impl ThreadHistoryMode {
         match self {
             Self::Legacy => "legacy",
             Self::Paginated => "paginated",
+            Self::PaginatedRefsV1 => "paginated_refs_v1",
         }
+    }
+
+    /// Whether this mode uses paginated rollout storage and replay semantics.
+    pub const fn is_paginated(self) -> bool {
+        matches!(self, Self::Paginated | Self::PaginatedRefsV1)
+    }
+
+    /// Whether compacted histories may be persisted using backward item references.
+    pub const fn supports_compacted_history_references(self) -> bool {
+        matches!(self, Self::PaginatedRefsV1)
     }
 }
 
@@ -774,6 +794,7 @@ impl FromStr for ThreadHistoryMode {
         match value {
             "legacy" => Ok(Self::Legacy),
             "paginated" => Ok(Self::Paginated),
+            "paginated_refs_v1" => Ok(Self::PaginatedRefsV1),
             _ => Err(format!("unknown thread history mode `{value}`")),
         }
     }

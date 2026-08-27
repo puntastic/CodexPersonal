@@ -323,9 +323,7 @@ impl ThreadMetadataBuilder {
 impl ThreadMetadata {
     /// Preserve SQLite-owned Git fields when rollout-derived metadata is reconciled.
     pub fn prefer_existing_git_info(&mut self, existing: &Self) {
-        if matches!(self.history_mode, ThreadHistoryMode::Paginated)
-            && matches!(existing.history_mode, ThreadHistoryMode::Paginated)
-        {
+        if self.history_mode.is_paginated() && existing.history_mode.is_paginated() {
             // `self` was rebuilt from the rollout's initial SessionMeta. `existing` is the
             // current SQLite row. Once that row says paginated, metadata updates are SQLite-only,
             // so a NULL is an explicit clear, not missing data. Copy the whole tuple or the stale

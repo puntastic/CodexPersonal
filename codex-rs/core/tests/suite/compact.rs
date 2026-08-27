@@ -361,20 +361,31 @@ fn assert_single_instruction_fragment(request: &responses::ResponsesRequest, exp
 
 fn replacement_history_from_rollout(path: &Path) -> Result<Vec<Value>> {
     let rollout_text = fs::read_to_string(path)?;
-    let mut replacement_history = None;
-    for line in rollout_text
+    let rollout_items = rollout_text
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-    {
-        let entry: RolloutLine = serde_json::from_str(line)?;
-        if let RolloutItem::Compacted(compacted) = entry.item
-            && let Some(items) = compacted.replacement_history
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|line| line.item)
+        .collect::<Vec<_>>();
+    let materialized = codex_history::materialize_compacted_histories(&rollout_items);
+    if !materialized.unresolved_item_ids.is_empty() {
+        return Err(anyhow!(
+            "unresolved compacted history references: {}",
+            materialized.unresolved_item_ids.join(", ")
+        ));
+    }
+    let mut replacement_history = None;
+    for item in materialized.rollout_items.iter() {
+        if let RolloutItem::Compacted(compacted) = item
+            && let Some(items) = compacted.replacement_history.as_ref()
         {
             replacement_history = Some(
                 items
-                    .into_iter()
-                    .map(|envelope| serde_json::to_value(envelope.item))
+                    .iter()
+                    .map(|envelope| serde_json::to_value(&envelope.item))
                     .collect::<std::result::Result<Vec<_>, _>>()?,
             );
         }
@@ -700,15 +711,15 @@ async fn summarize_context_three_requests_and_instructions() {
     let text = std::fs::read_to_string(&rollout_path).expect("failed to read rollout file");
     let mut regular_turn_context_count = 0usize;
     let mut saw_compacted_summary = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(entry): Result<RolloutLine, _> = serde_json::from_str(trimmed) else {
-            continue;
-        };
-        match entry.item {
+    let rollout_items = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<RolloutLine>(line.trim()).ok())
+        .map(|line| line.item)
+        .collect::<Vec<_>>();
+    let materialized = codex_history::materialize_compacted_histories(&rollout_items);
+    assert!(materialized.unresolved_item_ids.is_empty());
+    for item in materialized.rollout_items.iter() {
+        match item {
             RolloutItem::TurnContext(_) => {
                 regular_turn_context_count += 1;
             }

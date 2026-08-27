@@ -1,4 +1,7 @@
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_rollout::CompactedHistoryEntry;
 use codex_rollout::RolloutItem;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -225,4 +228,128 @@ fn skips_legacy_ghost_snapshots() {
             .expect("inspect ghost snapshot")
             .is_none()
     );
+}
+
+#[test]
+fn strips_nested_ghost_snapshot_and_keeps_legacy_metadata_aligned() {
+    let bytes = line(
+        "compacted",
+        json!({
+            "message": "summary",
+            "replacement_history": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "kept developer"}]
+                },
+                {"type": "ghost_snapshot", "ghost_commit": {"id": "deadbeef"}},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "kept user"}]
+                }
+            ],
+            "replacement_history_metadata": [
+                {"client_authored": true},
+                {"client_authored": false},
+                {"client_authored": false}
+            ]
+        }),
+    );
+
+    let parsed = parse_legacy_rollout_line(&bytes)
+        .expect("parse compacted history")
+        .expect("keep compacted history");
+    let RolloutItem::Compacted(compacted) = parsed.item else {
+        panic!("expected compacted rollout item");
+    };
+    let history = compacted
+        .replacement_history
+        .expect("legacy replacement history");
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history
+            .iter()
+            .map(|envelope| envelope
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.client_authored))
+            .collect::<Vec<_>>(),
+        vec![Some(true), Some(false)]
+    );
+    assert!(
+        history
+            .iter()
+            .all(|envelope| !matches!(&envelope.item, ResponseItem::Other))
+    );
+    assert!(matches!(
+        &history[0].item,
+        ResponseItem::Message { content, .. }
+            if content == &vec![ContentItem::InputText {
+                text: "kept developer".to_string(),
+            }]
+    ));
+}
+
+#[test]
+fn strips_nested_ghost_snapshot_from_entry_backed_history() {
+    let bytes = line(
+        "compacted",
+        json!({
+            "message": "summary",
+            "replacement_history_entries": [
+                {"type": "reference", "item_id": "older-source"},
+                {
+                    "type": "inline",
+                    "item": {"type": "ghost_snapshot", "ghost_commit": {"id": "deadbeef"}},
+                    "metadata": {"client_authored": true}
+                },
+                {
+                    "type": "inline",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "kept"}]
+                    }
+                }
+            ]
+        }),
+    );
+
+    let parsed = parse_legacy_rollout_line(&bytes)
+        .expect("parse entry-backed history")
+        .expect("keep entry-backed history");
+    let RolloutItem::Compacted(compacted) = parsed.item else {
+        panic!("expected compacted rollout item");
+    };
+    let entries = compacted
+        .replacement_history_entries
+        .expect("entry-backed replacement history");
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(
+        &entries[0],
+        CompactedHistoryEntry::Reference { item_id } if item_id == "older-source"
+    ));
+    assert!(matches!(
+        &entries[1],
+        CompactedHistoryEntry::Inline { item, .. }
+            if matches!(item.as_ref(), ResponseItem::Message { .. })
+    ));
+}
+
+#[test]
+fn nested_ghost_snapshot_does_not_mask_misaligned_legacy_metadata() {
+    let bytes = line(
+        "compacted",
+        json!({
+            "message": "summary",
+            "replacement_history": [
+                {"type": "message", "role": "assistant", "content": []},
+                {"type": "ghost_snapshot", "ghost_commit": {"id": "deadbeef"}}
+            ],
+            "replacement_history_metadata": [{"client_authored": true}]
+        }),
+    );
+
+    assert!(parse_legacy_rollout_line(&bytes).is_err());
 }

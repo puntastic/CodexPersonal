@@ -24,6 +24,7 @@ use crate::shell_snapshot::ShellSnapshot;
 use crate::test_support::models_manager_with_provider;
 use crate::tools::format_exec_output_str;
 use crate::tools::registry::ToolRegistry;
+use assert_matches::assert_matches;
 use codex_config::ConfigLayerStack;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::LoaderOverrides;
@@ -117,6 +118,7 @@ use codex_execpolicy::Decision;
 use codex_execpolicy::NetworkRuleProtocol;
 use codex_execpolicy::Policy;
 use codex_history::CodexHarnessMetadata;
+use codex_history::CompactedHistoryEntry;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
@@ -154,6 +156,7 @@ use codex_protocol::protocol::RealtimeVoicesList;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::Submission;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TokenCountEvent;
@@ -2145,7 +2148,8 @@ async fn reconstruct_history_matches_live_compactions() {
     let reconstruction_turn = session.new_default_turn().await;
     let reconstructed = session
         .reconstruct_history_from_rollout(reconstruction_turn.as_ref(), &rollout_items)
-        .await;
+        .await
+        .expect("rollout reconstruction");
 
     assert_eq!(expected, raw_envelopes(&reconstructed.history));
     assert_eq!(2, reconstructed.window_number);
@@ -2193,6 +2197,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
     let rollout_items = vec![RolloutItem::Compacted(CompactedItem {
         message: String::new(),
         replacement_history: Some(replacement_history.clone()),
+        replacement_history_entries: None,
         mcp_resource_origins: None,
         window_number: Some(42),
         first_window_id: Some(first_window_id.to_string()),
@@ -2202,7 +2207,8 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
 
     let reconstructed = session
         .reconstruct_history_from_rollout(&turn_context, &rollout_items)
-        .await;
+        .await
+        .expect("rollout reconstruction");
 
     assert_eq!(reconstructed.history, replacement_history);
     assert_eq!(42, reconstructed.window_number);
@@ -2222,7 +2228,8 @@ async fn record_initial_history_reconstructs_resumed_transcript() {
             history: Arc::new(rollout_items),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
-        .await;
+        .await
+        .expect("record initial history");
 
     let history = session.state.lock().await.clone_history();
     assert_eq!(expected, raw_history_items(&history));
@@ -2405,7 +2412,8 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     let (resumed_session, _resumed_turn_context) = make_session_and_context().await;
     resumed_session
         .record_initial_history(InitialHistory::Resumed(resumed))
-        .await;
+        .await
+        .expect("record initial history");
     assert_eq!(
         strip_response_item_ids(&raw_history_items(&resumed_session.clone_history().await)),
         strip_response_item_ids(std::slice::from_ref(&expected_item))
@@ -2474,7 +2482,8 @@ async fn record_inter_agent_communication_preserves_item_id_in_rollout_and_resum
         .await;
     resumed_session
         .record_initial_history(InitialHistory::Resumed(resumed))
-        .await;
+        .await
+        .expect("record initial history");
     let resumed_history = resumed_session.clone_history().await;
     let resumed_items = raw_history_items(&resumed_history);
     let [resumed_item] = resumed_items.as_slice() else {
@@ -2594,7 +2603,8 @@ async fn prepares_resumed_history_before_installing_it() {
             })]),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
-        .await;
+        .await
+        .expect("record initial history");
 
     let history = session.state.lock().await.clone_history();
     assert_eq!(
@@ -2703,7 +2713,10 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
 async fn record_initial_history_new_defers_initial_context_until_first_turn() {
     let (session, _turn_context) = make_session_and_context().await;
 
-    session.record_initial_history(InitialHistory::New).await;
+    session
+        .record_initial_history(InitialHistory::New)
+        .await
+        .expect("record initial history");
 
     let history = session.clone_history().await;
     assert_eq!(raw_history_items(&history), Vec::<ResponseItem>::new());
@@ -2738,7 +2751,8 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
             history: Arc::new(rollout_items),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
-        .await;
+        .await
+        .expect("record initial history");
 
     let history_before_seed = session.state.lock().await.clone_history();
     assert_eq!(expected, raw_history_items(&history_before_seed));
@@ -2848,7 +2862,8 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             history: Arc::new(rollout_items),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
-        .await;
+        .await
+        .expect("record initial history");
 
     let actual = session.state.lock().await.token_info();
     assert_eq!(actual, Some(info2));
@@ -3373,7 +3388,8 @@ async fn record_initial_history_reconstructs_forked_transcript() {
 
     session
         .record_initial_history(InitialHistory::Forked(rollout_items))
-        .await;
+        .await
+        .expect("record initial history");
 
     let history = session.state.lock().await.clone_history();
     assert_eq!(
@@ -3418,21 +3434,720 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     else {
         panic!("expected resumed rollout history");
     };
-    let persisted_replacement_history = resumed.history.iter().rev().find_map(|item| match item {
-        RolloutItem::Compacted(compacted) => compacted.replacement_history.as_ref(),
-        RolloutItem::SessionMeta(_)
-        | RolloutItem::ResponseItem(_)
-        | RolloutItem::InterAgentCommunication(_)
-        | RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::TurnContext(_)
-        | RolloutItem::WorldState(_)
-        | RolloutItem::SecurityRiskScore(_)
-        | RolloutItem::RealtimeItem(_)
-        | RolloutItem::EventMsg(_) => None,
-    });
+    let materialized = codex_history::materialize_compacted_histories(&resumed.history);
+    assert!(materialized.unresolved_item_ids.is_empty());
+    let persisted_replacement_history =
+        materialized
+            .rollout_items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                RolloutItem::Compacted(compacted) => compacted.replacement_history.as_ref(),
+                RolloutItem::SessionMeta(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::InterAgentCommunication(_)
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::WorldState(_)
+                | RolloutItem::SecurityRiskScore(_)
+                | RolloutItem::RealtimeItem(_)
+                | RolloutItem::EventMsg(_) => None,
+            });
     assert_eq!(
         persisted_replacement_history.cloned(),
         Some(live_history.annotated_items().to_vec())
+    );
+}
+
+#[tokio::test]
+async fn failed_source_append_does_not_make_item_referenceable_by_compaction() {
+    let (mut session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    session
+        .live_thread()
+        .expect("live thread")
+        .shutdown()
+        .await
+        .expect("shut down persistence");
+
+    let item_id = ResponseItemId::with_suffix("msg", "failed-source");
+    let item = ResponseItem::Message {
+        id: Some(item_id.clone()),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "must remain inline".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    session
+        .record_conversation_items(&turn_context, std::slice::from_ref(&item))
+        .await;
+
+    let state = session.state.lock().await;
+    let active_history = state.history.annotated_items().to_vec();
+    assert!(
+        !state
+            .persisted_history_items()
+            .contains_key(item_id.as_str())
+    );
+    let encoded = super::compacted_history::encode_replacement_history(
+        &active_history,
+        state.persisted_history_items(),
+        ThreadHistoryMode::PaginatedRefsV1,
+    );
+    assert_eq!(encoded.entries, None);
+    assert_eq!(encoded.legacy, Some(active_history));
+}
+
+#[tokio::test]
+async fn filtered_response_item_is_not_acknowledged_as_a_durable_reference_source() {
+    let (mut session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let rollout_path =
+        attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    let item_id = ResponseItemId::with_suffix("at", "filtered-source");
+    let item = ResponseItem::AdditionalTools {
+        id: Some(item_id.clone()),
+        role: "developer".to_string(),
+        tools: vec![json!({"type": "function", "name": "temporary"})],
+    };
+    session
+        .record_conversation_items(&turn_context, std::slice::from_ref(&item))
+        .await;
+    session.flush_rollout().await.expect("rollout should flush");
+
+    let state = session.state.lock().await;
+    assert!(
+        !state
+            .persisted_history_items()
+            .contains_key(item_id.as_str()),
+        "writer-filtered response items are not durable sources"
+    );
+    let active_item = state
+        .history
+        .annotated_items()
+        .iter()
+        .find(|envelope| envelope.item.id() == Some(&item_id))
+        .expect("filtered item remains useful in live history")
+        .clone();
+    let encoded = super::compacted_history::encode_replacement_history(
+        std::slice::from_ref(&active_item),
+        state.persisted_history_items(),
+        ThreadHistoryMode::PaginatedRefsV1,
+    );
+    assert_eq!(encoded.entries, None);
+    assert_eq!(encoded.legacy, Some(vec![active_item]));
+    drop(state);
+
+    let raw_rollout = std::fs::read_to_string(rollout_path).expect("read raw rollout");
+    assert!(!raw_rollout.contains("filtered-source"));
+}
+
+#[tokio::test]
+async fn failed_changed_source_append_does_not_reference_stale_value() {
+    let (mut session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+
+    let item_id = ResponseItemId::with_suffix("msg", "reused-source");
+    let message = |text: &str| ResponseItem::Message {
+        id: Some(item_id.clone()),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let persisted = message("durable v1");
+    session
+        .record_conversation_items(&turn_context, std::slice::from_ref(&persisted))
+        .await;
+    let durable = session
+        .state
+        .lock()
+        .await
+        .persisted_history_items()
+        .get(item_id.as_str())
+        .expect("first value should become a durable source")
+        .clone();
+    assert_matches!(
+        &durable.item,
+        ResponseItem::Message {
+            id: Some(id),
+            content,
+            ..
+        } if id == &item_id
+            && matches!(
+                content.as_slice(),
+                [ContentItem::InputText { text }] if text == "durable v1"
+            )
+    );
+
+    session
+        .live_thread()
+        .expect("live thread")
+        .shutdown()
+        .await
+        .expect("shut down persistence");
+    let changed = message("unpersisted v2");
+    session
+        .record_conversation_items(&turn_context, std::slice::from_ref(&changed))
+        .await;
+
+    let state = session.state.lock().await;
+    let changed = state
+        .history
+        .annotated_items()
+        .iter()
+        .rev()
+        .find(|envelope| {
+            matches!(
+                &envelope.item,
+                ResponseItem::Message {
+                    id: Some(id),
+                    content,
+                    ..
+                } if id == &item_id
+                    && matches!(
+                        content.as_slice(),
+                        [ContentItem::InputText { text }] if text == "unpersisted v2"
+                    )
+            )
+        })
+        .expect("changed active item")
+        .clone();
+    let encoded = super::compacted_history::encode_replacement_history(
+        std::slice::from_ref(&changed),
+        state.persisted_history_items(),
+        ThreadHistoryMode::PaginatedRefsV1,
+    );
+    assert_eq!(encoded.entries, None);
+    assert_eq!(encoded.legacy, Some(vec![changed]));
+}
+
+#[tokio::test]
+async fn failed_copied_fork_seed_does_not_make_parent_items_referenceable() {
+    let (mut session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    assert!(matches!(&session.fork_persistence, ForkPersistence::Copied));
+    attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    session
+        .live_thread()
+        .expect("live thread")
+        .shutdown()
+        .await
+        .expect("shut down persistence");
+
+    let inherited = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "parent-only")),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "copied from parent".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    session
+        .record_initial_history(InitialHistory::Forked(vec![RolloutItem::ResponseItem(
+            inherited.into(),
+        )]))
+        .await
+        .expect("in-memory fork reconstruction remains usable");
+
+    assert!(
+        session
+            .state
+            .lock()
+            .await
+            .persisted_history_items()
+            .is_empty(),
+        "a failed copied-prefix append must not make parent-only items referenceable"
+    );
+}
+
+#[tokio::test]
+async fn failed_referenced_fork_suffix_append_keeps_only_inherited_sources_referenceable() {
+    let (mut session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let session_mut = Arc::get_mut(&mut session).expect("unique session");
+    session_mut.fork_persistence = ForkPersistence::Referenced {
+        history_base: Some(HistoryPosition {
+            thread_id: ThreadId::default(),
+            end_ordinal_exclusive: 1,
+            end_byte_offset: 1,
+        }),
+        inherited_item_count: 1,
+    };
+    attach_thread_persistence(session_mut).await;
+    session
+        .live_thread()
+        .expect("live thread")
+        .shutdown()
+        .await
+        .expect("shut down persistence");
+
+    let message = |suffix: &str, text: &str| ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", suffix)),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        // Replay preparation classifies legacy unannotated content as `unknown`. Start with that
+        // canonical metadata so this fixture tests an exact addressable ancestor; a changed
+        // envelope is deliberately excluded from the durable-source map and inlined instead.
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+            ..Default::default()
+        }),
+    };
+    let inherited = message("referenced-inherited", "addressable through history_base");
+    let local = message(
+        "referenced-local",
+        "missing because the child append failed",
+    );
+
+    session
+        .record_initial_history(InitialHistory::Forked(vec![
+            RolloutItem::ResponseItem(inherited.clone().into()),
+            RolloutItem::ResponseItem(local.clone().into()),
+        ]))
+        .await
+        .expect("in-memory referenced fork reconstruction remains usable");
+
+    let state = session.state.lock().await;
+    assert_eq!(
+        state
+            .persisted_history_items()
+            .get(inherited.id().expect("inherited id").as_str())
+            .map(|envelope| &envelope.item),
+        Some(&inherited),
+        "the inherited reference-backed prefix remains addressable"
+    );
+    assert!(
+        !state
+            .persisted_history_items()
+            .contains_key(local.id().expect("local id").as_str()),
+        "a failed local suffix append must not make the missing child record referenceable"
+    );
+}
+
+#[tokio::test]
+async fn referenced_fork_does_not_invent_durable_id_for_legacy_inherited_item() {
+    let (mut session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let session_mut = Arc::get_mut(&mut session).expect("unique session");
+    session_mut.fork_persistence = ForkPersistence::Referenced {
+        history_base: Some(HistoryPosition {
+            thread_id: ThreadId::default(),
+            end_ordinal_exclusive: 1,
+            end_byte_offset: 1,
+        }),
+        inherited_item_count: 1,
+    };
+    attach_thread_persistence(session_mut).await;
+
+    let inherited = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "legacy ancestor without a stable ID".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    session
+        .record_initial_history(InitialHistory::Forked(vec![RolloutItem::ResponseItem(
+            inherited.clone().into(),
+        )]))
+        .await
+        .expect("referenced fork remains usable");
+
+    let state = session.state.lock().await;
+    assert!(
+        state.persisted_history_items().is_empty(),
+        "an immutable no-ID ancestor must not acquire a child-only durable identity"
+    );
+    let active = state
+        .history
+        .annotated_items()
+        .iter()
+        .find(|envelope| {
+            matches!(
+                &envelope.item,
+                ResponseItem::Message {
+                    id: None,
+                    role,
+                    content,
+                    ..
+                } if role == "user"
+                    && matches!(
+                        content.as_slice(),
+                        [ContentItem::InputText { text }]
+                            if text == "legacy ancestor without a stable ID"
+                    )
+            )
+        })
+        .expect("legacy inherited item remains in active history")
+        .clone();
+    assert!(
+        active.item.id().is_none(),
+        "inherited source remains unchanged"
+    );
+    let encoded = super::compacted_history::encode_replacement_history(
+        std::slice::from_ref(&active),
+        state.persisted_history_items(),
+        ThreadHistoryMode::PaginatedRefsV1,
+    );
+    assert_eq!(encoded.entries, None);
+    assert_eq!(encoded.legacy, Some(vec![active]));
+}
+
+#[test]
+fn fork_id_assignment_mutates_only_locally_owned_history() {
+    let no_id_message = |text: &str| {
+        RolloutItem::ResponseItem(
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: text.to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        )
+    };
+    let mut referenced = vec![no_id_message("inherited"), no_id_message("local")];
+    Session::assign_missing_fork_rollout_response_item_ids(
+        &mut referenced,
+        &ForkPersistence::Referenced {
+            history_base: Some(HistoryPosition {
+                thread_id: ThreadId::default(),
+                end_ordinal_exclusive: 1,
+                end_byte_offset: 1,
+            }),
+            inherited_item_count: 1,
+        },
+    );
+    let referenced_ids = referenced
+        .iter()
+        .map(|item| match item {
+            RolloutItem::ResponseItem(item) => item.item.id().cloned(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(referenced_ids[0].is_none());
+    assert!(referenced_ids[1].is_some());
+
+    let mut copied = vec![
+        no_id_message("copied inherited"),
+        no_id_message("copied local"),
+    ];
+    Session::assign_missing_fork_rollout_response_item_ids(&mut copied, &ForkPersistence::Copied);
+    assert!(copied.iter().all(|item| {
+        matches!(item, RolloutItem::ResponseItem(item) if item.item.id().is_some())
+    }));
+}
+
+#[tokio::test]
+async fn copied_fork_does_not_acknowledge_writer_filtered_prefix_item() {
+    let (mut session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    assert!(matches!(&session.fork_persistence, ForkPersistence::Copied));
+    let rollout_path =
+        attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    let item_id = ResponseItemId::with_suffix("at", "copied-filtered-prefix");
+    let filtered = ResponseItem::AdditionalTools {
+        id: Some(item_id.clone()),
+        role: "developer".to_string(),
+        tools: vec![json!({"type": "function", "name": "temporary"})],
+    };
+
+    session
+        .record_initial_history(InitialHistory::Forked(vec![RolloutItem::ResponseItem(
+            filtered.into(),
+        )]))
+        .await
+        .expect("copied fork remains usable in memory");
+    session.flush_rollout().await.expect("rollout should flush");
+
+    assert!(
+        !session
+            .state
+            .lock()
+            .await
+            .persisted_history_items()
+            .contains_key(item_id.as_str()),
+        "a copied-prefix item filtered by the writer is not a durable reference source"
+    );
+    assert!(
+        !std::fs::read_to_string(rollout_path)
+            .expect("read copied rollout")
+            .contains(item_id.as_str())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_compactions_store_image_payload_once_and_resume_exactly() {
+    const IMAGE_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    let (mut session, _legacy_turn_context, _rx) =
+        make_session_and_context_with_auth_and_config_and_rx(
+            CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            |_| {},
+        )
+        .await;
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .history_mode = ThreadHistoryMode::PaginatedRefsV1;
+    let turn_context = session.new_default_turn().await;
+    let rollout_path = attach_thread_persistence_with_history_mode(
+        Arc::get_mut(&mut session).expect("unique session"),
+        ThreadHistoryMode::PaginatedRefsV1,
+    )
+    .await;
+    let image_id = ResponseItemId::with_suffix("msg", "stable-image");
+    let image_message = ResponseItem::Message {
+        id: Some(image_id.clone()),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image_url: IMAGE_DATA_URI.to_string(),
+            detail: Some(ImageDetail::High),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    session
+        .record_conversation_items(&turn_context, std::slice::from_ref(&image_message))
+        .await;
+    let image_envelope = session
+        .state
+        .lock()
+        .await
+        .history
+        .annotated_items()
+        .iter()
+        .find(|envelope| envelope.item.id() == Some(&image_id))
+        .expect("prepared image history item")
+        .clone();
+
+    for message in ["first image checkpoint", "second image checkpoint"] {
+        let (window_number, window_ids) = session.advance_auto_compact_window().await;
+        session
+            .replace_compacted_history(
+                vec![image_envelope.clone()],
+                /*reference_context_item*/ None,
+                /*world_state_baseline*/ None,
+                CompactedHistoryMetadata {
+                    message: message.to_string(),
+                    window_number,
+                    window_ids,
+                },
+            )
+            .await;
+    }
+    session.flush_rollout().await.expect("rollout should flush");
+
+    let raw_rollout = std::fs::read_to_string(&rollout_path).expect("read raw rollout");
+    assert_eq!(
+        raw_rollout.matches(IMAGE_DATA_URI).count(),
+        1,
+        "the data URI belongs in its source record, not every compaction checkpoint"
+    );
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let checkpoints = resumed
+        .history
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 2);
+    assert!(checkpoints.iter().all(|checkpoint| {
+        checkpoint.replacement_history.is_none()
+            && matches!(
+                checkpoint.replacement_history_entries.as_deref(),
+                Some([CompactedHistoryEntry::Reference { item_id }])
+                    if item_id == image_id.as_str()
+            )
+    }));
+
+    let materialized = codex_history::materialize_compacted_histories(&resumed.history);
+    assert!(materialized.unresolved_item_ids.is_empty());
+    let materialized_checkpoints = materialized
+        .rollout_items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::Compacted(compacted) => compacted.replacement_history.as_deref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(materialized_checkpoints.len(), 2);
+    assert!(
+        materialized_checkpoints
+            .iter()
+            .all(|history| *history == std::slice::from_ref(&image_envelope))
+    );
+
+    let (resumed_session, _resumed_turn_context) = make_session_and_context().await;
+    resumed_session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .history_mode = ThreadHistoryMode::PaginatedRefsV1;
+    resumed_session
+        .record_initial_history(InitialHistory::Resumed(resumed))
+        .await
+        .expect("cold resume");
+    assert_eq!(
+        resumed_session.clone_history().await.annotated_items(),
+        std::slice::from_ref(&image_envelope)
+    );
+}
+
+#[tokio::test]
+async fn repeated_compactions_preserve_distinct_values_that_reuse_one_id() {
+    let (mut session, _legacy_turn_context, _rx) =
+        make_session_and_context_with_auth_and_config_and_rx(
+            CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            |_| {},
+        )
+        .await;
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .history_mode = ThreadHistoryMode::PaginatedRefsV1;
+    let turn_context = session.new_default_turn().await;
+    let rollout_path = attach_thread_persistence_with_history_mode(
+        Arc::get_mut(&mut session).expect("unique session"),
+        ThreadHistoryMode::PaginatedRefsV1,
+    )
+    .await;
+    let reused_id = ResponseItemId::with_suffix("msg", "reused-across-values");
+    let message = |text: &str| ResponseItem::Message {
+        id: Some(reused_id.clone()),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    for item in [message("first value"), message("second value")] {
+        session
+            .record_conversation_items(&turn_context, std::slice::from_ref(&item))
+            .await;
+    }
+    let expected_history = session
+        .state
+        .lock()
+        .await
+        .history
+        .annotated_items()
+        .iter()
+        .filter(|envelope| envelope.item.id() == Some(&reused_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(expected_history.len(), 2);
+
+    for message in ["first reused-ID checkpoint", "second reused-ID checkpoint"] {
+        let (window_number, window_ids) = session.advance_auto_compact_window().await;
+        session
+            .replace_compacted_history(
+                expected_history.clone(),
+                /*reference_context_item*/ None,
+                /*world_state_baseline*/ None,
+                CompactedHistoryMetadata {
+                    message: message.to_string(),
+                    window_number,
+                    window_ids,
+                },
+            )
+            .await;
+    }
+    session.flush_rollout().await.expect("rollout should flush");
+
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let checkpoints = resumed
+        .history
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 2);
+    assert!(checkpoints.iter().all(|checkpoint| {
+        checkpoint.replacement_history.as_deref() == Some(expected_history.as_slice())
+            && checkpoint.replacement_history_entries.is_none()
+    }));
+
+    let (resumed_session, _resumed_turn_context) = make_session_and_context().await;
+    resumed_session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .history_mode = ThreadHistoryMode::PaginatedRefsV1;
+    resumed_session
+        .record_initial_history(InitialHistory::Resumed(resumed))
+        .await
+        .expect("cold resume");
+    assert_eq!(
+        resumed_session.clone_history().await.annotated_items(),
+        expected_history.as_slice()
     );
 }
 
@@ -3471,7 +4186,8 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         .record_initial_history(InitialHistory::Forked(vec![RolloutItem::ResponseItem(
             response_item,
         )]))
-        .await;
+        .await
+        .expect("record initial history");
 
     let live_history = session.clone_history().await;
     let live_items = raw_history_items(&live_history);
@@ -3724,7 +4440,8 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
 
     session
         .record_initial_history(InitialHistory::Forked(rollout_items))
-        .await;
+        .await
+        .expect("record initial history");
 
     let history = session.clone_history().await;
     assert_eq!(
@@ -4067,6 +4784,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
                     .map(ResponseItemEnvelope::new)
                     .collect(),
             ),
+            replacement_history_entries: None,
             mcp_resource_origins: None,
             window_number: Some(7),
             first_window_id: Some(first_window_id.to_string()),
@@ -4818,6 +5536,13 @@ async fn wait_for_thread_rollback_failed(rx: &async_channel::Receiver<Event>) ->
 }
 
 async fn open_thread_persistence(session: &mut Session) -> PathBuf {
+    open_thread_persistence_with_history_mode(session, ThreadHistoryMode::default()).await
+}
+
+async fn open_thread_persistence_with_history_mode(
+    session: &mut Session,
+    history_mode: ThreadHistoryMode,
+) -> PathBuf {
     let config = session.get_config().await;
     let live_thread = LiveThread::create(
         Arc::clone(&session.services.thread_store),
@@ -4834,7 +5559,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
             dynamic_tools: Vec::new(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
-            history_mode: Default::default(),
+            history_mode,
             subagent_history_start_ordinal: None,
             history_base: None,
             initial_window_id: Uuid::now_v7().to_string(),
@@ -4860,7 +5585,14 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
 }
 
 async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
-    let rollout_path = open_thread_persistence(session).await;
+    attach_thread_persistence_with_history_mode(session, ThreadHistoryMode::default()).await
+}
+
+async fn attach_thread_persistence_with_history_mode(
+    session: &mut Session,
+    history_mode: ThreadHistoryMode,
+) -> PathBuf {
+    let rollout_path = open_thread_persistence_with_history_mode(session, history_mode).await;
     session
         .ensure_rollout_materialized(PersistContext::Standard)
         .await;
@@ -11717,6 +12449,7 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::Compacted(CompactedItem {
         message: summary1.to_string(),
         replacement_history: None,
+        replacement_history_entries: None,
         mcp_resource_origins: None,
         window_number: Some(window_number),
         first_window_id: Some(window_ids.first_window_id.to_string()),
@@ -11747,6 +12480,7 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::Compacted(CompactedItem {
         message: summary2.to_string(),
         replacement_history: None,
+        replacement_history_entries: None,
         mcp_resource_origins: None,
         window_number: Some(window_number),
         first_window_id: Some(window_ids.first_window_id.to_string()),

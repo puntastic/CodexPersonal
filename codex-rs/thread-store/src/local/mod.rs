@@ -101,6 +101,9 @@ use crate::UpdatedProject;
 use crate::local::writer_lock::WriterLockCoordinator;
 use crate::local::writer_lock::WriterLockGuard;
 
+pub use rollout_migration::PreservedSourceRetirementOutcome;
+pub use rollout_migration::PreservedSourceRetirementReport;
+pub use rollout_migration::PreservedSourceRetirementStatus;
 pub use rollout_migration::RolloutMigrationFailureReason;
 pub use rollout_migration::RolloutMigrationMode;
 pub use rollout_migration::RolloutMigrationOptions;
@@ -678,6 +681,7 @@ impl ThreadStore for LocalThreadStore {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::Arc;
 
     use codex_protocol::ThreadId;
@@ -685,6 +689,7 @@ mod tests {
     use codex_protocol::items::TurnItem;
     use codex_protocol::items::UserMessageItem;
     use codex_protocol::models::BaseInstructions;
+    use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::MessagePhase;
     use codex_protocol::models::ResponseItem;
@@ -843,15 +848,34 @@ mod tests {
         .await
         .expect("state db should initialize");
         let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
-        let uuid = uuid::Uuid::from_u128(228);
-        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
-        let rollout_path = write_session_file_with_history_mode(
-            home.path(),
-            "2025-01-03T12-00-00",
-            uuid,
-            ThreadHistoryMode::Paginated,
-        )
-        .expect("paginated session file");
+        let thread_id = ThreadId::new();
+        let mut create_params = create_thread_params(thread_id);
+        create_params.history_mode = ThreadHistoryMode::Paginated;
+        store
+            .create_thread(create_params)
+            .await
+            .expect("create paginated session");
+        store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .expect("persist paginated session");
+        store.flush_thread(thread_id).await.expect("flush session");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("paginated rollout path");
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("close initial writer");
+        let bounded_history = store
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect("load canonical bounded history")
+            .items;
         let stale_rollout_path = home.path().join("stale-rollout.jsonl");
         tokio::fs::write(&stale_rollout_path, "malformed session metadata\n")
             .await
@@ -879,7 +903,7 @@ mod tests {
             ResumeThreadParams {
                 thread_id,
                 rollout_path: Some(rollout_path.clone()),
-                history: Some(Arc::new(vec![user_message_item("bounded suffix")])),
+                history: Some(Arc::new(bounded_history)),
                 include_archived: false,
                 metadata: ThreadPersistenceMetadata {
                     cwd: Some(home.path().to_path_buf()),
@@ -890,10 +914,15 @@ mod tests {
         )
         .await
         .expect("resume paginated thread from its requested rollout");
-        assert_eq!(
-            resumed.local_rollout_path().await.expect("live rollout"),
-            Some(rollout_path)
-        );
+        let resumed_path = resumed
+            .local_rollout_path()
+            .await
+            .expect("live rollout")
+            .expect("resumed rollout path");
+        assert!(codex_utils_path::paths_match_after_normalization(
+            resumed_path,
+            rollout_path
+        ));
         resumed.shutdown().await.expect("shutdown resumed writer");
 
         let metadata = runtime
@@ -1451,6 +1480,478 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migrated_resume_rejects_append_after_preserved_legacy_source_changes() {
+        let home = TempDir::new().expect("temp dir");
+        let (store, thread_id, rollout_path, preserved_source_path) =
+            migrate_live_legacy_thread(&home).await;
+        let model_context = store
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect("load migrated model context");
+        let resumed = LiveThread::resume(
+            store,
+            ThreadHistoryMode::PaginatedRefsV1,
+            ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                history: Some(Arc::new(model_context.items)),
+                include_archived: false,
+                metadata: thread_metadata(),
+            },
+        )
+        .await
+        .expect("resume unchanged migrated generation");
+        let initial_active_bytes = tokio::fs::read(&rollout_path)
+            .await
+            .expect("read active migrated generation");
+        let initial_preserved_bytes = tokio::fs::read(&preserved_source_path)
+            .await
+            .expect("read preserved legacy generation");
+
+        resumed
+            .append_items(&[response_message_item(
+                "user",
+                "new generation advances before the legacy split",
+            )])
+            .await
+            .expect("advance the active migrated generation");
+        resumed
+            .flush()
+            .await
+            .expect("flush the active migrated generation");
+        let active_bytes = tokio::fs::read(&rollout_path)
+            .await
+            .expect("read advanced active generation");
+        assert!(active_bytes.starts_with(&initial_active_bytes));
+        assert!(active_bytes.len() > initial_active_bytes.len());
+
+        let mut older_writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&preserved_source_path)
+            .expect("open preserved legacy generation");
+        older_writer
+            .write_all(b"older writer advanced legacy generation\n")
+            .expect("advance preserved legacy generation");
+        older_writer
+            .sync_all()
+            .expect("sync preserved legacy generation");
+        drop(older_writer);
+        let preserved_bytes = tokio::fs::read(&preserved_source_path)
+            .await
+            .expect("read advanced preserved generation");
+        assert!(preserved_bytes.starts_with(&initial_preserved_bytes));
+        assert!(preserved_bytes.len() > initial_preserved_bytes.len());
+
+        let error = resumed
+            .append_items(&[response_message_item(
+                "user",
+                "append must not cross a split generation",
+            )])
+            .await
+            .expect_err("split generation must reject the next append");
+        let ThreadStoreError::Conflict { message } = error else {
+            panic!("split generation should return a conflict: {error}");
+        };
+        assert!(message.contains("older writer changed the preserved legacy generation"));
+        assert_eq!(
+            tokio::fs::read(&rollout_path)
+                .await
+                .expect("read active generation after rejected append"),
+            active_bytes
+        );
+        assert_eq!(
+            tokio::fs::read(&preserved_source_path)
+                .await
+                .expect("read preserved generation after rejected append"),
+            preserved_bytes
+        );
+        resumed
+            .discard()
+            .await
+            .expect("discard split-generation writer");
+    }
+
+    #[tokio::test]
+    async fn migrated_resume_appends_when_preserved_legacy_source_is_unchanged() {
+        let home = TempDir::new().expect("temp dir");
+        let (store, thread_id, rollout_path, preserved_source_path) =
+            migrate_live_legacy_thread(&home).await;
+        let model_context = store
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect("load migrated model context");
+        let active_bytes = tokio::fs::read(&rollout_path)
+            .await
+            .expect("read active migrated generation");
+        let preserved_bytes = tokio::fs::read(&preserved_source_path)
+            .await
+            .expect("read preserved legacy generation");
+        let resumed = LiveThread::resume(
+            store,
+            ThreadHistoryMode::PaginatedRefsV1,
+            ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                history: Some(Arc::new(model_context.items)),
+                include_archived: false,
+                metadata: thread_metadata(),
+            },
+        )
+        .await
+        .expect("resume unchanged migrated generation");
+
+        resumed
+            .append_items(&[response_message_item(
+                "user",
+                "append after clean migrated resume",
+            )])
+            .await
+            .expect("append to unchanged migrated generation");
+        resumed
+            .flush()
+            .await
+            .expect("flush unchanged migrated generation");
+        resumed
+            .shutdown()
+            .await
+            .expect("shutdown unchanged migrated generation");
+
+        let appended_bytes = tokio::fs::read(&rollout_path)
+            .await
+            .expect("read appended active generation");
+        assert!(appended_bytes.starts_with(&active_bytes));
+        assert!(appended_bytes.len() > active_bytes.len());
+        assert_eq!(
+            tokio::fs::read(&preserved_source_path)
+                .await
+                .expect("read unchanged preserved generation"),
+            preserved_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_thread_rejects_stale_or_sliced_history_before_opening_writer() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::new();
+        let mut create_params = create_thread_params(thread_id);
+        create_params.history_mode = ThreadHistoryMode::PaginatedRefsV1;
+        store
+            .create_thread(create_params)
+            .await
+            .expect("create reference-backed session");
+        store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .expect("persist reference-backed session");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush reference-backed session");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("reference-backed rollout path");
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("close initial writer");
+        let (canonical_history, _, _) = RolloutRecorder::load_rollout_items(rollout_path.as_path())
+            .await
+            .expect("load canonical history");
+        let mut stale_history = canonical_history.clone();
+        stale_history
+            .iter_mut()
+            .find_map(|item| match item {
+                RolloutItem::SessionMeta(meta_line) => Some(&mut meta_line.meta),
+                _ => None,
+            })
+            .expect("canonical session metadata")
+            .history_mode = ThreadHistoryMode::Paginated;
+        let original_len = tokio::fs::metadata(rollout_path.as_path())
+            .await
+            .expect("rollout metadata")
+            .len();
+
+        for supplied_history in [stale_history, vec![user_message_item("bounded suffix")]] {
+            let error = store
+                .resume_thread(ResumeThreadParams {
+                    thread_id,
+                    rollout_path: Some(rollout_path.clone()),
+                    history: Some(Arc::new(supplied_history)),
+                    include_archived: false,
+                    metadata: thread_metadata(),
+                })
+                .await
+                .expect_err("stale or sliced history must be reloaded");
+            assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+            assert_eq!(
+                tokio::fs::metadata(rollout_path.as_path())
+                    .await
+                    .expect("rollout metadata after rejected resume")
+                    .len(),
+                original_len
+            );
+        }
+
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: Some(Arc::new(canonical_history)),
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("fresh canonical history should resume");
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown resumed writer");
+    }
+
+    #[tokio::test]
+    async fn resume_thread_rejects_context_staled_by_same_rollout_append() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let first_store = LocalThreadStore::new(config.clone(), /*state_db*/ None);
+        let thread_id = ThreadId::new();
+        let mut create_params = create_thread_params(thread_id);
+        create_params.history_mode = ThreadHistoryMode::PaginatedRefsV1;
+        first_store
+            .create_thread(create_params)
+            .await
+            .expect("create reference-backed session");
+        first_store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![response_message_item("user", "before concurrent append")],
+            })
+            .await
+            .expect("append initial context");
+        first_store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .expect("persist initial context");
+        first_store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush initial context");
+        let rollout_path = first_store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("reference-backed rollout path");
+        first_store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("close initial writer");
+        let stale_context = first_store
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect("load context before concurrent append");
+
+        let concurrent_store = LocalThreadStore::new(config, /*state_db*/ None);
+        concurrent_store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                history: None,
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("open concurrent writer");
+        concurrent_store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![response_message_item("assistant", "concurrent append")],
+            })
+            .await
+            .expect("append concurrent context");
+        concurrent_store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .expect("persist concurrent context");
+        concurrent_store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush concurrent context");
+        concurrent_store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("close concurrent writer");
+        let concurrent_len = tokio::fs::metadata(&rollout_path)
+            .await
+            .expect("metadata after concurrent append")
+            .len();
+
+        let error = first_store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                history: Some(Arc::new(stale_context.items)),
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect_err("context loaded before a same-path append must be rejected");
+        assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+        assert_eq!(
+            tokio::fs::metadata(&rollout_path)
+                .await
+                .expect("metadata after rejected stale resume")
+                .len(),
+            concurrent_len
+        );
+
+        let fresh_context = first_store
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect("reload context after concurrent append");
+        first_store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: Some(Arc::new(fresh_context.items)),
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("freshly reloaded context should resume");
+        first_store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown fresh resumed writer");
+    }
+
+    #[tokio::test]
+    async fn resume_thread_rejects_valid_but_superseded_explicit_rollout() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime.clone()));
+        let thread_id = ThreadId::new();
+        let mut create_params = create_thread_params(thread_id);
+        create_params.history_mode = ThreadHistoryMode::PaginatedRefsV1;
+        store
+            .create_thread(create_params)
+            .await
+            .expect("create reference-backed session");
+        store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .expect("persist reference-backed session");
+        store.flush_thread(thread_id).await.expect("flush session");
+        let superseded_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("initial rollout path");
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("close initial writer");
+
+        let replacement_rollout_id = ThreadId::new();
+        let replacement_path = superseded_path.with_file_name(format!(
+            "{}_{}.jsonl",
+            superseded_path
+                .file_stem()
+                .expect("rollout file stem")
+                .to_string_lossy(),
+            replacement_rollout_id
+        ));
+        tokio::fs::copy(&superseded_path, &replacement_path)
+            .await
+            .expect("copy replacement rollout");
+        let mut builder = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            replacement_path.clone(),
+            chrono::Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.history_mode = ThreadHistoryMode::PaginatedRefsV1;
+        builder.cwd = home.path().to_path_buf();
+        runtime
+            .upsert_thread(&builder.build("test-provider"))
+            .await
+            .expect("select replacement rollout");
+        let (superseded_history, _, _) =
+            RolloutRecorder::load_rollout_items(superseded_path.as_path())
+                .await
+                .expect("load superseded history");
+        let superseded_len = tokio::fs::metadata(&superseded_path)
+            .await
+            .expect("superseded metadata")
+            .len();
+        let replacement_len = tokio::fs::metadata(&replacement_path)
+            .await
+            .expect("replacement metadata")
+            .len();
+
+        let error = store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(superseded_path.clone()),
+                history: Some(Arc::new(superseded_history)),
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect_err("superseded rollout must not reopen");
+        assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+        assert_eq!(
+            tokio::fs::metadata(&superseded_path)
+                .await
+                .expect("superseded metadata after conflict")
+                .len(),
+            superseded_len
+        );
+        assert_eq!(
+            tokio::fs::metadata(&replacement_path)
+                .await
+                .expect("replacement metadata after conflict")
+                .len(),
+            replacement_len
+        );
+
+        let (replacement_history, _, _) =
+            RolloutRecorder::load_rollout_items(replacement_path.as_path())
+                .await
+                .expect("load replacement history");
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(replacement_path),
+                history: Some(Arc::new(replacement_history)),
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("selected replacement should reopen");
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown replacement writer");
+    }
+
+    #[tokio::test]
     async fn live_writers_reject_cross_process_create_and_resume() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
@@ -1676,7 +2177,9 @@ mod tests {
             .await
             .expect("read external live thread");
 
-        assert_eq!(thread.rollout_path, Some(rollout_path));
+        assert!(thread.rollout_path.is_some_and(|resumed_path| {
+            codex_utils_path::paths_match_after_normalization(resumed_path, rollout_path)
+        }));
         assert!(thread.history.expect("history").items.iter().any(|item| {
             matches!(
                 item,
@@ -1962,6 +2465,69 @@ mod tests {
         }
     }
 
+    async fn migrate_live_legacy_thread(
+        home: &TempDir,
+    ) -> (
+        Arc<LocalThreadStore>,
+        ThreadId,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime)));
+        let thread_id = ThreadId::new();
+        let live_thread = LiveThread::create(store.clone(), create_thread_params(thread_id))
+            .await
+            .expect("create legacy live thread");
+        live_thread
+            .append_items(&[user_message_item("before migration")])
+            .await
+            .expect("append legacy history");
+        live_thread.flush().await.expect("flush legacy history");
+        let rollout_path = live_thread
+            .local_rollout_path()
+            .await
+            .expect("load legacy rollout path")
+            .expect("local legacy rollout path");
+        live_thread
+            .shutdown()
+            .await
+            .expect("shutdown legacy live thread");
+
+        let report = store
+            .migrate_rollouts(RolloutMigrationOptions {
+                mode: RolloutMigrationMode::Apply,
+                thread_ids: vec![thread_id],
+                max_mib_per_second: None,
+            })
+            .await
+            .expect("migrate legacy live thread");
+        assert_eq!(report.outcomes.len(), 1);
+        let outcome = &report.outcomes[0];
+        assert_eq!(outcome.status, RolloutMigrationStatus::Migrated);
+        assert_eq!(outcome.rollout_path, rollout_path);
+        let preserved_source_path = outcome
+            .preserved_source_path
+            .clone()
+            .expect("migration should retain the legacy generation");
+        assert_eq!(
+            codex_rollout::read_session_meta_line(&rollout_path)
+                .await
+                .expect("read migrated session metadata")
+                .meta
+                .history_mode,
+            ThreadHistoryMode::PaginatedRefsV1
+        );
+
+        (store, thread_id, rollout_path, preserved_source_path)
+    }
+
     fn assert_paginated_threads_unsupported(err: ThreadStoreError) {
         assert!(matches!(
             err,
@@ -1988,6 +2554,21 @@ mod tests {
             text_elements: Vec::new(),
             ..Default::default()
         }))
+    }
+
+    fn response_message_item(role: &str, message: &str) -> RolloutItem {
+        RolloutItem::ResponseItem(
+            ResponseItem::Message {
+                id: None,
+                role: role.to_string(),
+                content: vec![ContentItem::InputText {
+                    text: message.to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        )
     }
 
     async fn assert_rollout_contains_message(path: &std::path::Path, expected: &str) {

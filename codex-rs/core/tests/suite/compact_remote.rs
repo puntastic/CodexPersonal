@@ -427,15 +427,30 @@ fn annotate_retained_user_in_rollout(path: &Path, retained_text: &str) -> Result
     Ok(())
 }
 
-fn assert_compacted_user_metadata(path: &Path, retained_text: &str) -> Result<()> {
-    let replacement_history = fs::read_to_string(path)?
+fn materialized_rollout_items(path: &Path) -> Result<Vec<RolloutItem>> {
+    let rollout_items = fs::read_to_string(path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
+        .map(|line| line.item)
+        .collect::<Vec<_>>();
+    let materialized = codex_history::materialize_compacted_histories(&rollout_items);
+    if !materialized.unresolved_item_ids.is_empty() {
+        return Err(anyhow::anyhow!(
+            "unresolved compacted history references: {}",
+            materialized.unresolved_item_ids.join(", ")
+        ));
+    }
+    Ok(materialized.rollout_items.into_owned())
+}
+
+fn assert_compacted_user_metadata(path: &Path, retained_text: &str) -> Result<()> {
+    let replacement_history = materialized_rollout_items(path)?
+        .into_iter()
         .rev()
-        .find_map(|line| match line.item {
+        .find_map(|item| match item {
             RolloutItem::Compacted(compacted) => compacted.replacement_history,
             _ => None,
         })
@@ -666,10 +681,9 @@ async fn remote_compact_v2_retains_only_client_developer_messages_when_enabled(
         .for_each(assert_compact_request_omits_harness_metadata);
 
     codex.shutdown_and_wait().await?;
-    let replacement_history = fs::read_to_string(&rollout_path)?
-        .lines()
-        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
-        .filter_map(|line| match line.item {
+    let replacement_history = materialized_rollout_items(&rollout_path)?
+        .into_iter()
+        .filter_map(|item| match item {
             RolloutItem::Compacted(compacted) => compacted.replacement_history,
             _ => None,
         })
@@ -3280,17 +3294,10 @@ async fn remote_compact_persists_replacement_history_in_rollout() -> Result<()> 
     assert_eq!(responses_mock.requests().len(), 1);
     assert_eq!(compact_mock.requests().len(), 1);
 
-    let rollout_text = fs::read_to_string(&rollout_path)?;
+    let rollout_items = materialized_rollout_items(&rollout_path)?;
     let mut saw_compacted_history = false;
-    for line in rollout_text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-    {
-        let Ok(entry) = serde_json::from_str::<RolloutLine>(line) else {
-            continue;
-        };
-        if let RolloutItem::Compacted(compacted) = entry.item
+    for item in rollout_items {
+        if let RolloutItem::Compacted(compacted) = item
             && compacted.message.is_empty()
             && let Some(replacement_history) = compacted.replacement_history.as_ref()
         {

@@ -61,6 +61,47 @@ fn paginated_session_meta_item(thread_id: ThreadId, cwd: &Path) -> RolloutItem {
     })
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PreviousThreadHistoryMode {
+    Legacy,
+    Paginated,
+}
+
+#[test]
+fn reference_backed_session_meta_is_rejected_by_previous_reader_schema() {
+    let thread_id = ThreadId::new();
+    let mut head = paginated_session_meta_item(thread_id, Path::new("/workspace"));
+    let RolloutItem::SessionMeta(meta) = &mut head else {
+        panic!("expected session metadata");
+    };
+    meta.meta.history_mode = ThreadHistoryMode::PaginatedRefsV1;
+    let encoded = serde_json::to_value(RolloutLine {
+        timestamp: "2026-08-26T00:00:00Z".to_string(),
+        ordinal: Some(0),
+        item: head,
+    })
+    .expect("gated metadata should serialize");
+    let history_mode = encoded
+        .get("payload")
+        .and_then(|payload| payload.get("history_mode"))
+        .cloned()
+        .expect("session metadata history mode");
+    assert_eq!(history_mode, serde_json::json!("paginated_refs_v1"));
+
+    // This is the schema known by the immediately preceding reader. Its SessionMeta guard runs
+    // on the rollout head before any checkpoint is replayed, so the new wire value fails closed
+    // rather than exposing a reference-backed checkpoint as a history-less legacy compaction.
+    assert!(serde_json::from_value::<PreviousThreadHistoryMode>(history_mode).is_err());
+
+    let current: RolloutLine =
+        serde_json::from_value(encoded).expect("current reader should accept gated metadata");
+    let RolloutItem::SessionMeta(meta) = current.item else {
+        panic!("expected current session metadata");
+    };
+    assert_eq!(meta.meta.history_mode, ThreadHistoryMode::PaginatedRefsV1);
+}
+
 fn agent_message_item(message: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
         message: message.to_string(),
@@ -608,6 +649,50 @@ fn strip_legacy_ghost_snapshot_keeps_checkpoint_metadata_aligned() {
         serde_json::json!([
             {"slot": "assistant"},
             {"slot": "user"}
+        ])
+    );
+}
+
+#[test]
+fn strip_legacy_ghost_snapshot_from_entry_backed_checkpoint() {
+    let mut value = serde_json::json!({
+        "type": "compacted",
+        "payload": {
+            "message": "summary",
+            "replacement_history_entries": [
+                {
+                    "type": "reference",
+                    "item_id": "retained-source"
+                },
+                {
+                    "type": "inline",
+                    "item": {
+                        "type": "ghost_snapshot",
+                        "ghost_commit": {"id": "deadbeef"}
+                    },
+                    "metadata": {"client_authored": true}
+                },
+                {
+                    "type": "inline",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": []
+                    }
+                }
+            ]
+        }
+    });
+
+    assert!(!strip_legacy_ghost_snapshot_rollout_line(&mut value));
+    assert_eq!(
+        value["payload"]["replacement_history_entries"],
+        serde_json::json!([
+            {"type": "reference", "item_id": "retained-source"},
+            {
+                "type": "inline",
+                "item": {"type": "message", "role": "user", "content": []}
+            }
         ])
     );
 }

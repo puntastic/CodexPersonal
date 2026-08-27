@@ -32,6 +32,12 @@ use serde::Serialize;
 use serde::Serializer;
 use serde::de::Error as _;
 
+mod compacted_history;
+pub use compacted_history::CompactedHistoryResolver;
+pub use compacted_history::MaterializedCompactedHistories;
+pub use compacted_history::materialize_compacted_histories;
+pub use compacted_history::resolve_checkpoint_at;
+
 /// A model-history item with room for history-only metadata.
 ///
 /// Persistence keeps the response item intact and stores its metadata separately.
@@ -143,10 +149,47 @@ impl JsonSchema for RolloutItem {
 
 mod rollout_payload;
 
+/// A replacement-history entry stored inline or resolved by a persisted item ID.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompactedHistoryEntry {
+    Inline {
+        item: Box<ResponseItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<CodexHarnessMetadata>,
+    },
+    Reference {
+        item_id: String,
+    },
+}
+
+impl CompactedHistoryEntry {
+    /// Returns the response-item envelope when this entry stores its item inline.
+    pub fn into_inline(self) -> Option<ResponseItemEnvelope> {
+        match self {
+            Self::Inline { item, metadata } => Some(ResponseItemEnvelope {
+                item: *item,
+                metadata,
+            }),
+            Self::Reference { .. } => None,
+        }
+    }
+}
+
+impl From<ResponseItemEnvelope> for CompactedHistoryEntry {
+    fn from(envelope: ResponseItemEnvelope) -> Self {
+        Self::Inline {
+            item: Box::new(envelope.item),
+            metadata: envelope.metadata,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactedItem {
     pub message: String,
     pub replacement_history: Option<Vec<ResponseItemEnvelope>>,
+    pub replacement_history_entries: Option<Vec<CompactedHistoryEntry>>,
     pub mcp_resource_origins: Option<McpResourceOriginCheckpoint>,
     pub window_number: Option<u64>,
     pub first_window_id: Option<String>,

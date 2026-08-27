@@ -12,6 +12,7 @@ use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::UserMessageEvent;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -305,6 +306,24 @@ async fn worker_compresses_old_active_and_archived_rollouts() -> anyhow::Result<
             .join("rollout-compression.lock")
             .exists()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_keeps_reference_backed_rollouts_seekable_for_bounded_resume() -> anyhow::Result<()>
+{
+    let home = TempDir::new()?;
+    let uuid = Uuid::from_u128(27);
+    let thread_id = ThreadId::from_string(&uuid.to_string())?;
+    let path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
+    write_rollout(&path, thread_id, "reference-backed")?;
+    set_history_mode(&path, ThreadHistoryMode::PaginatedRefsV1)?;
+    set_old_mtime(&path)?;
+
+    worker::run(home.path().to_path_buf()).await?;
+
+    assert!(path.exists());
+    assert!(!compressed_rollout_path(&path).exists());
     Ok(())
 }
 
@@ -750,6 +769,21 @@ fn set_history_base(path: &std::path::Path, history_base: HistoryPosition) -> an
     let mut lines = contents.lines();
     let mut head: serde_json::Value = serde_json::from_str(lines.next().expect("session meta"))?;
     head["payload"]["history_base"] = serde_json::to_value(history_base)?;
+    let mut updated = serde_json::to_string(&head)?;
+    for line in lines {
+        updated.push('\n');
+        updated.push_str(line);
+    }
+    updated.push('\n');
+    fs::write(path, updated)?;
+    Ok(())
+}
+
+fn set_history_mode(path: &std::path::Path, history_mode: ThreadHistoryMode) -> anyhow::Result<()> {
+    let contents = fs::read_to_string(path)?;
+    let mut lines = contents.lines();
+    let mut head: serde_json::Value = serde_json::from_str(lines.next().expect("session meta"))?;
+    head["payload"]["history_mode"] = serde_json::to_value(history_mode)?;
     let mut updated = serde_json::to_string(&head)?;
     for line in lines {
         updated.push('\n');

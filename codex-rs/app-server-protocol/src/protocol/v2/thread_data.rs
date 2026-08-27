@@ -83,7 +83,9 @@ impl From<CoreThreadHistoryMode> for ThreadHistoryMode {
     fn from(value: CoreThreadHistoryMode) -> Self {
         match value {
             CoreThreadHistoryMode::Legacy => Self::Legacy,
-            CoreThreadHistoryMode::Paginated => Self::Paginated,
+            CoreThreadHistoryMode::Paginated | CoreThreadHistoryMode::PaginatedRefsV1 => {
+                Self::Paginated
+            }
         }
     }
 }
@@ -92,7 +94,10 @@ impl From<ThreadHistoryMode> for CoreThreadHistoryMode {
     fn from(value: ThreadHistoryMode) -> Self {
         match value {
             ThreadHistoryMode::Legacy => Self::Legacy,
-            ThreadHistoryMode::Paginated => Self::Paginated,
+            // The public API keeps one paginated mode. New paginated requests opt into the
+            // old-reader-visible storage gate so reference-backed checkpoints cannot be opened
+            // lossily by older binaries.
+            ThreadHistoryMode::Paginated => Self::PaginatedRefsV1,
         }
     }
 }

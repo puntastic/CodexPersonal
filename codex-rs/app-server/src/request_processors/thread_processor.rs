@@ -1418,7 +1418,7 @@ impl ThreadRequestProcessor {
             .sum();
         let history_mode = history_mode.or_else(|| {
             (!config.ephemeral && thread_store.supports_paginated_history_lists())
-                .then_some(ThreadHistoryMode::Paginated)
+                .then_some(ThreadHistoryMode::PaginatedRefsV1)
         });
         let mut thread_extension_init = ExtensionDataInit::new();
         if !selected_capability_roots.is_empty() {
@@ -2079,7 +2079,7 @@ impl ThreadRequestProcessor {
         let (thread_id, thread) = self.load_thread(&thread_id).await?;
         ensure_direct_input_allowed(thread.as_ref()).await?;
         let config_snapshot = thread.config_snapshot().await;
-        if !matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
+        if !config_snapshot.history_mode.is_paginated() {
             return Err(invalid_request(
                 "thread/revert only supports paginated threads",
             ));
@@ -2297,10 +2297,7 @@ impl ThreadRequestProcessor {
 
         let (thread_id, thread) = self.load_thread(&thread_id).await?;
         ensure_direct_input_allowed(thread.as_ref()).await?;
-        if matches!(
-            thread.config_snapshot().await.history_mode,
-            ThreadHistoryMode::Paginated
-        ) {
+        if thread.config_snapshot().await.history_mode.is_paginated() {
             return Err(invalid_request(
                 "paginated threads do not support thread/rollback",
             ));
@@ -2878,7 +2875,7 @@ impl ThreadRequestProcessor {
             else {
                 return Ok(None);
             };
-            if matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated) {
+            if stored_thread.history_mode.is_paginated() {
                 let (mut thread, _) =
                     thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
                 thread.turns = self
@@ -3025,7 +3022,7 @@ impl ThreadRequestProcessor {
             })
             .await
         {
-            Ok(thread) if thread.history_mode == ThreadHistoryMode::Paginated => {
+            Ok(thread) if thread.history_mode.is_paginated() => {
                 return self
                     .paginated_thread_turns_list_response(
                         thread_uuid,
@@ -3666,7 +3663,10 @@ impl ThreadRequestProcessor {
             }
         };
         let paginated_thread_id = resume_source_thread.as_ref().and_then(|thread| {
-            matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
+            thread
+                .history_mode
+                .is_paginated()
+                .then_some(thread.thread_id)
         });
         let paginated_resume = paginated_thread_id.is_some();
         if paginated_resume && include_turns {
@@ -3906,7 +3906,7 @@ impl ThreadRequestProcessor {
                 );
                 let config_snapshot = codex_thread.config_snapshot().await;
                 let (turns_backwards_cursor, items_backwards_cursor) =
-                    if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
+                    if config_snapshot.history_mode.is_paginated() {
                         match Self::paginated_resume_backwards_cursors(
                             self.thread_store.as_ref(),
                             thread_id,
@@ -4115,8 +4115,7 @@ impl ThreadRequestProcessor {
         };
 
         if let Some((existing_thread_id, existing_thread, mut source_thread)) = running_thread {
-            let paginated_resume =
-                matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
+            let paginated_resume = source_thread.history_mode.is_paginated();
             let existing_thread_rollout_path = existing_thread.rollout_path();
             let active_path = existing_thread_rollout_path
                 .as_ref()
@@ -4370,7 +4369,7 @@ impl ThreadRequestProcessor {
         &self,
         stored_thread: StoredThread,
     ) -> Result<(InitialHistory, StoredThread), JSONRPCErrorError> {
-        if matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated) {
+        if stored_thread.history_mode.is_paginated() {
             let model_context = self
                 .thread_store
                 .load_latest_model_context(StoreLoadThreadHistoryParams {
@@ -4433,7 +4432,7 @@ impl ThreadRequestProcessor {
 
         let stored_thread = result.map_err(thread_store_resume_read_error)?;
         if let Some(requested_path) = path
-            && matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated)
+            && stored_thread.history_mode.is_paginated()
         {
             let current_thread = self
                 .thread_store
@@ -4640,7 +4639,7 @@ impl ThreadRequestProcessor {
             && let Some(title) = stored_thread.name.as_deref().map(str::trim)
             && !title.is_empty()
         {
-            if stored_thread.history_mode == ThreadHistoryMode::Paginated {
+            if stored_thread.history_mode.is_paginated() {
                 thread.name = Some(title.to_string());
             } else {
                 set_thread_name_from_title(thread, title.to_string());
@@ -4691,7 +4690,7 @@ impl ThreadRequestProcessor {
                 /*include_history*/ false,
             )
             .await?;
-        let paginated_source = matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
+        let paginated_source = source_thread.history_mode.is_paginated();
         if last_turn_id.is_some() && before_turn_id.is_some() {
             return Err(invalid_request(
                 "`beforeTurnId` cannot be combined with `lastTurnId`",

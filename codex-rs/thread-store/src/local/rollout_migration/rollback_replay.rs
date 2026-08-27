@@ -33,6 +33,7 @@ struct ReverseSegment {
 /// Rewrite needed when legacy reverse replay skips a compaction segment but still resumes from
 /// the suffix after that checkpoint.
 pub(super) struct ModelReplayPlan {
+    pub(super) selected_compaction: Option<usize>,
     pub(super) empty_replacement_history_compaction: Option<usize>,
 }
 
@@ -51,7 +52,8 @@ impl ModelReplayPlanner {
         let record = match item {
             RolloutItem::Compacted(compacted) => ReplayRecord::Compacted {
                 record_index,
-                has_replacement_history: compacted.replacement_history.is_some(),
+                has_replacement_history: compacted.replacement_history.is_some()
+                    || compacted.replacement_history_entries.is_some(),
             },
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
                 ReplayRecord::Rollback(rollback.num_turns)
@@ -166,6 +168,7 @@ impl ModelReplayPlanner {
             .flatten()
             .and_then(|start| start.checked_sub(1));
         ModelReplayPlan {
+            selected_compaction,
             empty_replacement_history_compaction,
         }
     }

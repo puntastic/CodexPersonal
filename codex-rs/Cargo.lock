@@ -4363,6 +4363,7 @@ dependencies = [
  "futures",
  "pretty_assertions",
  "pulldown-cmark",
+ "same-file",
  "serde",
  "serde_json",
  "sqlx",

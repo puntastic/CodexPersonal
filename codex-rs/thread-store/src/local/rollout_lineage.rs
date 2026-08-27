@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
-use codex_protocol::protocol::ThreadHistoryMode;
 
 use super::LocalThreadStore;
 use super::thread_rollout_resolver;
@@ -36,6 +35,21 @@ impl LocalThreadStore {
     ) -> ThreadStoreResult<RolloutLineage> {
         self.resolve_rollout_lineage_with_representation(
             requested_thread_id,
+            None,
+            LineageRepresentation::Existing,
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_rollout_lineage_from_rollout(
+        &self,
+        requested_thread_id: ThreadId,
+        rollout_id: ThreadId,
+        rollout_path: PathBuf,
+    ) -> ThreadStoreResult<RolloutLineage> {
+        self.resolve_rollout_lineage_with_representation(
+            requested_thread_id,
+            Some((rollout_id, rollout_path)),
             LineageRepresentation::Existing,
         )
         .await
@@ -47,6 +61,7 @@ impl LocalThreadStore {
     ) -> ThreadStoreResult<RolloutLineage> {
         self.resolve_rollout_lineage_with_representation(
             requested_thread_id,
+            None,
             LineageRepresentation::PlainForReference,
         )
         .await
@@ -55,6 +70,7 @@ impl LocalThreadStore {
     async fn resolve_rollout_lineage_with_representation(
         &self,
         requested_thread_id: ThreadId,
+        mut initial_rollout: Option<(ThreadId, PathBuf)>,
         representation: LineageRepresentation,
     ) -> ThreadStoreResult<RolloutLineage> {
         let mut segments = Vec::new();
@@ -70,24 +86,29 @@ impl LocalThreadStore {
                     Some(self.live_writer_locks.lock(coordination_id).await)
                 }
             };
-            let (rollout_id, rollout_path) = match next_rollout_id {
-                Some(rollout_id) => {
-                    let rollout_path = resolve_rollout_path_by_id(self, rollout_id)
+            let (rollout_id, rollout_path) = match initial_rollout.take() {
+                Some(initial_rollout) => initial_rollout,
+                None => match next_rollout_id {
+                    Some(rollout_id) => {
+                        let rollout_path = resolve_rollout_path_by_id(self, rollout_id)
+                            .await?
+                            .ok_or_else(|| {
+                                malformed_lineage(rollout_id, "missing source rollout")
+                            })?;
+                        (rollout_id, rollout_path)
+                    }
+                    None => {
+                        let resolved = thread_rollout_resolver::resolve_current_including_archived(
+                            self,
+                            requested_thread_id,
+                        )
                         .await?
-                        .ok_or_else(|| malformed_lineage(rollout_id, "missing source rollout"))?;
-                    (rollout_id, rollout_path)
-                }
-                None => {
-                    let resolved = thread_rollout_resolver::resolve_current_including_archived(
-                        self,
-                        requested_thread_id,
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        malformed_lineage(requested_thread_id, "missing source rollout")
-                    })?;
-                    (resolved.rollout_id, resolved.path)
-                }
+                        .ok_or_else(|| {
+                            malformed_lineage(requested_thread_id, "missing source rollout")
+                        })?;
+                        (resolved.rollout_id, resolved.path)
+                    }
+                },
             };
             if !seen.insert(rollout_id) {
                 return Err(malformed_lineage(requested_thread_id, "cycle detected"));
@@ -124,7 +145,7 @@ impl LocalThreadStore {
                     "source rollout belongs to another thread",
                 ));
             }
-            if meta.meta.history_mode != ThreadHistoryMode::Paginated {
+            if !meta.meta.history_mode.is_paginated() {
                 return Err(malformed_lineage(
                     requested_thread_id,
                     "source rollout is not paginated",
