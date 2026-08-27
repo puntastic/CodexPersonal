@@ -16,6 +16,7 @@ use crate::ThreadStoreResult;
 
 const WRITER_LOCK_DIR: &str = "thread-writer-locks";
 const COORDINATION_LOCK_FILE: &str = ".coordination.lock";
+const LIFECYCLE_LOCK_SUFFIX: &str = ".lifecycle.lock";
 
 pub(super) struct WriterLockCoordinator {
     directory: PathBuf,
@@ -26,6 +27,22 @@ pub(super) struct WriterLockGuard {
     coordinator: Arc<WriterLockCoordinator>,
     path: PathBuf,
     file: Option<File>,
+}
+
+/// Cross-process counterpart to the process-local lifecycle reservation.
+///
+/// Lifecycle files deliberately remain on disk after the guard is released. Shared locks make
+/// unlink-on-drop unsafe: another process may still hold the old file while a new caller opens a
+/// replacement inode. A stable zero-byte file per thread keeps every process on the same lock.
+#[derive(Debug)]
+pub(super) struct LifecycleLockGuard {
+    _file: File,
+}
+
+#[derive(Clone, Copy)]
+enum LifecycleLockMode {
+    Shared,
+    Exclusive,
 }
 
 impl WriterLockCoordinator {
@@ -86,6 +103,78 @@ impl WriterLockCoordinator {
         })
     }
 
+    /// Reserve a thread's lifecycle while a fork prepares and persists its child reference.
+    pub(super) async fn reserve_lifecycle(
+        self: &Arc<Self>,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<LifecycleLockGuard> {
+        self.acquire_lifecycle(thread_id, LifecycleLockMode::Shared)
+            .await
+    }
+
+    /// Exclude cross-process fork reservations while a destructive reference scan and delete run.
+    pub(super) async fn lock_lifecycle(
+        self: &Arc<Self>,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<LifecycleLockGuard> {
+        self.acquire_lifecycle(thread_id, LifecycleLockMode::Exclusive)
+            .await
+    }
+
+    async fn acquire_lifecycle(
+        self: &Arc<Self>,
+        thread_id: ThreadId,
+        mode: LifecycleLockMode,
+    ) -> ThreadStoreResult<LifecycleLockGuard> {
+        let coordinator = Arc::clone(self);
+        tokio::task::spawn_blocking(move || coordinator.acquire_lifecycle_blocking(thread_id, mode))
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!(
+                    "failed to join thread {thread_id} lifecycle lock acquisition: {err}"
+                ),
+            })?
+    }
+
+    fn acquire_lifecycle_blocking(
+        &self,
+        thread_id: ThreadId,
+        mode: LifecycleLockMode,
+    ) -> ThreadStoreResult<LifecycleLockGuard> {
+        fs::create_dir_all(&self.directory).map_err(|err| ThreadStoreError::Internal {
+            message: format!(
+                "failed to create thread writer lock directory {}: {err}",
+                self.directory.display()
+            ),
+        })?;
+        let path = self
+            .directory
+            .join(format!("{thread_id}{LIFECYCLE_LOCK_SUFFIX}"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!(
+                    "failed to open thread lifecycle lock {}: {err}",
+                    path.display()
+                ),
+            })?;
+        let result = match mode {
+            LifecycleLockMode::Shared => file.lock_shared(),
+            LifecycleLockMode::Exclusive => file.lock(),
+        };
+        result.map_err(|err| ThreadStoreError::Internal {
+            message: format!(
+                "failed to acquire thread lifecycle lock {}: {err}",
+                path.display()
+            ),
+        })?;
+        Ok(LifecycleLockGuard { _file: file })
+    }
+
     fn lock_coordination(&self) -> ThreadStoreResult<File> {
         fs::create_dir_all(&self.directory).map_err(|err| ThreadStoreError::Internal {
             message: format!(
@@ -121,6 +210,10 @@ impl WriterLockCoordinator {
             let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
+            // Lifecycle leases are stable rendezvous files, not stale exclusive-writer markers.
+            if file_name.ends_with(LIFECYCLE_LOCK_SUFFIX) {
+                continue;
+            }
             let Some(thread_id) = file_name.strip_suffix(".lock") else {
                 continue;
             };

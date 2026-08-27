@@ -46,6 +46,7 @@ use super::super::test_support::test_config;
 use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
+use crate::DeleteThreadsParams;
 use crate::ForkBoundary;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
@@ -1208,6 +1209,98 @@ async fn prepared_fork_reserves_source_until_child_reference_is_durable() {
 
     let error = delete
         .await
+        .expect_err("durable child reference protects its source");
+    assert!(
+        error
+            .to_string()
+            .contains("forked history still references")
+    );
+}
+
+#[tokio::test]
+async fn prepared_fork_reserves_source_across_stores_until_child_reference_is_durable() {
+    assert_cross_store_fork_delete_interleaving(/*batch_delete*/ false).await;
+}
+
+#[tokio::test]
+async fn prepared_fork_reserves_source_across_stores_during_batch_delete() {
+    assert_cross_store_fork_delete_interleaving(/*batch_delete*/ true).await;
+}
+
+async fn assert_cross_store_fork_delete_interleaving(batch_delete: bool) {
+    let home = TempDir::new().expect("temp dir");
+    let fork_store = projection_store(home.path()).await;
+    let source_thread_id = ThreadId::default();
+    create_paginated_thread(&fork_store, source_thread_id).await;
+    fork_store
+        .append_items(AppendThreadItemsParams {
+            thread_id: source_thread_id,
+            items: vec![turn_started("source-turn"), turn_completed("source-turn")],
+        })
+        .await
+        .expect("append source turn");
+    fork_store
+        .persist_thread(source_thread_id, PersistContext::Standard)
+        .await
+        .expect("persist source metadata");
+    fork_store
+        .shutdown_thread(source_thread_id)
+        .await
+        .expect("release source writer");
+
+    let prepared = fork_store
+        .prepare_fork(PrepareForkParams {
+            thread_id: source_thread_id,
+            boundary: ForkBoundary::Latest,
+        })
+        .await
+        .expect("prepare referenced fork");
+    let history_base = prepared.history_base.expect("source history base");
+
+    // A second LocalThreadStore has independent process-local lifecycle locks, just as another
+    // Codex process would. Its delete must wait on the file-backed reservation before scanning.
+    let delete_store =
+        LocalThreadStore::new(fork_store.config.clone(), fork_store.state_db().await);
+    let mut delete = tokio::spawn(async move {
+        if batch_delete {
+            delete_store
+                .delete_threads(DeleteThreadsParams {
+                    thread_ids: vec![source_thread_id],
+                })
+                .await
+        } else {
+            delete_store
+                .delete_thread(DeleteThreadParams {
+                    thread_id: source_thread_id,
+                })
+                .await
+        }
+    });
+    tokio::select! {
+        biased;
+        result = &mut delete => {
+            panic!("cross-store deletion completed before its child reference was durable: {result:?}")
+        }
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+    }
+
+    let child_thread_id = ThreadId::default();
+    create_paginated_subagent_thread(
+        &fork_store,
+        child_thread_id,
+        Some(history_base),
+        /*subagent_history_start_ordinal*/ None,
+    )
+    .await;
+    fork_store
+        .persist_thread(child_thread_id, PersistContext::Standard)
+        .await
+        .expect("persist child history reference");
+    drop(prepared);
+
+    let error = delete
+        .await
+        .expect("delete task should finish")
         .expect_err("durable child reference protects its source");
     assert!(
         error

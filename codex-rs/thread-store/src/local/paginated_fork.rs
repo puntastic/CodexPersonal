@@ -21,23 +21,32 @@ pub(super) async fn prepare(
         boundary,
     } = params;
     let source_reservation = store.live_writer_locks.reserve_lifecycle(thread_id).await;
+    let cross_process_source_reservation = store
+        .writer_lock_coordinator
+        .reserve_lifecycle(thread_id)
+        .await?;
     // Keep the source reserved until persistence and lineage materialization finish, even if the
     // caller cancels fork preparation.
     let lineage_store = store.clone();
-    let (lineage, source_reservation) = tokio::spawn(async move {
-        match live_writer::persist_thread(&lineage_store, thread_id).await {
-            Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
-            Err(err) => return Err(err),
-        }
-        let lineage = lineage_store
-            .resolve_rollout_lineage_for_reference(thread_id)
-            .await?;
-        Ok::<_, ThreadStoreError>((lineage, source_reservation))
-    })
-    .await
-    .map_err(|err| ThreadStoreError::Internal {
-        message: format!("failed to resolve fork lineage: {err}"),
-    })??;
+    let (lineage, source_reservation, cross_process_source_reservation) =
+        tokio::spawn(async move {
+            match live_writer::persist_thread(&lineage_store, thread_id).await {
+                Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+                Err(err) => return Err(err),
+            }
+            let lineage = lineage_store
+                .resolve_rollout_lineage_for_reference(thread_id)
+                .await?;
+            Ok::<_, ThreadStoreError>((
+                lineage,
+                source_reservation,
+                cross_process_source_reservation,
+            ))
+        })
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to resolve fork lineage: {err}"),
+        })??;
     let source_segment = lineage
         .segments()
         .last()
@@ -80,7 +89,7 @@ pub(super) async fn prepare(
         thread_id,
         history_base,
         model_context,
-        source_reservation,
+        (source_reservation, cross_process_source_reservation),
     ))
 }
 

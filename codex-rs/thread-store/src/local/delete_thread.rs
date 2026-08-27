@@ -78,6 +78,10 @@ pub(super) async fn delete_thread(
             .map_err(delete_migration_error)?
             .ok_or_else(migration_delete_conflict)?;
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
+    let _cross_process_lifecycle_guard = store
+        .writer_lock_coordinator
+        .lock_lifecycle(thread_id)
+        .await?;
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
     let deleted_thread_ids = HashSet::from([thread_id]);
     let reference_index = scan_reference_index(store, &deleted_thread_ids).await?;
@@ -113,6 +117,15 @@ pub(super) async fn delete_threads(
     let mut _lifecycle_guards = Vec::with_capacity(thread_ids.len());
     for thread_id in &thread_ids {
         _lifecycle_guards.push(store.live_writer_locks.lock_lifecycle(*thread_id).await);
+    }
+    let mut _cross_process_lifecycle_guards = Vec::with_capacity(thread_ids.len());
+    for &thread_id in &thread_ids {
+        _cross_process_lifecycle_guards.push(
+            store
+                .writer_lock_coordinator
+                .lock_lifecycle(thread_id)
+                .await?,
+        );
     }
     let mut _live_writer_guards = Vec::with_capacity(thread_ids.len());
     for &thread_id in &thread_ids {
