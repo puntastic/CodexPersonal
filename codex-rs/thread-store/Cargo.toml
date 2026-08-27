@@ -27,12 +27,14 @@ codex-utils-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
 futures = { workspace = true }
 pulldown-cmark = { workspace = true }
+same-file = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
 zstd = { workspace = true }
 
 [dev-dependencies]
@@ -40,4 +42,3 @@ codex-utils-absolute-path = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-uuid = { workspace = true }

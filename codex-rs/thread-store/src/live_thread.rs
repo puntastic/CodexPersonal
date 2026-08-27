@@ -152,7 +152,7 @@ impl LiveThread {
         let thread_id = params.thread_id;
         let should_load_history = params.history.is_none();
         let include_archived = params.include_archived;
-        let metadata = if history_mode == ThreadHistoryMode::Paginated
+        let metadata = if history_mode.is_paginated()
             && let Some(local_store) = thread_store.as_any().downcast_ref::<LocalThreadStore>()
             && let Some(state_db) = local_store.state_db().await
         {

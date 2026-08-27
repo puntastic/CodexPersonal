@@ -17,6 +17,7 @@ use codex_extension_api::ExtensionDataInit;
 use codex_protocol::intersect_effective_permission_profiles;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_utils_path_uri::PathUri;
+use std::collections::HashSet;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
 
@@ -99,6 +100,30 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
     }
 }
 
+pub(super) fn retained_checkpoint_reference_item_ids(
+    items: &[RolloutItem],
+    keep_start_index: usize,
+    selected_checkpoint_index: Option<usize>,
+) -> HashSet<String> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            *index >= keep_start_index
+                && selected_checkpoint_index.is_none_or(|base| *index >= base)
+        })
+        .filter_map(|(_, item)| match item {
+            RolloutItem::Compacted(compacted) => compacted.replacement_history_entries.as_deref(),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|entry| match entry {
+            codex_history::CompactedHistoryEntry::Reference { item_id } => Some(item_id.clone()),
+            codex_history::CompactedHistoryEntry::Inline { .. } => None,
+        })
+        .collect()
+}
+
 fn retain_forked_developer_message(item: &mut ResponseItem, usage_hint_texts: &[String]) -> bool {
     if !matches!(item, ResponseItem::Message { role, .. } if role == "developer") {
         return true;
@@ -137,7 +162,7 @@ async fn load_agent_model_context(
             .await?
             .history
             .map(|history| history.items)),
-        ThreadHistoryMode::Paginated => Ok(Some(
+        ThreadHistoryMode::Paginated | ThreadHistoryMode::PaginatedRefsV1 => Ok(Some(
             state
                 .load_latest_model_context(LoadThreadHistoryParams {
                     thread_id,
@@ -666,11 +691,10 @@ impl AgentControl {
                 let history_mode = if let Some(parent_thread_id) = options.parent_thread_id
                     && let Ok(parent_thread) = state.get_thread(parent_thread_id).await
                 {
-                    matches!(
-                        parent_thread.config_snapshot().await.history_mode,
-                        ThreadHistoryMode::Paginated
-                    )
-                    .then_some(ThreadHistoryMode::Paginated)
+                    let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
+                    parent_history_mode
+                        .is_paginated()
+                        .then_some(parent_history_mode)
                 } else {
                     None
                 };
@@ -853,8 +877,9 @@ impl AgentControl {
         parent_thread.ensure_rollout_materialized().await;
         parent_thread.flush_rollout().await?;
 
-        let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
-            .then_some(ThreadHistoryMode::Paginated);
+        let destination_history_mode = parent_history_mode
+            .is_paginated()
+            .then_some(parent_history_mode);
         let mut forked_rollout_items =
             load_agent_model_context(state, parent_thread_id, parent_history_mode)
                 .await?
@@ -873,10 +898,22 @@ impl AgentControl {
                 Some(meta_line.meta.selected_capability_roots.clone())
             })
             .unwrap_or_default();
-        if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-            forked_rollout_items =
-                truncate_rollout_to_last_n_fork_turns(forked_rollout_items, *last_n_turns);
-        }
+        let fork_keep_index = match fork_mode {
+            SpawnAgentForkMode::FullHistory => 0,
+            SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                fork_turn_suffix_start(&forked_rollout_items, *last_n_turns)
+            }
+        };
+        let selected_checkpoint_index =
+            crate::session::rollout_reconstruction::selected_surviving_complete_checkpoint_index(
+                &forked_rollout_items[fork_keep_index..],
+            )
+            .map(|index| fork_keep_index + index);
+        let requested_source_item_ids = retained_checkpoint_reference_item_ids(
+            &forked_rollout_items,
+            fork_keep_index,
+            selected_checkpoint_index,
+        );
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if multi_agent_version == MultiAgentVersion::V2 {
                 let parent_config = parent_thread.session.get_config().await;
@@ -893,16 +930,22 @@ impl AgentControl {
         let mut preserve_reference_context_item =
             matches!(fork_mode, SpawnAgentForkMode::FullHistory);
         if preserve_reference_context_item {
-            for item in forked_rollout_items.iter().rev() {
-                let RolloutItem::Compacted(compacted) = item else {
-                    continue;
-                };
+            let relevant_checkpoint = selected_checkpoint_index
+                .and_then(|index| forked_rollout_items.get(index))
+                .or_else(|| {
+                    forked_rollout_items[fork_keep_index..]
+                        .iter()
+                        .rev()
+                        .find(|item| matches!(item, RolloutItem::Compacted(_)))
+                });
+            if let Some(RolloutItem::Compacted(compacted)) = relevant_checkpoint {
                 // Legacy checkpoints force the child to rebuild context regardless of the
                 // live parent's reference baseline; an older superseded checkpoint does not.
-                if compacted.replacement_history.is_none() {
+                if compacted.replacement_history.is_none()
+                    && compacted.replacement_history_entries.is_none()
+                {
                     preserve_reference_context_item = false;
                 }
-                break;
             }
         }
         let mut replaced_parent_developer_instructions = false;
@@ -963,11 +1006,48 @@ impl AgentControl {
 
             true
         };
-        forked_rollout_items.retain_mut(|item| {
-            if !keep_forked_rollout_item(item, preserve_reference_context_item)
-                || destination_history_mode == Some(ThreadHistoryMode::Paginated)
+        // Walk the parent once. The source resolver sees omitted ancestry without expanding it;
+        // the destination resolver sees only exact values that the child writer can address.
+        // Each retained checkpoint is materialized, sanitized, and immediately re-encoded, so
+        // peak memory is one complete checkpoint rather than the sum of every historical one.
+        let mut source_resolver = codex_history::CompactedHistoryResolver::default();
+        let mut destination_resolver = codex_history::CompactedHistoryResolver::default();
+        let mut prepared_fork =
+            Vec::with_capacity(forked_rollout_items.len().saturating_sub(fork_keep_index));
+        for (index, mut item) in std::mem::take(&mut forked_rollout_items)
+            .into_iter()
+            .enumerate()
+        {
+            let keep_by_turn = index >= fork_keep_index;
+            let keep_checkpoint = selected_checkpoint_index.is_none_or(|base| index >= base);
+            let resolved_parent_history = if keep_by_turn
+                && keep_checkpoint
+                && let RolloutItem::Compacted(compacted) = &item
+            {
+                source_resolver
+                    .resolve_compacted_item(compacted)
+                    .map_err(|mut missing| {
+                        missing.sort_unstable();
+                        missing.dedup();
+                        CodexErr::Fatal(format!(
+                            "cannot fork thread with unresolved compacted history references: {}",
+                            missing.join(", ")
+                        ))
+                    })?
+            } else {
+                None
+            };
+            // Older superseded checkpoints may contain unrelated dangling references. Their
+            // explicit Inline/legacy values remain valid source carriers, but the checkpoint
+            // itself is neither resolved nor copied.
+            source_resolver.index_explicit_sources_for_ids(&item, &requested_source_item_ids);
+
+            if !keep_by_turn
+                || matches!(&item, RolloutItem::Compacted(_)) && !keep_checkpoint
+                || !keep_forked_rollout_item(&item, preserve_reference_context_item)
+                || destination_history_mode.is_some_and(ThreadHistoryMode::is_paginated)
                     && matches!(
-                        &*item,
+                        &item,
                         RolloutItem::EventMsg(
                             EventMsg::ItemCompleted(_)
                                 | EventMsg::TokenCount(_)
@@ -976,15 +1056,15 @@ impl AgentControl {
                         )
                     )
             {
-                return false;
+                continue;
             }
 
-            match item {
+            let keep_item = match &mut item {
                 RolloutItem::ResponseItem(response_item) => {
                     retain_forked_item(response_item, &mut replaced_parent_developer_instructions)
                 }
                 RolloutItem::Compacted(compacted) => {
-                    if let Some(replacement_history) = compacted.replacement_history.as_mut() {
+                    if let Some(mut replacement_history) = resolved_parent_history {
                         // Matches before this checkpoint cannot survive its replacement history.
                         replaced_parent_developer_instructions = false;
                         replacement_history.retain_mut(|response_item| {
@@ -993,6 +1073,22 @@ impl AgentControl {
                                 &mut replaced_parent_developer_instructions,
                             )
                         });
+                        compacted.replacement_history = Some(replacement_history);
+                        compacted.replacement_history_entries = None;
+                    }
+                    if destination_history_mode
+                        .is_some_and(ThreadHistoryMode::supports_compacted_history_references)
+                    {
+                        destination_resolver
+                            .reencode_item_with_backward_references(&mut item)
+                            .map_err(|mut missing| {
+                                missing.sort_unstable();
+                                missing.dedup();
+                                CodexErr::Fatal(format!(
+                                    "cannot persist fork with unresolved compacted history references: {}",
+                                    missing.join(", ")
+                                ))
+                            })?;
                     }
                     true
                 }
@@ -1009,8 +1105,19 @@ impl AgentControl {
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
                 RolloutItem::SecurityRiskScore(_) => false,
+            };
+            if !keep_item {
+                continue;
             }
-        });
+
+            if !matches!(&item, RolloutItem::Compacted(_))
+                && codex_rollout::is_persisted_rollout_item(&item, parent_history_mode)
+            {
+                destination_resolver.index_explicit_sources(&item);
+            }
+            prepared_fork.push(item);
+        }
+        forked_rollout_items = prepared_fork;
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
         // context omitted the parent's developer fragment, append the child's override so its
         // instructions still reach the model exactly once.

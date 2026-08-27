@@ -213,6 +213,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::exec_output::StreamOutput;
 
 mod code_mode_warning;
+mod compacted_history;
 pub(crate) mod context_window;
 mod environment;
 pub(crate) mod extension_metrics;
@@ -226,7 +227,7 @@ mod mcp_runtime;
 pub(crate) mod multi_agents;
 mod review;
 mod rollout_budget;
-mod rollout_reconstruction;
+pub(crate) mod rollout_reconstruction;
 #[allow(clippy::module_inception)]
 pub(crate) mod session;
 mod step_activation;
@@ -260,6 +261,8 @@ use self::turn::agent_message_text;
 use self::turn::collect_explicit_app_ids_from_skill_items;
 use self::turn::realtime_text_for_event;
 use self::turn_context::TurnContext;
+#[cfg(test)]
+mod compacted_history_tests;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
@@ -1338,19 +1341,21 @@ impl Session {
         state.clear_connector_selection();
     }
 
-    async fn record_initial_history(&self, conversation_history: InitialHistory) {
-        let (is_subagent, is_paginated_subagent) = {
+    async fn record_initial_history(
+        &self,
+        conversation_history: InitialHistory,
+    ) -> CodexResult<()> {
+        let (is_subagent, is_paginated_subagent, history_mode) = {
             let state = self.state.lock().await;
             let session_configuration = &state.session_configuration;
             (
                 session_configuration.session_source.is_non_root_agent(),
-                matches!(
-                    session_configuration.history_mode,
-                    ThreadHistoryMode::Paginated
-                ) && matches!(
-                    session_configuration.thread_source.as_ref(),
-                    Some(ThreadSource::Subagent | ThreadSource::GuardianReview)
-                ),
+                session_configuration.history_mode.is_paginated()
+                    && matches!(
+                        session_configuration.thread_source.as_ref(),
+                        Some(ThreadSource::Subagent | ThreadSource::GuardianReview)
+                    ),
+                session_configuration.history_mode,
             )
         };
         let has_prior_user_turns = initial_history_has_prior_user_turns(&conversation_history);
@@ -1380,7 +1385,7 @@ impl Session {
                 }
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
-                    .await;
+                    .await?;
 
                 // If resuming, warn when the last recorded model differs from the current one.
                 let curr: &str = turn_context.model_info().slug.as_str();
@@ -1418,9 +1423,42 @@ impl Session {
             }
             InitialHistory::Forked(mut rollout_items) => {
                 let turn_context = self.new_default_turn().await;
-                Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
+                // A reference-backed inherited prefix is immutable in another rollout. Giving a
+                // legacy no-ID ancestor a child-only ID would create a source identity that the
+                // history_base does not actually contain. Only locally persisted suffix items may
+                // receive fresh IDs here; copied forks own and persist their entire prefix.
+                Self::assign_missing_fork_rollout_response_item_ids(
+                    &mut rollout_items,
+                    &self.fork_persistence,
+                );
                 self.apply_rollout_reconstruction(&turn_context, &rollout_items)
-                    .await;
+                    .await?;
+
+                // Reconstruction identifies exact sources that would be referenceable if this
+                // were a resumed thread. A fork has a different durability boundary, so hold that
+                // candidate set aside until we can qualify it against the records the child can
+                // actually address. Copied forks need their prefix written locally; referenced
+                // forks can address only the inherited prefix plus any local suffix whose append
+                // succeeds.
+                let pending_fork_history = self.state.lock().await.take_persisted_history_items();
+                let mut durable_fork_sources = match &self.fork_persistence {
+                    ForkPersistence::Referenced {
+                        history_base: Some(_),
+                        inherited_item_count,
+                    } => codex_rollout::persisted_rollout_items(
+                        &rollout_items[..(*inherited_item_count).min(rollout_items.len())],
+                        history_mode,
+                    ),
+                    ForkPersistence::Referenced {
+                        history_base: None, ..
+                    } => Vec::new(),
+                    ForkPersistence::Copied if is_paginated_subagent => {
+                        // Paginated subagents write the inherited prefix while their LiveThread
+                        // is created, before this startup append.
+                        codex_rollout::persisted_rollout_items(&rollout_items, history_mode)
+                    }
+                    ForkPersistence::Copied => Vec::new(),
+                };
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
@@ -1453,7 +1491,22 @@ impl Session {
                         rollout_items.push(thread_settings_applied);
                     }
                 }
-                self.persist_rollout_items(&rollout_items).await;
+                let prefix_persisted = self.try_persist_rollout_items(&rollout_items).await;
+                if prefix_persisted {
+                    durable_fork_sources.extend(codex_rollout::persisted_rollout_items(
+                        &rollout_items,
+                        history_mode,
+                    ));
+                }
+                let durable_items =
+                    codex_history::CompactedHistoryResolver::filter_exact_explicit_sources(
+                        &durable_fork_sources,
+                        &pending_fork_history,
+                    );
+                self.state
+                    .lock()
+                    .await
+                    .replace_persisted_history_items(durable_items);
 
                 // Forked threads should remain file-backed immediately after startup.
                 self.ensure_rollout_materialized(PersistContext::Standard)
@@ -1478,6 +1531,7 @@ impl Session {
                     .await;
             }
         }
+        Ok(())
     }
 
     #[instrument(
@@ -1492,7 +1546,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
-    ) -> Option<PreviousTurnSettings> {
+    ) -> CodexResult<Option<PreviousTurnSettings>> {
         let rollout_reconstruction::RolloutReconstruction {
             mut history,
             previous_turn_settings,
@@ -1504,14 +1558,16 @@ impl Session {
             window_id,
         } = self
             .reconstruct_history_from_rollout(turn_context, rollout_items)
-            .await;
+            .await?;
         // Keep the recorded rollout unchanged. Prepare its reconstructed history before
         // installing it, so legacy media is processed once for this resume or fork and
         // will be processed again if the rollout is reconstructed in a future session.
         // Replay disables image-resize notices, so media preparation remains one-to-one. Keep
         // the prior batch behavior and carry history-only metadata in a positional sidecar.
-        let (mut prepared_history, metadata): (Vec<_>, Vec<_>) = history
-            .into_iter()
+        let persisted_history = history;
+        let (mut prepared_history, metadata): (Vec<_>, Vec<_>) = persisted_history
+            .iter()
+            .cloned()
             .map(|envelope| (envelope.item, envelope.metadata))
             .unzip();
         let _ = prepare_image_response_items(
@@ -1530,8 +1586,24 @@ impl Session {
             .zip(metadata)
             .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
             .collect();
+        // Reconstruction can synthesize model items (for example from a legacy typed
+        // inter-agent record), and some response variants are deliberately writer-filtered.
+        // Only exact envelopes with an explicit source in the loaded rollout may become future
+        // backward references.
+        let unchanged_source_candidates = persisted_history
+            .iter()
+            .zip(&history)
+            .filter(|(persisted, prepared)| persisted == prepared)
+            .map(|(persisted, _)| persisted.clone())
+            .collect::<Vec<_>>();
+        let persisted_items =
+            codex_history::CompactedHistoryResolver::filter_exact_explicit_sources(
+                rollout_items,
+                &unchanged_source_candidates,
+            );
         {
             let mut state = self.state.lock().await;
+            state.replace_persisted_history_items(persisted_items);
             state.replace_annotated_history(history, reference_context_item);
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
@@ -1562,7 +1634,7 @@ impl Session {
             self.set_auto_compact_window_estimated_prefill_for_scope(turn_context, prefix_tokens)
                 .await;
         }
-        previous_turn_settings
+        Ok(previous_turn_settings)
     }
 
     async fn set_auto_compact_window_estimated_prefill_for_scope(
@@ -3136,6 +3208,20 @@ impl Session {
         }
     }
 
+    fn assign_missing_fork_rollout_response_item_ids(
+        items: &mut [RolloutItem],
+        fork_persistence: &ForkPersistence,
+    ) {
+        let locally_owned_start = match fork_persistence {
+            ForkPersistence::Copied => 0,
+            ForkPersistence::Referenced {
+                inherited_item_count,
+                ..
+            } => (*inherited_item_count).min(items.len()),
+        };
+        Self::assign_missing_rollout_response_item_ids(&mut items[locally_owned_start..]);
+    }
+
     pub(crate) fn response_item_from_user_input(&self, input: Vec<UserInput>) -> ResponseItem {
         let mut item = ResponseItem::from(ResponseInputItem::from_user_input(
             input,
@@ -3198,7 +3284,7 @@ impl Session {
             .iter()
             .map(|envelope| envelope.item.clone())
             .collect::<Vec<_>>();
-        {
+        let persisted_items = {
             let mut state = self.state.lock().await;
             state
                 .current_time_reminder
@@ -3206,7 +3292,30 @@ impl Session {
             state
                 .history
                 .record_annotated_items(&items, turn_context.model_info().truncation_policy.into());
-        }
+            let active_by_id = state
+                .history
+                .annotated_items()
+                .iter()
+                .filter_map(|envelope| {
+                    envelope
+                        .item
+                        .id()
+                        .map(|item_id| (item_id.as_str(), envelope))
+                })
+                .collect::<HashMap<_, _>>();
+            // ContextManager may truncate selected tool outputs while recording them. Only make an
+            // ID referenceable when the value about to be persisted is byte-for-value identical
+            // to the live value compaction could later reuse under that ID.
+            items
+                .iter()
+                .filter_map(|envelope| {
+                    let item_id = envelope.item.id()?;
+                    (codex_rollout::should_persist_response_item(&envelope.item)
+                        && active_by_id.get(item_id.as_str()).copied() == Some(envelope))
+                    .then(|| envelope.clone())
+                })
+                .collect::<Vec<_>>()
+        };
         for image in image_preparations {
             self.services
                 .analytics_events_client
@@ -3217,7 +3326,12 @@ impl Session {
         }
         let rollout_items: Vec<RolloutItem> =
             items.into_iter().map(RolloutItem::ResponseItem).collect();
-        self.persist_rollout_items(&rollout_items).await;
+        if self.try_persist_rollout_items(&rollout_items).await {
+            self.state
+                .lock()
+                .await
+                .note_persisted_history_items(persisted_items);
+        }
         if turn_context.config.memories.disable_on_external_context
             && let Some(item) = response_items
                 .iter()
@@ -3497,9 +3611,19 @@ impl Session {
         for envelope in &mut items {
             Self::assign_missing_response_item_id(&mut envelope.item);
         }
+        let persisted_replacement_history = {
+            let state = self.state.lock().await;
+            compacted_history::encode_replacement_history(
+                &items,
+                state.persisted_history_items(),
+                state.session_configuration.history_mode,
+            )
+        };
+        let persisted_items = items.clone();
         let compacted_item = CompactedItem {
             message: metadata.message,
-            replacement_history: Some(items.clone()),
+            replacement_history: persisted_replacement_history.legacy,
+            replacement_history_entries: persisted_replacement_history.entries,
             mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
             window_number: Some(metadata.window_number),
             first_window_id: Some(metadata.window_ids.first_window_id.to_string()),
@@ -3521,8 +3645,15 @@ impl Session {
             }
         }
 
-        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
-            .await;
+        if self
+            .try_persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
+            .await
+        {
+            self.state
+                .lock()
+                .await
+                .replace_persisted_history_items(persisted_items);
+        }
         // Persist the baseline after the replacement history that established it.
         if let Some(world_state_item) = world_state_item {
             self.persist_rollout_items(&[RolloutItem::WorldState(world_state_item)])
@@ -3856,10 +3987,24 @@ impl Session {
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
-        if let Some(live_thread) = self.live_thread()
-            && let Err(e) = live_thread.append_items(items).await
-        {
-            error!("failed to record rollout items: {e:#}");
+        self.try_persist_rollout_items(items).await;
+    }
+
+    /// Returns whether the complete batch was accepted by the live rollout lineage.
+    ///
+    /// Reference-backed compaction must not call an item durable when its source append failed or
+    /// when this session has no persistent rollout. The public fire-and-report wrapper preserves
+    /// existing behavior for callers that do not build later storage references.
+    async fn try_persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
+        let Some(live_thread) = self.live_thread() else {
+            return false;
+        };
+        match live_thread.append_items(items).await {
+            Ok(()) => true,
+            Err(e) => {
+                error!("failed to record rollout items: {e:#}");
+                false
+            }
         }
     }
 

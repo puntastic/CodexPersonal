@@ -1,5 +1,4 @@
 use codex_protocol::ThreadId;
-use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
@@ -62,7 +61,7 @@ pub(super) async fn revert(
             message: format!("current rollout for {thread_id} belongs to another thread"),
         });
     }
-    if source_meta.history_mode != ThreadHistoryMode::Paginated {
+    if !source_meta.history_mode.is_paginated() {
         return Err(ThreadStoreError::InvalidRequest {
             message: format!("thread {thread_id} does not use paginated history"),
         });
@@ -152,7 +151,7 @@ async fn create_replacement_recorder(
     .with_rollout_id(rollout_id)
     .with_selected_capability_roots(source_meta.selected_capability_roots)
     .with_multi_agent_version(source_meta.multi_agent_version)
-    .with_history_mode(ThreadHistoryMode::Paginated)
+    .with_history_mode(source_meta.history_mode)
     .with_history_base(history_base)
     .with_subagent_history_start_ordinal(source_meta.subagent_history_start_ordinal);
     if let Some(context_window) = source_meta.context_window {

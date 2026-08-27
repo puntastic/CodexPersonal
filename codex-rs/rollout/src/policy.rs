@@ -13,7 +13,7 @@ pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistory
         RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
         RolloutItem::EventMsg(ev) => should_persist_event_msg(ev, history_mode),
-        RolloutItem::RealtimeItem(_) => matches!(history_mode, ThreadHistoryMode::Paginated),
+        RolloutItem::RealtimeItem(_) => history_mode.is_paginated(),
         // Persist Codex executive markers so we can analyze flows (e.g., compaction, API turns).
         RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
@@ -93,7 +93,7 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
             // Paginated rollouts store TurnItems.
             // Legacy rollouts keep only items with no lossless raw ResponseItem or legacy
             // equivalent.
-            matches!(history_mode, ThreadHistoryMode::Paginated)
+            history_mode.is_paginated()
                 || matches!(
                     event.item,
                     TurnItem::Plan(_) | TurnItem::Extension(ExtensionItem::Sleep(_))

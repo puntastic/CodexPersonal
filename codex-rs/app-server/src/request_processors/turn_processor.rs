@@ -1406,10 +1406,12 @@ impl TurnRequestProcessor {
         // AgentRunner::start still delegates to spawn_subagent, which forks from the parent's
         // full history. Paginated threads only allow bounded model-context reads, so keep this
         // closed until detached review has a bounded fork path.
-        if matches!(
-            parent_thread.config_snapshot().await.history_mode,
-            codex_protocol::protocol::ThreadHistoryMode::Paginated
-        ) {
+        if parent_thread
+            .config_snapshot()
+            .await
+            .history_mode
+            .is_paginated()
+        {
             return Err(invalid_request(
                 "paginated threads do not support detached review",
             ));

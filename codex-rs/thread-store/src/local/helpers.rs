@@ -253,7 +253,9 @@ pub(super) async fn resolve_thread_names(
             };
             let name = match history_mode {
                 ThreadHistoryMode::Legacy => distinct_thread_metadata_title(&metadata),
-                ThreadHistoryMode::Paginated => sqlite_thread_name(&metadata),
+                ThreadHistoryMode::Paginated | ThreadHistoryMode::PaginatedRefsV1 => {
+                    sqlite_thread_name(&metadata)
+                }
             };
             if let Some(name) = name {
                 names.insert(thread_id, name);
@@ -282,7 +284,7 @@ pub(super) fn distinct_thread_metadata_title(metadata: &ThreadMetadata) -> Optio
 }
 
 pub(super) fn set_thread_name(thread: &mut StoredThread, name: String) {
-    if thread.history_mode == ThreadHistoryMode::Paginated || thread.preview.trim() != name.trim() {
+    if thread.history_mode.is_paginated() || thread.preview.trim() != name.trim() {
         thread.name = Some(name);
     }
 }

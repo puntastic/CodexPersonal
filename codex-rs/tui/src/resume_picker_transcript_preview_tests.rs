@@ -73,6 +73,7 @@ fn legacy_transcript_preview_scans_tail_across_compaction() {
             RolloutItem::Compacted(CompactedItem {
                 message: String::from("summary that is not transcript text"),
                 replacement_history: None,
+                replacement_history_entries: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -204,6 +205,7 @@ fn legacy_transcript_preview_falls_back_for_oversized_hidden_record() {
             RolloutItem::Compacted(CompactedItem {
                 message: "x".repeat(MAX_LEGACY_TRANSCRIPT_PREVIEW_SCAN_BYTES),
                 replacement_history: None,
+                replacement_history_entries: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -231,6 +233,7 @@ fn legacy_transcript_preview_falls_back_when_scan_budget_is_exhausted() {
     let compacted = RolloutItem::Compacted(CompactedItem {
         message: "x".repeat(MAX_LEGACY_TRANSCRIPT_PREVIEW_SCAN_BYTES / 8),
         replacement_history: None,
+        replacement_history_entries: None,
         mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,

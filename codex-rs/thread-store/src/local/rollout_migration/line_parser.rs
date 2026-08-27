@@ -31,7 +31,9 @@ pub(super) fn parse_legacy_rollout_line(bytes: &[u8]) -> Result<Option<RolloutLi
 }
 
 pub(super) fn parse_legacy_rollout_value(mut value: Value) -> Result<Option<RolloutLine>, String> {
-    if should_skip_retired_record(&value) {
+    if codex_rollout::strip_legacy_ghost_snapshot_rollout_line(&mut value)
+        || should_skip_retired_record(&value)
+    {
         return Ok(None);
     }
     normalize_legacy_turn_context(&mut value);
@@ -48,13 +50,7 @@ fn should_skip_retired_record(value: &Value) -> bool {
     matches!(
         event_type(value),
         Some("guardian_assessment" | "thread_name_updated" | "undo_completed")
-    ) || (rollout_type(value) == Some("response_item")
-        && value
-            .get("payload")
-            .and_then(Value::as_object)
-            .and_then(|payload| payload.get("type"))
-            .and_then(Value::as_str)
-            == Some("ghost_snapshot"))
+    )
 }
 
 fn normalize_legacy_turn_context(value: &mut Value) {

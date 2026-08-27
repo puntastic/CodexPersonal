@@ -680,15 +680,19 @@ impl Session {
             .parent_thread_id
             .or_else(|| initial_history.get_resumed_parent_thread_id());
         session_configuration.parent_thread_id = parent_thread_id;
-        let is_paginated_subagent = matches!(
-            session_configuration.history_mode,
-            ThreadHistoryMode::Paginated
-        ) && matches!(
-            session_configuration.thread_source.as_ref(),
-            Some(ThreadSource::Subagent | ThreadSource::GuardianReview)
-        );
+        let is_paginated_subagent = session_configuration.history_mode.is_paginated()
+            && matches!(
+                session_configuration.thread_source.as_ref(),
+                Some(ThreadSource::Subagent | ThreadSource::GuardianReview)
+            );
         if let InitialHistory::Forked(items) = &mut initial_history {
-            Self::assign_missing_rollout_response_item_ids(items);
+            Self::assign_missing_fork_rollout_response_item_ids(items, &fork_persistence);
+            if matches!(&fork_persistence, ForkPersistence::Copied) {
+                *items = super::compacted_history::normalize_copied_fork_rollout(
+                    std::mem::take(items),
+                    session_configuration.history_mode,
+                )?;
+            }
         }
         let multi_agent_version = multi_agent_version.map(OnceLock::from).unwrap_or_default();
         let initial_multi_agent_version = multi_agent_version.get().copied();
@@ -1529,7 +1533,7 @@ impl Session {
             };
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
-            Box::pin(sess.record_initial_history(initial_history)).await;
+            Box::pin(sess.record_initial_history(initial_history)).await?;
             if restore_child_window {
                 sess.state.lock().await.restore_auto_compact_window(
                     /*window_number*/ 0,

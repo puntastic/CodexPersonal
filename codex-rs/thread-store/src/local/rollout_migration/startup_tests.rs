@@ -125,20 +125,46 @@ async fn records_and_advances_checked_thread() {
             .expect("read migrated metadata")
             .meta
             .history_mode,
-        ThreadHistoryMode::Paginated
+        ThreadHistoryMode::PaginatedRefsV1
     );
 
     let newer_thread_id = ThreadId::new();
-    move_to_timestamp(
+    let newer_path = move_to_timestamp(
         home.path(),
         write_rollout(home.path(), newer_thread_id, ThreadHistoryMode::Paginated),
         "2025/01/04",
         "2025-01-04T12-00-00",
     );
+    let (items, _, _) = RolloutRecorder::load_rollout_items(&newer_path)
+        .await
+        .expect("load newer inline paginated rollout");
+    let newer_metadata = codex_rollout::builder_from_items(items.as_slice(), &newer_path)
+        .expect("build newer thread metadata")
+        .build("test-provider");
+    store
+        .state_db()
+        .await
+        .expect("state db")
+        .upsert_thread(&newer_metadata)
+        .await
+        .expect("index newer inline paginated rollout");
     store
         .migrate_rollouts_on_startup()
         .await
-        .expect("check newer paginated rollout");
+        .expect("advance past contained inline paginated rollout");
+
+    assert_eq!(
+        store
+            .state_db()
+            .await
+            .expect("state db")
+            .get_thread(newer_thread_id)
+            .await
+            .expect("read contained paginated metadata")
+            .expect("contained paginated thread")
+            .history_mode,
+        ThreadHistoryMode::Paginated
+    );
 
     let state = store
         .state_db()
@@ -194,7 +220,53 @@ async fn checks_rollouts_within_the_cursor_lookback() {
             .expect("read migrated metadata")
             .meta
             .history_mode,
-        ThreadHistoryMode::Paginated
+        ThreadHistoryMode::PaginatedRefsV1
+    );
+}
+
+#[tokio::test]
+async fn new_refs_migration_id_full_scans_legacy_rollouts_hidden_by_the_old_cursor() {
+    let home = TempDir::new().expect("create Codex home");
+    let older_thread_id = ThreadId::new();
+    let older_path = move_to_timestamp(
+        home.path(),
+        write_rollout(home.path(), older_thread_id, ThreadHistoryMode::Legacy),
+        "2024/01/01",
+        "2024-01-01T12-00-00",
+    );
+    let newer_path = move_to_timestamp(
+        home.path(),
+        write_rollout(home.path(), ThreadId::new(), ThreadHistoryMode::Paginated),
+        "2025/01/03",
+        "2025-01-03T12-00-00",
+    );
+    let store = indexed_store(home.path()).await;
+    let old_cursor = super::thread_creation_cursor(&newer_path).expect("newer rollout cursor");
+    let state_db = store.state_db().await.expect("state db");
+    state_db
+        .advance_rollout_migration_state("legacy_to_paginated_v1", Some(&old_cursor))
+        .await
+        .expect("seed superseded migration cursor");
+    assert!(
+        state_db
+            .get_rollout_migration_state(super::LEGACY_TO_PAGINATED_MIGRATION_ID)
+            .await
+            .expect("read new migration state")
+            .is_none()
+    );
+
+    store
+        .migrate_rollouts_on_startup()
+        .await
+        .expect("full scan for new refs migration generation");
+
+    assert_eq!(
+        codex_rollout::read_session_meta_line(&older_path)
+            .await
+            .expect("read old legacy metadata")
+            .meta
+            .history_mode,
+        ThreadHistoryMode::PaginatedRefsV1
     );
 }
 
@@ -241,7 +313,7 @@ async fn recovers_pending_migrations_after_retrying_busy_rollouts() {
             .expect("read migrated metadata")
             .meta
             .history_mode,
-        ThreadHistoryMode::Paginated
+        ThreadHistoryMode::PaginatedRefsV1
     );
     assert!(!journal_path.exists());
     assert!(
@@ -289,7 +361,7 @@ async fn waits_for_a_live_writer_before_migrating() {
             .expect("read migrated metadata")
             .meta
             .history_mode,
-        ThreadHistoryMode::Paginated
+        ThreadHistoryMode::PaginatedRefsV1
     );
 }
 
@@ -328,7 +400,7 @@ async fn waits_for_rollout_maintenance_before_migrating() {
             .expect("read migrated metadata")
             .meta
             .history_mode,
-        ThreadHistoryMode::Paginated
+        ThreadHistoryMode::PaginatedRefsV1
     );
 }
 
@@ -466,13 +538,15 @@ async fn retries_busy_rollouts_after_archive_and_compression_move() {
         .await
         .expect("retry no-longer-busy rollout");
 
+    assert!(!compressed_path.exists());
+    assert!(archived_path.exists());
     assert_eq!(
-        codex_rollout::read_session_meta_line(&compressed_path)
+        codex_rollout::read_session_meta_line(&archived_path)
             .await
             .expect("read migrated metadata")
             .meta
             .history_mode,
-        ThreadHistoryMode::Paginated
+        ThreadHistoryMode::PaginatedRefsV1
     );
     assert!(
         state_db
@@ -546,6 +620,6 @@ async fn treats_writer_owned_empty_rollouts_as_busy() {
             .expect("read migrated metadata")
             .meta
             .history_mode,
-        ThreadHistoryMode::Paginated
+        ThreadHistoryMode::PaginatedRefsV1
     );
 }

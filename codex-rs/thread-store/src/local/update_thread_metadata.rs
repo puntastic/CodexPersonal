@@ -90,7 +90,7 @@ pub(super) async fn update_thread_metadata(
     } else {
         None
     };
-    let paginated = matches!(history_mode, Some(ThreadHistoryMode::Paginated));
+    let paginated = history_mode.is_some_and(ThreadHistoryMode::is_paginated);
     let require_sqlite_write =
         pending_patch.is_some() || sqlite_write_failure_should_block(&patch) || paginated;
     let mut updated = apply_metadata_update(
@@ -502,7 +502,7 @@ async fn apply_metadata_update(
                             .update_thread_title(thread_id, name.as_deref().unwrap_or_default())
                             .await
                     }
-                    ThreadHistoryMode::Paginated => {
+                    ThreadHistoryMode::Paginated | ThreadHistoryMode::PaginatedRefsV1 => {
                         state_db
                             .update_thread_name(thread_id, name.as_deref())
                             .await

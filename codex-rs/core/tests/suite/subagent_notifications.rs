@@ -1489,8 +1489,11 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             })
             .collect::<Vec<_>>();
         assert_ne!(window_ids[0], window_ids[1]);
-        let checkpoint = child_rollout
-            .get_rollout_items()
+        let child_rollout_items = child_rollout.get_rollout_items();
+        let materialized = codex_history::materialize_compacted_histories(child_rollout_items);
+        assert!(materialized.unresolved_item_ids.is_empty());
+        let checkpoint = materialized
+            .rollout_items
             .iter()
             .find_map(|item| match item {
                 RolloutItem::Compacted(checkpoint) => Some(checkpoint),

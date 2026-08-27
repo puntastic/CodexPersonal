@@ -30,6 +30,11 @@ pub(crate) struct SessionState {
     /// Persisted origin of the session base instructions, when known.
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
+    /// Response items whose complete values are reachable through the durable rollout lineage.
+    ///
+    /// IDs alone are insufficient because a provider can reuse an ID for a changed envelope. Keep
+    /// the exact durable value so a failed update can never make a stale source referenceable.
+    persisted_history_items: HashMap<String, ResponseItemEnvelope>,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) server_reasoning_included: bool,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
@@ -68,6 +73,7 @@ impl SessionState {
             session_configuration,
             base_instructions_provenance: None,
             history,
+            persisted_history_items: HashMap::new(),
             latest_rate_limits: None,
             server_reasoning_included: false,
             mcp_dependency_prompted: HashSet::new(),
@@ -114,6 +120,36 @@ impl SessionState {
 
     pub(crate) fn clone_history(&self) -> ContextManager {
         self.history.clone()
+    }
+
+    pub(crate) fn persisted_history_items(&self) -> &HashMap<String, ResponseItemEnvelope> {
+        &self.persisted_history_items
+    }
+
+    pub(crate) fn note_persisted_history_items(
+        &mut self,
+        items: impl IntoIterator<Item = ResponseItemEnvelope>,
+    ) {
+        for envelope in items {
+            if let Some(item_id) = envelope.item.id() {
+                self.persisted_history_items
+                    .insert(item_id.as_str().to_string(), envelope);
+            }
+        }
+    }
+
+    pub(crate) fn replace_persisted_history_items(
+        &mut self,
+        items: impl IntoIterator<Item = ResponseItemEnvelope>,
+    ) {
+        self.persisted_history_items.clear();
+        self.note_persisted_history_items(items);
+    }
+
+    pub(crate) fn take_persisted_history_items(&mut self) -> Vec<ResponseItemEnvelope> {
+        std::mem::take(&mut self.persisted_history_items)
+            .into_values()
+            .collect()
     }
 
     #[cfg(test)]

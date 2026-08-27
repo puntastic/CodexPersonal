@@ -1,4 +1,4 @@
-//! Decides whether startup needs to invoke legacy -> paginated rollout migration.
+//! Decides whether startup needs to invoke legacy -> reference-paginated rollout migration.
 //!
 //! It keeps startup cheap by storing a creation-ordered cursor in SQLite and checking only newer
 //! rollout files on later launches. When it finds legacy history or a pending recovery marker, it
@@ -31,12 +31,19 @@ use super::find_all_rollout_paths;
 use super::migration_error;
 use super::publish::migration_journal_path;
 use super::publish::pending_migration_thread_ids;
+use super::publish::read_migration_journal_recovery;
+use super::publish::retained_migration_recovery_path;
+use super::publish::retained_migration_requires_reconciliation;
+use super::publish::retained_migration_thread_ids;
+use super::publish::validate_migration_recovery;
 use super::telemetry::RolloutMigrationTrigger;
-use super::thread_id_from_rollout_filename;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
-const LEGACY_TO_PAGINATED_MIGRATION_ID: &str = "legacy_to_paginated_v1";
+// A new id intentionally invalidates the older legacy-to-inline-paginated cursor. Old inline
+// `Paginated` rollouts are contained byte-for-byte because descendants can hold frozen offsets
+// into them; only `Legacy` is rewritten behind the RefsV1 runtime gate.
+const LEGACY_TO_PAGINATED_MIGRATION_ID: &str = "legacy_to_paginated_refs_v1";
 const EMPTY_SKIP_REASON: &str = "empty";
 const FAILED_SKIP_REASON: &str = "failed";
 const MALFORMED_SESSION_META_SKIP_REASON: &str = "malformed_session_meta";
@@ -67,6 +74,9 @@ pub(super) async fn migrate_rollouts_on_startup(store: &LocalThreadStore) -> Thr
         .list_rollout_migration_skipped_rollouts(LEGACY_TO_PAGINATED_MIGRATION_ID)
         .await
         .map_err(migration_error)?;
+    if retained_rollouts_need_reconciliation(store, paths.as_slice()).await? {
+        return migrate_all_rollouts(store, paths, skipped_rollouts.as_slice()).await;
+    }
     retry_busy_rollouts(store, skipped_rollouts.as_slice(), paths.as_slice()).await?;
     skipped_rollouts = state_db
         .list_rollout_migration_skipped_rollouts(LEGACY_TO_PAGINATED_MIGRATION_ID)
@@ -134,13 +144,28 @@ async fn migrate_all_rollouts(
 ) -> ThreadStoreResult<()> {
     let skipped_file_names = skipped_rollout_file_names(store, existing_skips);
     let pending_thread_ids = pending_migration_thread_ids(&store.config.codex_home).await?;
+    let retained_thread_ids = retained_migration_thread_ids(&store.config.codex_home).await?;
+    let recovery_thread_ids = pending_thread_ids
+        .union(&retained_thread_ids)
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut recovery_file_names = HashSet::new();
+    for path in &paths_before_migration {
+        if codex_rollout::read_session_meta_line(path)
+            .await
+            .is_ok_and(|metadata| recovery_thread_ids.contains(&metadata.meta.id))
+            && let Some(file_name) = plain_rollout_file_name(path)
+        {
+            recovery_file_names.insert(file_name);
+        }
+    }
     let paths_to_migrate = paths_before_migration
         .iter()
         .filter(|path| {
             !plain_rollout_file_name(path)
                 .is_some_and(|file_name| skipped_file_names.contains(&file_name))
-                || thread_id_from_rollout_filename(path)
-                    .is_some_and(|thread_id| pending_thread_ids.contains(&thread_id))
+                || plain_rollout_file_name(path)
+                    .is_some_and(|file_name| recovery_file_names.contains(&file_name))
         })
         .cloned()
         .collect();
@@ -150,6 +175,58 @@ async fn migrate_all_rollouts(
     }
     // Only mark the pre-migration snapshot; newer rollouts wait for the next startup check.
     advance_last_checked_thread(store, paths_before_migration.as_slice()).await
+}
+
+async fn retained_rollouts_need_reconciliation(
+    store: &LocalThreadStore,
+    paths: &[PathBuf],
+) -> ThreadStoreResult<bool> {
+    let retained_thread_ids = retained_migration_thread_ids(&store.config.codex_home).await?;
+    for thread_id in retained_thread_ids {
+        let mut selected_path = None;
+        for path in paths {
+            if codex_rollout::read_session_meta_line(path)
+                .await
+                .is_ok_and(|metadata| {
+                    metadata.meta.id == thread_id
+                        && metadata.meta.history_mode == ThreadHistoryMode::PaginatedRefsV1
+                })
+            {
+                selected_path = Some(path.as_path());
+                break;
+            }
+        }
+        let Some(selected_path) = selected_path else {
+            let retained_path =
+                retained_migration_recovery_path(&store.config.codex_home, thread_id);
+            if let Some(recovery) = read_migration_journal_recovery(&retained_path).await? {
+                validate_migration_recovery(
+                    &store.config.codex_home,
+                    thread_id,
+                    &retained_path,
+                    &recovery,
+                    /*selected_published_path*/ None,
+                    /*require_publication_fingerprint*/ true,
+                )
+                .await?;
+            }
+            return Err(ThreadStoreError::Conflict {
+                message: format!(
+                    "thread {thread_id} has retained migration recovery but no visible paginated_refs_v1 rollout"
+                ),
+            });
+        };
+        if retained_migration_requires_reconciliation(
+            &store.config.codex_home,
+            thread_id,
+            selected_path,
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn retry_busy_rollouts(

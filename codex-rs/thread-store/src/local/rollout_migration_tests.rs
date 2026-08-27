@@ -11,6 +11,7 @@ use codex_extension_items::ExtensionItem;
 use codex_extension_items::image_generation::ImageGenerationFailure;
 use codex_extension_items::image_generation::ImageGenerationItem;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::items::ReasoningItem;
@@ -18,10 +19,12 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::McpResourceOrigin;
 use codex_protocol::mcp::McpResourceOriginCheckpoint;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -36,24 +39,33 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::CompactedHistoryEntry;
+use codex_rollout::CompactedHistoryResolver;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
+use codex_rollout::RolloutRecorder;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 
 use super::LocalThreadStore;
+use super::PreservedSourceRetirementStatus;
 use super::RolloutMigrationFailureReason;
 use super::RolloutMigrationMode;
 use super::RolloutMigrationOptions;
 use super::RolloutMigrationPaths;
 use super::RolloutMigrationProgress;
 use super::RolloutMigrationStatus;
+use super::RolloutRecordCursor;
+use super::RolloutRecordValidationError;
+use super::TrailingPartialPolicy;
 #[cfg(unix)]
 use super::decompress_rollout_to_path;
 use super::migration_journal_path;
+use super::preserved_legacy_rollout_path;
+use super::retained_migration_recovery_path;
 use super::telemetry::RolloutMigrationTrigger;
 use super::thread_history;
 use super::write_migration_journal;
@@ -73,6 +85,44 @@ use crate::UpdateThreadMetadataParams;
 use crate::local::test_support::test_config;
 
 const TIMESTAMP: &str = "2025-01-03T12:00:00Z";
+
+#[test]
+fn trailing_partial_policy_only_discards_truncated_legacy_json() {
+    assert!(
+        super::parse_rollout_record(
+            br#"{"timestamp":"unterminated""#,
+            /*terminated*/ false,
+            br#"{"timestamp":"unterminated""#.len() as u64,
+            RolloutRecordCursor::default(),
+            TrailingPartialPolicy::DiscardIncomplete,
+            /*require_rollout_line*/ false,
+        )
+        .expect("discard truncated legacy tail")
+        .is_none()
+    );
+    assert!(matches!(
+        super::parse_rollout_record(
+            b"{}",
+            /*terminated*/ false,
+            b"{}".len() as u64,
+            RolloutRecordCursor::default(),
+            TrailingPartialPolicy::DiscardIncomplete,
+            /*require_rollout_line*/ false,
+        ),
+        Err(RolloutRecordValidationError::Malformed { .. })
+    ));
+    assert!(matches!(
+        super::parse_rollout_record(
+            br#"{"timestamp":"unterminated""#,
+            /*terminated*/ false,
+            br#"{"timestamp":"unterminated""#.len() as u64,
+            RolloutRecordCursor::default(),
+            TrailingPartialPolicy::Reject,
+            /*require_rollout_line*/ false,
+        ),
+        Err(RolloutRecordValidationError::Malformed { .. })
+    ));
+}
 
 fn write_rollout(
     home: &Path,
@@ -127,6 +177,54 @@ fn write_rollout_with_fork(
     path
 }
 
+fn write_inline_paginated_rollout(
+    home: &Path,
+    thread_id: ThreadId,
+    source: SessionSource,
+    history_base: Option<HistoryPosition>,
+    subagent_history_start_ordinal: Option<u64>,
+    items: Vec<RolloutItem>,
+) -> PathBuf {
+    let directory = home.join("sessions/2025/01/03");
+    fs::create_dir_all(&directory).expect("create rollout directory");
+    let path = directory.join(format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl"));
+    let mut file = fs::File::create(&path).expect("create inline paginated rollout");
+    let first_ordinal = history_base.map_or(0, |base| base.end_ordinal_exclusive);
+    let metadata = SessionMeta {
+        session_id: thread_id.into(),
+        id: thread_id,
+        timestamp: TIMESTAMP.to_string(),
+        cwd: home.to_path_buf(),
+        originator: "test-originator".to_string(),
+        cli_version: "0.0.0".to_string(),
+        source,
+        model_provider: Some("test-provider".to_string()),
+        history_mode: ThreadHistoryMode::Paginated,
+        history_base,
+        subagent_history_start_ordinal,
+        ..SessionMeta::default()
+    };
+    let items = std::iter::once(RolloutItem::SessionMeta(SessionMetaLine {
+        meta: metadata,
+        git: None,
+    }))
+    .chain(items);
+    for (index, item) in items.enumerate() {
+        let line = RolloutLine {
+            timestamp: TIMESTAMP.to_string(),
+            ordinal: Some(first_ordinal + index as u64),
+            item,
+        };
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&line).expect("serialize paginated record")
+        )
+        .expect("write paginated record");
+    }
+    path
+}
+
 fn move_to_archived(home: &Path, path: PathBuf) -> PathBuf {
     let directory = home.join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR);
     fs::create_dir_all(&directory).expect("create archived rollout directory");
@@ -175,8 +273,61 @@ fn input_response_message(role: &str, text: &str) -> ResponseItem {
     }
 }
 
+fn input_response_message_with_id(role: &str, id: &str, content: Vec<ContentItem>) -> ResponseItem {
+    ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", id)),
+        role: role.to_string(),
+        content,
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 fn rollout_response_item(item: ResponseItem) -> RolloutItem {
     RolloutItem::ResponseItem(item.into())
+}
+
+fn response_item_without_id(mut item: ResponseItem) -> ResponseItem {
+    item.set_id(None);
+    item
+}
+
+fn envelopes_without_ids(
+    mut envelopes: Vec<codex_rollout::ResponseItemEnvelope>,
+) -> Vec<codex_rollout::ResponseItemEnvelope> {
+    for envelope in &mut envelopes {
+        envelope.item.set_id(None);
+    }
+    envelopes
+}
+
+fn serialized_response_record(item: ResponseItem) -> Vec<u8> {
+    let line = RolloutLine {
+        timestamp: TIMESTAMP.to_string(),
+        ordinal: None,
+        item: rollout_response_item(item),
+    };
+    let mut bytes = serde_json::to_vec(&line).expect("serialize response record");
+    bytes.push(b'\n');
+    bytes
+}
+
+fn fracture_json_string_newlines(record: &[u8]) -> Vec<u8> {
+    let mut fractured = Vec::with_capacity(record.len());
+    let mut index = 0;
+    let mut fracture_count = 0;
+    while index < record.len() {
+        if record[index..].starts_with(br"\n") {
+            fractured.push(b'\n');
+            fracture_count += 1;
+            index += 2;
+        } else {
+            fractured.push(record[index]);
+            index += 1;
+        }
+    }
+    assert!(fracture_count > 0, "record contains an escaped newline");
+    fractured
 }
 
 fn exec_completion(turn_id: &str, call_id: &str) -> RolloutItem {
@@ -230,6 +381,7 @@ fn compacted(replacement_history: Vec<ResponseItem>) -> RolloutItem {
     RolloutItem::Compacted(CompactedItem {
         message: "checkpoint".to_string(),
         replacement_history: Some(replacement_history.into_iter().map(Into::into).collect()),
+        replacement_history_entries: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
@@ -263,6 +415,147 @@ fn apply_options() -> RolloutMigrationOptions {
         mode: RolloutMigrationMode::Apply,
         max_mib_per_second: Some(1024),
         ..RolloutMigrationOptions::default()
+    }
+}
+
+struct SourceSnapshot {
+    bytes: Vec<u8>,
+    readonly: bool,
+    #[cfg(unix)]
+    mode: u32,
+}
+
+fn source_snapshot(path: &Path) -> SourceSnapshot {
+    let metadata = fs::metadata(path).expect("read source rollout metadata");
+    SourceSnapshot {
+        bytes: fs::read(path).expect("read source rollout"),
+        readonly: metadata.permissions().readonly(),
+        #[cfg(unix)]
+        mode: metadata.permissions().mode(),
+    }
+}
+
+fn copy_directory_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create copied Codex home directory");
+    for entry in fs::read_dir(source).expect("list source Codex home") {
+        let entry = entry.expect("read source Codex home entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().expect("read copied entry type");
+        if file_type.is_dir() {
+            copy_directory_tree(&source_path, &destination_path);
+        } else if file_type.is_file() {
+            match fs::copy(&source_path, &destination_path) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // SQLite can remove a WAL/SHM sidecar after the directory entry was observed.
+                }
+                Err(error) => panic!("copy Codex home file {source_path:?}: {error}"),
+            }
+        } else {
+            panic!("unexpected non-file Codex home entry: {source_path:?}");
+        }
+    }
+}
+
+fn file_tree_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn collect(root: &Path, directory: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in fs::read_dir(directory).expect("list snapshotted Codex home") {
+            let entry = entry.expect("read snapshotted Codex home entry");
+            let path = entry.path();
+            let file_type = entry.file_type().expect("read snapshotted entry type");
+            if file_type.is_dir() {
+                collect(root, &path, files);
+            } else if file_type.is_file() {
+                let file_name = entry.file_name();
+                let file_name = file_name.to_string_lossy();
+                if file_name.ends_with("-wal") || file_name.ends_with("-shm") {
+                    continue;
+                }
+                files.push((
+                    path.strip_prefix(root)
+                        .expect("snapshotted file belongs to Codex home")
+                        .to_path_buf(),
+                    fs::read(&path).expect("read snapshotted Codex home file"),
+                ));
+            } else {
+                panic!("unexpected non-file Codex home entry: {path:?}");
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect(root, root, &mut files);
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
+}
+
+fn sized_retired_record(record_bytes: usize) -> Vec<u8> {
+    let prefix = format!(
+        r#"{{"timestamp":"{TIMESTAMP}","type":"event_msg","payload":{{"type":"thread_name_updated","name":""#
+    );
+    let suffix = b"\"}}\n";
+    let name_bytes = record_bytes
+        .checked_sub(prefix.len() + suffix.len())
+        .expect("record size can contain the valid rollout envelope");
+    let mut record = Vec::with_capacity(record_bytes);
+    record.extend_from_slice(prefix.as_bytes());
+    record.extend(std::iter::repeat_n(b'x', name_bytes));
+    record.extend_from_slice(suffix);
+    assert_eq!(record.len(), record_bytes);
+    record
+}
+
+async fn assert_failed_migration_preserved_source(
+    store: &LocalThreadStore,
+    home: &Path,
+    thread_id: ThreadId,
+    path: &Path,
+    snapshot: &SourceSnapshot,
+) {
+    let current = source_snapshot(path);
+    assert_eq!(current.bytes, snapshot.bytes);
+    assert_eq!(current.readonly, snapshot.readonly);
+    #[cfg(unix)]
+    assert_eq!(current.mode, snapshot.mode);
+    assert_eq!(
+        codex_rollout::read_session_meta_line(path)
+            .await
+            .expect("read preserved session metadata")
+            .meta
+            .history_mode,
+        ThreadHistoryMode::Legacy
+    );
+    assert_eq!(
+        store
+            .state_db
+            .as_ref()
+            .expect("state db")
+            .get_thread(thread_id)
+            .await
+            .expect("read preserved thread metadata")
+            .expect("thread metadata")
+            .history_mode,
+        ThreadHistoryMode::Legacy
+    );
+    assert!(
+        thread_history::projection_state(store, thread_id)
+            .await
+            .expect("read projection state")
+            .is_none()
+    );
+    let staged_path = super::staged_rollout_path(path).expect("derive staged path");
+    for residue in [
+        staged_path.clone(),
+        super::rewritten_staged_rollout_path(&staged_path).expect("derive rewritten staged path"),
+        super::compressed_staged_rollout_path(path).expect("derive compressed staged path"),
+        super::decompressed_staged_rollout_path(path).expect("derive decompressed staged path"),
+        migration_journal_path(home, thread_id),
+    ] {
+        assert!(
+            !residue.exists(),
+            "unexpected migration residue: {residue:?}"
+        );
     }
 }
 
@@ -335,7 +628,7 @@ async fn migration_publishes_canonical_projected_history_and_is_idempotent() {
     assert!(matches!(
         &lines[0].item,
         RolloutItem::SessionMeta(metadata)
-            if metadata.meta.history_mode == ThreadHistoryMode::Paginated
+            if metadata.meta.history_mode == ThreadHistoryMode::PaginatedRefsV1
                 && metadata.meta.id == thread_id
                 && metadata.meta.history_base.is_none()
     ));
@@ -361,6 +654,672 @@ async fn migration_publishes_canonical_projected_history_and_is_idempotent() {
         RolloutMigrationStatus::AlreadyPaginated
     );
     assert_eq!(fs::read(&path).expect("read idempotent rollout"), bytes);
+}
+
+#[tokio::test]
+async fn migration_contains_inline_paginated_history_byte_for_byte_without_sqlite_promotion() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let history_base = HistoryPosition {
+        thread_id: ThreadId::new(),
+        end_ordinal_exclusive: 41,
+        end_byte_offset: 8_192,
+    };
+    let source = input_response_message_with_id(
+        "user",
+        "inherited-image",
+        vec![ContentItem::InputImage {
+            image_url: "data:image/png;base64,paginated-pass-through".to_string(),
+            detail: None,
+        }],
+    );
+    let path = write_inline_paginated_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::SubAgent(SubAgentSource::Other("test".to_string())),
+        Some(history_base),
+        Some(43),
+        vec![
+            rollout_response_item(source.clone()),
+            compacted(vec![source.clone()]),
+            agent_message("record that must not be synthesized or dropped"),
+        ],
+    );
+    let before = fs::read(&path).expect("read inline paginated source");
+    let store = indexed_store(home.path()).await;
+    let state_before = store
+        .state_db
+        .as_ref()
+        .expect("state db")
+        .get_thread(thread_id)
+        .await
+        .expect("read inline paginated metadata")
+        .expect("thread metadata");
+    assert_eq!(state_before.history_mode, ThreadHistoryMode::Paginated);
+
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("contain inline paginated rollout");
+
+    assert_eq!(
+        report.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated
+    );
+    assert_eq!(report.outcomes[0].preserved_source_path, None);
+    assert_eq!(fs::read(&path).expect("read contained rollout"), before);
+    let state_after = store
+        .state_db
+        .as_ref()
+        .expect("state db")
+        .get_thread(thread_id)
+        .await
+        .expect("read metadata")
+        .expect("thread metadata");
+    assert_eq!(state_after.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(state_after.rollout_path, state_before.rollout_path);
+
+    let second = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("rerun contained paginated rollout");
+    assert_eq!(
+        second.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated
+    );
+    assert_eq!(fs::read(&path).expect("read idempotent rollout"), before);
+    assert_eq!(second.outcomes[0].preserved_source_path, None);
+}
+
+#[tokio::test]
+async fn paginated_containment_does_not_resolve_or_rewrite_a_dangling_checkpoint() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let checkpoint = CompactedItem {
+        message: "dangling checkpoint".to_string(),
+        replacement_history: None,
+        replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
+            item_id: "missing-response-item".to_string(),
+        }]),
+        mcp_resource_origins: None,
+        window_number: None,
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    };
+    let path = write_inline_paginated_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        None,
+        None,
+        vec![RolloutItem::Compacted(checkpoint.clone())],
+    );
+    let before = fs::read(&path).expect("read source before failed upgrade");
+    let store = indexed_store(home.path()).await;
+    let mut limiter = super::RolloutMigrationRateLimiter::new(None).expect("create rate limiter");
+    store
+        .project_rollout_in_batches(thread_id, &path, &mut limiter)
+        .await
+        .expect("seed the usable old paginated projection");
+    let projection_before = thread_history::projection_state(&store, thread_id)
+        .await
+        .expect("read initial projection")
+        .expect("initial projection exists");
+
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("contain paginated rollout with dangling checkpoint");
+
+    assert_eq!(
+        report.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated
+    );
+    assert_eq!(fs::read(&path).expect("read preserved source"), before);
+    assert_eq!(
+        codex_rollout::read_session_meta_line(&path)
+            .await
+            .expect("read preserved metadata")
+            .meta
+            .history_mode,
+        ThreadHistoryMode::Paginated
+    );
+    let projection = thread_history::projection_state(&store, thread_id)
+        .await
+        .expect("read retained projection")
+        .expect("old paginated projection stays live");
+    assert_eq!(
+        (projection.next_byte_offset, projection.next_ordinal),
+        (
+            projection_before.next_byte_offset,
+            projection_before.next_ordinal
+        )
+    );
+    assert!(!migration_journal_path(home.path(), thread_id).exists());
+    assert!(
+        !preserved_legacy_rollout_path(&path)
+            .expect("derive preserved path")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn paginated_containment_leaves_a_trailing_partial_and_live_projection_untouched() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_inline_paginated_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        None,
+        None,
+        vec![user_message("complete paginated record")],
+    );
+    let store = indexed_store(home.path()).await;
+    let mut limiter = super::RolloutMigrationRateLimiter::new(None).expect("create rate limiter");
+    store
+        .project_rollout_in_batches(thread_id, &path, &mut limiter)
+        .await
+        .expect("seed old paginated projection");
+    let projection_before = thread_history::projection_state(&store, thread_id)
+        .await
+        .expect("read initial projection")
+        .expect("initial projection exists");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open paginated rollout")
+        .write_all(br#"{"timestamp":"unterminated""#)
+        .expect("append partial record");
+    let source = fs::read(&path).expect("read source with partial tail");
+
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("contain selected paginated rollout");
+
+    assert_eq!(
+        report.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated
+    );
+    assert_eq!(fs::read(&path).expect("read unchanged rollout"), source);
+    let projection_after = thread_history::projection_state(&store, thread_id)
+        .await
+        .expect("read retained projection")
+        .expect("projection remains usable");
+    assert_eq!(
+        (
+            projection_after.next_byte_offset,
+            projection_after.next_ordinal
+        ),
+        (
+            projection_before.next_byte_offset,
+            projection_before.next_ordinal
+        )
+    );
+    assert!(!migration_journal_path(home.path(), thread_id).exists());
+    assert!(
+        !preserved_legacy_rollout_path(&path)
+            .expect("derive preserved path")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn migration_stores_repeated_compaction_payload_once_without_changing_context() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let image_url = "data:image/png;base64,unique-compaction-payload";
+    let source = input_response_message_with_id(
+        "user",
+        "image-source",
+        vec![ContentItem::InputImage {
+            image_url: image_url.to_string(),
+            detail: None,
+        }],
+    );
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(source.clone()),
+            compacted(vec![source.clone()]),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate repeated compaction payload");
+
+    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    let output = fs::read_to_string(&path).expect("read migrated rollout");
+    assert_eq!(output.matches(image_url).count(), 1);
+
+    let mut lines = read_rollout(&path);
+    let checkpoint = lines
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::Compacted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .expect("reference-backed checkpoint");
+    assert_eq!(checkpoint.replacement_history, None);
+    assert_eq!(
+        checkpoint.replacement_history_entries,
+        Some(vec![CompactedHistoryEntry::Reference {
+            item_id: source.id().expect("source id").as_str().to_string(),
+        }])
+    );
+
+    let mut resolver = CompactedHistoryResolver::default();
+    for line in &mut lines {
+        resolver
+            .materialize_item(&mut line.item)
+            .expect("materialize migrated checkpoint");
+    }
+    let materialized = lines
+        .into_iter()
+        .find_map(|line| match line.item {
+            RolloutItem::Compacted(checkpoint) => checkpoint.replacement_history,
+            _ => None,
+        })
+        .expect("materialized replacement history");
+    assert_eq!(materialized, vec![source.into()]);
+}
+
+#[tokio::test]
+async fn migration_backfills_occurrence_id_for_repeated_no_id_image() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let image_url = "data:image/png;base64,historical-no-id-image";
+    let source = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image_url: image_url.to_string(),
+            detail: None,
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(source.clone()),
+            compacted(vec![source.clone()]),
+            compacted(vec![source.clone()]),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate repeated no-ID image");
+
+    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    let output = fs::read_to_string(&path).expect("read migrated rollout");
+    assert_eq!(output.matches(image_url).count(), 1);
+    let mut lines = read_rollout(&path);
+    let assigned_id = lines
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::ResponseItem(envelope) => envelope.item.id(),
+            _ => None,
+        })
+        .expect("top-level image received a stable ID")
+        .clone();
+    assert!(assigned_id.is_prefixed());
+    let checkpoint_entries = lines
+        .iter()
+        .filter_map(|line| match &line.item {
+            RolloutItem::Compacted(checkpoint) => checkpoint.replacement_history_entries.clone(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        checkpoint_entries,
+        vec![
+            vec![CompactedHistoryEntry::Reference {
+                item_id: assigned_id.to_string(),
+            }],
+            vec![CompactedHistoryEntry::Reference {
+                item_id: assigned_id.to_string(),
+            }],
+        ]
+    );
+    let mut resolver = CompactedHistoryResolver::default();
+    for line in &mut lines {
+        resolver
+            .materialize_item(&mut line.item)
+            .expect("materialize no-ID checkpoints");
+    }
+    let materialized_histories = lines
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(checkpoint) => checkpoint.replacement_history,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(materialized_histories.len(), 2);
+    for history in materialized_histories {
+        assert_eq!(envelopes_without_ids(history), vec![source.clone().into()]);
+    }
+}
+
+#[tokio::test]
+async fn migration_assigns_distinct_ids_to_duplicate_equal_no_id_occurrences() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let source = input_response_message("user", "duplicate but separately ordered");
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(source.clone()),
+            rollout_response_item(source.clone()),
+            compacted(vec![source.clone(), source]),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate duplicate equal occurrences");
+
+    let lines = read_rollout(&path);
+    let assigned_ids = lines
+        .iter()
+        .filter_map(|line| match &line.item {
+            RolloutItem::ResponseItem(envelope) => envelope.item.id().cloned(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(assigned_ids.len(), 2);
+    assert_ne!(assigned_ids[0], assigned_ids[1]);
+    let entries = lines
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::Compacted(checkpoint) => checkpoint.replacement_history_entries.as_ref(),
+            _ => None,
+        })
+        .expect("reference-backed checkpoint");
+    assert_eq!(
+        entries,
+        &vec![
+            CompactedHistoryEntry::Reference {
+                item_id: assigned_ids[0].to_string(),
+            },
+            CompactedHistoryEntry::Reference {
+                item_id: assigned_ids[1].to_string(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn migration_occurrence_ids_are_deterministic_for_byte_identical_rollout_copies() {
+    let left_home = TempDir::new().expect("create first Codex home");
+    let right_home = TempDir::new().expect("create second Codex home");
+    let thread_id = ThreadId::from_u128(0x1234);
+    let source = input_response_message("user", "same historical occurrence");
+    let left_path = write_rollout(
+        left_home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(source.clone()),
+            compacted(vec![source]),
+        ],
+    );
+    let relative_path = left_path
+        .strip_prefix(left_home.path())
+        .expect("rollout belongs to first home");
+    let right_path = right_home.path().join(relative_path);
+    fs::create_dir_all(right_path.parent().expect("rollout parent"))
+        .expect("create copied rollout directory");
+    fs::copy(&left_path, &right_path).expect("copy rollout byte-for-byte");
+    assert_eq!(
+        fs::read(&left_path).expect("read first source"),
+        fs::read(&right_path).expect("read copied source")
+    );
+    let left_store = indexed_store(left_home.path()).await;
+    let right_store = indexed_store(right_home.path()).await;
+
+    left_store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate first copy");
+    right_store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate second copy");
+
+    let assigned_id = |path: &Path| {
+        read_rollout(path)
+            .into_iter()
+            .find_map(|line| match line.item {
+                RolloutItem::ResponseItem(envelope) => envelope.item.id().cloned(),
+                _ => None,
+            })
+            .expect("migrated source has assigned ID")
+    };
+    assert_eq!(assigned_id(&left_path), assigned_id(&right_path));
+}
+
+#[tokio::test]
+async fn migration_recovers_missing_checkpoint_id_from_exact_explicit_occurrence() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let source = input_response_message_with_id(
+        "user",
+        "explicit-occurrence",
+        vec![ContentItem::InputText {
+            text: "checkpoint lost only its ID".to_string(),
+        }],
+    );
+    let mut checkpoint_copy = source.clone();
+    checkpoint_copy.set_id(None);
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(source.clone()),
+            compacted(vec![checkpoint_copy]),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate missing checkpoint ID");
+
+    let checkpoint = read_rollout(&path)
+        .into_iter()
+        .find_map(|line| match line.item {
+            RolloutItem::Compacted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .expect("migrated checkpoint");
+    assert_eq!(
+        checkpoint.replacement_history_entries,
+        Some(vec![CompactedHistoryEntry::Reference {
+            item_id: source.id().expect("explicit source ID").to_string(),
+        }])
+    );
+}
+
+#[tokio::test]
+async fn migration_keeps_first_unmatched_no_id_checkpoint_carrier_inline_then_references_it() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let image_url = "data:image/png;base64,checkpoint-first-carrier";
+    let source = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image_url: image_url.to_string(),
+            detail: None,
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![compacted(vec![source.clone()]), compacted(vec![source])],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate checkpoint-first carrier");
+
+    assert_eq!(
+        fs::read_to_string(&path)
+            .expect("read migrated rollout")
+            .matches(image_url)
+            .count(),
+        1
+    );
+    let checkpoints = read_rollout(&path)
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let carrier = checkpoints[0]
+        .replacement_history
+        .as_ref()
+        .expect("first checkpoint retains its new carrier inline");
+    let assigned_id = carrier[0]
+        .item
+        .id()
+        .expect("inline carrier received a stable ID")
+        .to_string();
+    assert_eq!(checkpoints[0].replacement_history_entries, None);
+    assert_eq!(
+        checkpoints[1].replacement_history_entries,
+        Some(vec![CompactedHistoryEntry::Reference {
+            item_id: assigned_id,
+        }])
+    );
+}
+
+#[tokio::test]
+async fn migration_uses_only_older_sources_and_reuses_prior_checkpoint_inlines() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let first = input_response_message_with_id(
+        "user",
+        "first",
+        vec![ContentItem::InputText {
+            text: "first".to_string(),
+        }],
+    );
+    let second = input_response_message_with_id(
+        "assistant",
+        "second",
+        vec![ContentItem::OutputText {
+            text: "second".to_string(),
+        }],
+    );
+    let checkpoint = |message: &str| CompactedItem {
+        message: message.to_string(),
+        replacement_history: None,
+        replacement_history_entries: None,
+        mcp_resource_origins: None,
+        window_number: None,
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    };
+    let mut first_checkpoint = checkpoint("first checkpoint");
+    first_checkpoint.replacement_history_entries = Some(vec![
+        CompactedHistoryEntry::Reference {
+            item_id: first.id().expect("first id").as_str().to_string(),
+        },
+        CompactedHistoryEntry::Inline {
+            item: Box::new(second.clone()),
+            metadata: None,
+        },
+    ]);
+    let mut second_checkpoint = checkpoint("second checkpoint");
+    second_checkpoint.replacement_history = Some(vec![first.clone().into(), second.clone().into()]);
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(first.clone()),
+            RolloutItem::Compacted(first_checkpoint),
+            RolloutItem::Compacted(second_checkpoint),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate chained compaction checkpoints");
+
+    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    let checkpoints = read_rollout(&path)
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 2);
+    assert_eq!(
+        checkpoints[0].replacement_history_entries,
+        Some(vec![
+            CompactedHistoryEntry::Reference {
+                item_id: first.id().expect("first id").as_str().to_string(),
+            },
+            CompactedHistoryEntry::Inline {
+                item: Box::new(second.clone()),
+                metadata: None,
+            },
+        ])
+    );
+    assert_eq!(
+        checkpoints[1].replacement_history_entries,
+        Some(vec![
+            CompactedHistoryEntry::Reference {
+                item_id: first.id().expect("first id").as_str().to_string(),
+            },
+            CompactedHistoryEntry::Reference {
+                item_id: second.id().expect("second id").as_str().to_string(),
+            },
+        ])
+    );
 }
 
 #[tokio::test]
@@ -570,7 +1529,7 @@ async fn migration_hoists_delayed_session_meta_before_paginated_history() {
         &lines[0].item,
         RolloutItem::SessionMeta(metadata)
             if metadata.meta.id == thread_id
-                && metadata.meta.history_mode == ThreadHistoryMode::Paginated
+                && metadata.meta.history_mode == ThreadHistoryMode::PaginatedRefsV1
     ));
     let turns = store
         .list_turns(ListTurnsParams {
@@ -770,7 +1729,9 @@ async fn migration_rolls_back_response_and_inter_agent_user_boundaries() {
         read_rollout(&contextual_path)
             .into_iter()
             .filter_map(|line| match line.item {
-                RolloutItem::ResponseItem(response) => Some(response.into_item()),
+                RolloutItem::ResponseItem(response) => {
+                    Some(response_item_without_id(response.into_item()))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>(),
@@ -810,7 +1771,9 @@ async fn migration_drops_trailing_context_when_rollback_arrives_before_next_turn
         read_rollout(&path)
             .into_iter()
             .filter_map(|line| match line.item {
-                RolloutItem::ResponseItem(response) => Some(response.into_item()),
+                RolloutItem::ResponseItem(response) => {
+                    Some(response_item_without_id(response.into_item()))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>(),
@@ -877,7 +1840,9 @@ async fn migration_does_not_coalesce_distinct_adjacent_user_records() {
         read_rollout(&path)
             .into_iter()
             .filter_map(|line| match line.item {
-                RolloutItem::ResponseItem(response) => Some(response.into_item()),
+                RolloutItem::ResponseItem(response) => {
+                    Some(response_item_without_id(response.into_item()))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>(),
@@ -1045,19 +2010,34 @@ async fn migration_rolls_back_inter_agent_metadata_with_its_delivery() {
 async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
-    let RolloutItem::Compacted(mut checkpoint) = compacted(vec![
-        input_response_message("user", "old question"),
-        ResponseItem::Message {
-            id: None,
-            role: "assistant".to_string(),
-            content: vec![ContentItem::OutputText {
-                text: "old answer".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ]) else {
-        unreachable!("compacted helper always creates a compaction checkpoint");
+    let prior_assistant = input_response_message_with_id(
+        "assistant",
+        "prior-assistant",
+        vec![ContentItem::OutputText {
+            text: "old answer".to_string(),
+        }],
+    );
+    let mut checkpoint = CompactedItem {
+        message: "checkpoint".to_string(),
+        replacement_history: None,
+        replacement_history_entries: Some(vec![
+            CompactedHistoryEntry::Inline {
+                item: Box::new(input_response_message("user", "old question")),
+                metadata: None,
+            },
+            CompactedHistoryEntry::Reference {
+                item_id: prior_assistant
+                    .id()
+                    .expect("prior assistant id")
+                    .as_str()
+                    .to_string(),
+            },
+        ]),
+        mcp_resource_origins: None,
+        window_number: Some(1),
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
     };
     checkpoint.mcp_resource_origins = Some(McpResourceOriginCheckpoint {
         origins: vec![McpResourceOrigin {
@@ -1077,6 +2057,7 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         thread_id,
         SessionSource::Cli,
         vec![
+            rollout_response_item(prior_assistant),
             started("keep-before-compaction"),
             user_message("old question"),
             completed("keep-before-compaction"),
@@ -1117,7 +2098,96 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         })
         .expect("retained compaction");
     assert_eq!(checkpoint.replacement_history, Some(Vec::new()));
+    assert_eq!(checkpoint.replacement_history_entries, None);
     assert_eq!(checkpoint.mcp_resource_origins, None);
+}
+
+#[tokio::test]
+async fn rollback_rewrite_resolves_requested_source_outside_selected_checkpoint() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let external_source = input_response_message_with_id(
+        "assistant",
+        "outside-selected-checkpoint",
+        vec![ContentItem::OutputText {
+            text: "externally sourced answer".to_string(),
+        }],
+    );
+    let external_source_id = external_source
+        .id()
+        .expect("external source id")
+        .as_str()
+        .to_string();
+    let rewritten_checkpoint = RolloutItem::Compacted(CompactedItem {
+        message: "newer checkpoint to rewrite".to_string(),
+        replacement_history: None,
+        replacement_history_entries: Some(vec![
+            CompactedHistoryEntry::Inline {
+                item: Box::new(input_response_message("user", "kept history")),
+                metadata: None,
+            },
+            CompactedHistoryEntry::Reference {
+                item_id: external_source_id,
+            },
+            CompactedHistoryEntry::Inline {
+                item: Box::new(input_response_message("user", "remove history")),
+                metadata: None,
+            },
+        ]),
+        mcp_resource_origins: None,
+        window_number: Some(2),
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    });
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(external_source.clone()),
+            // Reverse replay selects this older checkpoint, which deliberately does not carry the
+            // external source needed by the newer checkpoint's rollback rewrite.
+            compacted(vec![input_response_message("user", "kept history")]),
+            started("remove"),
+            user_message("remove history"),
+            completed("remove"),
+            rewritten_checkpoint,
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            started("replacement"),
+            user_message("replacement history"),
+            completed("replacement"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("resolve requested source while rewriting newer checkpoint");
+
+    let mut lines = read_rollout(&path);
+    let mut resolver = CompactedHistoryResolver::default();
+    for line in &mut lines {
+        resolver
+            .materialize_item(&mut line.item)
+            .expect("materialize rewritten rollback checkpoint");
+    }
+    let rewritten = lines
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(item) => Some(item),
+            _ => None,
+        })
+        .next_back()
+        .expect("rewritten checkpoint");
+    let history = rewritten
+        .replacement_history
+        .expect("rewritten checkpoint materializes completely");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].item, external_source);
 }
 
 #[tokio::test]
@@ -1254,6 +2324,7 @@ async fn migration_uses_turn_context_to_select_reverse_replay_anchor() {
                 items
                     .into_iter()
                     .map(codex_rollout::ResponseItemEnvelope::into_item)
+                    .map(response_item_without_id)
                     .collect::<Vec<_>>()
             }),
             _ => None,
@@ -1370,7 +2441,7 @@ async fn migration_drops_copied_user_fork_metadata_without_creating_a_history_ba
         RolloutItem::SessionMeta(metadata)
             if metadata.meta.id == thread_id
                 && metadata.meta.forked_from_id == Some(parent_id)
-                && metadata.meta.history_mode == ThreadHistoryMode::Paginated
+                && metadata.meta.history_mode == ThreadHistoryMode::PaginatedRefsV1
                 && metadata.meta.history_base.is_none()
     ));
     assert_eq!(
@@ -1385,7 +2456,10 @@ async fn migration_drops_copied_user_fork_metadata_without_creating_a_history_ba
             .into_iter()
             .filter_map(|line| match line.item {
                 RolloutItem::ResponseItem(item) => {
-                    Some(serde_json::to_value(item.item).expect("serialize migrated response"))
+                    Some(
+                        serde_json::to_value(response_item_without_id(item.item))
+                            .expect("serialize migrated response"),
+                    )
                 }
                 _ => None,
             })
@@ -1406,6 +2480,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
             RolloutItem::Compacted(CompactedItem {
                 message: "superseded checkpoint".repeat(1024),
                 replacement_history: Some(Vec::new()),
+                replacement_history_entries: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
                 first_window_id: None,
@@ -1426,6 +2501,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                     }
                     .into(),
                 ]),
+                replacement_history_entries: None,
                 mcp_resource_origins: None,
                 window_number: Some(2),
                 first_window_id: None,
@@ -1462,14 +2538,6 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
             completed("child-turn"),
         ],
     );
-    writeln!(
-        fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .expect("open legacy subagent rollout"),
-        "{{not valid rollout json"
-    )
-    .expect("append malformed record");
     let store = indexed_store(home.path()).await;
 
     store
@@ -1569,7 +2637,7 @@ async fn migration_projects_memory_consolidation_as_ordinary_history() {
     assert!(matches!(
         &lines[0].item,
         RolloutItem::SessionMeta(metadata)
-            if metadata.meta.history_mode == ThreadHistoryMode::Paginated
+            if metadata.meta.history_mode == ThreadHistoryMode::PaginatedRefsV1
                 && metadata.meta.subagent_history_start_ordinal.is_none()
     ));
     let turns = list_active_summary_turns(&store, thread_id).await;
@@ -1689,7 +2757,7 @@ async fn dry_run_reports_migration_order() {
 }
 
 #[tokio::test]
-async fn migration_preserves_compressed_rollouts_during_publish_and_recovery() {
+async fn migration_publishes_compressed_sources_as_plain_refs_and_retires_the_preserved_inode() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
     let path = write_rollout(
@@ -1710,40 +2778,112 @@ async fn migration_preserves_compressed_rollouts_during_publish_and_recovery() {
         .expect("migrate compressed rollout");
 
     assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
-    assert!(!path.exists());
-    assert!(compressed_path.exists());
+    assert!(path.exists());
+    assert!(!compressed_path.exists());
     assert_eq!(
-        codex_rollout::read_session_meta_line(&compressed_path)
+        codex_rollout::read_session_meta_line(&path)
             .await
-            .expect("read compressed metadata")
+            .expect("read plain metadata")
             .meta
             .history_mode,
-        ThreadHistoryMode::Paginated
+        ThreadHistoryMode::PaginatedRefsV1
+    );
+    assert_eq!(report.outcomes[0].rollout_path, path);
+    let preserved = report.outcomes[0]
+        .preserved_source_path
+        .as_ref()
+        .expect("compressed source is retained until explicit retirement")
+        .clone();
+    assert!(preserved.exists());
+    assert_eq!(
+        store
+            .state_db
+            .as_ref()
+            .expect("state db")
+            .get_thread(thread_id)
+            .await
+            .expect("read migrated metadata")
+            .expect("thread metadata")
+            .rollout_path,
+        path
     );
     let turns = list_active_summary_turns(&store, thread_id).await;
     assert_eq!(turns.turns.len(), 1);
     assert_eq!(turns.turns[0].items.len(), 2);
 
-    thread_history::delete_thread(&store, thread_id)
+    let retirement = store
+        .retire_preserved_rollout_sources_after_confirmed_quiescence(vec![thread_id])
         .await
-        .expect("simulate missing projection");
-    let journal_path = migration_journal_path(home.path(), thread_id);
-    write_migration_journal(&journal_path)
+        .expect("retire compressed source after confirmed quiescence");
+    assert_eq!(retirement.outcomes.len(), 1);
+    assert_eq!(
+        retirement.outcomes[0].status,
+        PreservedSourceRetirementStatus::Retired
+    );
+    assert_eq!(retirement.outcomes[0].preserved_source_path, preserved);
+    assert!(!preserved.exists());
+    assert!(path.exists());
+    assert!(!compressed_path.exists());
+}
+
+#[tokio::test]
+async fn migration_contains_an_archived_compressed_paginated_rollout_byte_for_byte() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let active_path = write_inline_paginated_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        None,
+        None,
+        vec![
+            user_message("archived paginated question"),
+            agent_message("archived paginated answer"),
+        ],
+    );
+    let archived_path = move_to_archived(home.path(), active_path.clone());
+    let compressed_path = compress_rollout(&archived_path);
+    let before = fs::read(&compressed_path).expect("read compressed paginated source");
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
         .await
-        .expect("simulate pending migration journal");
-    let recovered = store
-        .migrate_rollouts(apply_options())
-        .await
-        .expect("recover compressed rollout");
+        .expect("contain archived compressed paginated rollout");
 
     assert_eq!(
-        recovered.outcomes[0].status,
-        RolloutMigrationStatus::Migrated
+        report.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated
     );
-    assert!(recovered.outcomes[0].bytes_processed > 0);
-    assert!(compressed_path.exists());
-    assert!(!path.exists());
-    assert!(!journal_path.exists());
+    assert_eq!(report.outcomes[0].rollout_path, compressed_path);
+    assert!(!active_path.exists());
+    assert!(!archived_path.exists());
+    assert_eq!(
+        fs::read(&compressed_path).expect("read contained compressed rollout"),
+        before
+    );
+    assert_eq!(report.outcomes[0].preserved_source_path, None);
+    assert_eq!(
+        codex_rollout::read_session_meta_line(&compressed_path)
+            .await
+            .expect("read contained archived metadata")
+            .meta
+            .history_mode,
+        ThreadHistoryMode::Paginated
+    );
+    let state = store
+        .state_db
+        .as_ref()
+        .expect("state db")
+        .get_thread(thread_id)
+        .await
+        .expect("read archived metadata")
+        .expect("thread metadata");
+    assert_eq!(state.rollout_path, compressed_path);
+    assert_eq!(state.history_mode, ThreadHistoryMode::Paginated);
 }
 
 #[tokio::test]
@@ -1773,7 +2913,7 @@ async fn migration_migrates_archived_rollouts_without_unarchiving_them() {
     assert!(matches!(
         &read_rollout(&archived_path)[0].item,
         RolloutItem::SessionMeta(metadata)
-            if metadata.meta.history_mode == ThreadHistoryMode::Paginated
+            if metadata.meta.history_mode == ThreadHistoryMode::PaginatedRefsV1
     ));
     let turns = store
         .list_turns(ListTurnsParams {
@@ -1817,7 +2957,7 @@ async fn migration_retries_a_rollout_moved_after_path_discovery() {
     assert!(matches!(
         &read_rollout(&archived_path)[0].item,
         RolloutItem::SessionMeta(metadata)
-            if metadata.meta.history_mode == ThreadHistoryMode::Paginated
+            if metadata.meta.history_mode == ThreadHistoryMode::PaginatedRefsV1
     ));
 }
 
@@ -2034,6 +3174,319 @@ async fn migration_apply_conflicts_with_rollout_maintenance() {
 }
 
 #[tokio::test]
+async fn copied_home_retained_journal_cannot_reach_original_home_or_mutate_copy() {
+    let original_home = TempDir::new().expect("create original Codex home");
+    let relocated_home = TempDir::new().expect("create relocated Codex home");
+    let thread_id = ThreadId::new();
+    let original_path = write_rollout(
+        original_home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            user_message("relocated recovery question"),
+            agent_message("relocated recovery answer"),
+        ],
+    );
+    let original_store = indexed_store(original_home.path()).await;
+    let migrated = original_store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("migrate original Codex home");
+    assert_eq!(
+        migrated.outcomes[0].status,
+        RolloutMigrationStatus::Migrated
+    );
+    let original_published_path = migrated.outcomes[0].rollout_path.clone();
+    let original_preserved_path = migrated.outcomes[0]
+        .preserved_source_path
+        .clone()
+        .expect("retain original legacy source");
+    let original_retained_path = retained_migration_recovery_path(original_home.path(), thread_id);
+    assert!(original_published_path.exists());
+    assert!(original_preserved_path.exists());
+    assert!(original_retained_path.exists());
+    drop(original_store);
+
+    copy_directory_tree(original_home.path(), relocated_home.path());
+    let relocated_published_path = relocated_home.path().join(
+        original_published_path
+            .strip_prefix(original_home.path())
+            .expect("published rollout belongs to original home"),
+    );
+    let relocated_preserved_path = relocated_home.path().join(
+        original_preserved_path
+            .strip_prefix(original_home.path())
+            .expect("preserved rollout belongs to original home"),
+    );
+    let relocated_retained_path =
+        retained_migration_recovery_path(relocated_home.path(), thread_id);
+    let relocated_store = indexed_store(relocated_home.path()).await;
+    let original_before = file_tree_snapshot(original_home.path());
+    let published_before = fs::read(&relocated_published_path).expect("read copied publication");
+    let preserved_before = fs::read(&relocated_preserved_path).expect("read copied preservation");
+    let retained_before = fs::read(&relocated_retained_path).expect("read copied journal");
+    let metadata_before = relocated_store
+        .state_db
+        .as_ref()
+        .expect("state db")
+        .get_thread(thread_id)
+        .await
+        .expect("read copied thread metadata")
+        .expect("copied thread metadata");
+    let projection_before = thread_history::projection_state(&relocated_store, thread_id)
+        .await
+        .expect("read copied projection")
+        .expect("copied projection");
+
+    let refused = relocated_store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("report copied absolute-path recovery conflict");
+
+    let outcome = &refused.outcomes[0];
+    assert_eq!(outcome.status, RolloutMigrationStatus::Failed);
+    assert_eq!(
+        outcome.failure_reason,
+        Some(RolloutMigrationFailureReason::RecoveryStateConflict)
+    );
+    assert!(
+        outcome
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("outside this Codex home"))
+    );
+    assert_eq!(file_tree_snapshot(original_home.path()), original_before);
+    assert_eq!(
+        fs::read(&relocated_published_path).expect("read untouched copied publication"),
+        published_before
+    );
+    assert_eq!(
+        fs::read(&relocated_preserved_path).expect("read untouched copied preservation"),
+        preserved_before
+    );
+    assert_eq!(
+        fs::read(&relocated_retained_path).expect("read untouched copied journal"),
+        retained_before
+    );
+    let metadata_after = relocated_store
+        .state_db
+        .as_ref()
+        .expect("state db")
+        .get_thread(thread_id)
+        .await
+        .expect("read unchanged copied thread metadata")
+        .expect("copied thread metadata");
+    assert_eq!(metadata_after.history_mode, metadata_before.history_mode);
+    assert_eq!(metadata_after.rollout_path, metadata_before.rollout_path);
+    let projection_after = thread_history::projection_state(&relocated_store, thread_id)
+        .await
+        .expect("read unchanged copied projection")
+        .expect("copied projection");
+    assert_eq!(
+        (
+            projection_after.next_byte_offset,
+            projection_after.next_ordinal
+        ),
+        (
+            projection_before.next_byte_offset,
+            projection_before.next_ordinal
+        )
+    );
+    assert_eq!(original_path, original_published_path);
+}
+
+#[tokio::test]
+async fn copied_home_pending_publication_without_sqlite_rejects_old_paths_without_mutation() {
+    let original_home = TempDir::new().expect("create original Codex home");
+    let relocated_home = TempDir::new().expect("create relocated Codex home");
+    let thread_id = ThreadId::new();
+    write_rollout(
+        original_home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            user_message("pending relocation question"),
+            agent_message("pending relocation answer"),
+        ],
+    );
+    let original_store = indexed_store(original_home.path()).await;
+    let migrated = original_store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("migrate original Codex home");
+    assert_eq!(
+        migrated.outcomes[0].status,
+        RolloutMigrationStatus::Migrated
+    );
+    let original_retained_path = retained_migration_recovery_path(original_home.path(), thread_id);
+    let original_pending_path = migration_journal_path(original_home.path(), thread_id);
+    drop(original_store);
+    fs::rename(&original_retained_path, &original_pending_path)
+        .expect("simulate pending publication recovery");
+
+    copy_directory_tree(original_home.path(), relocated_home.path());
+    let relocated_pending_path = migration_journal_path(relocated_home.path(), thread_id);
+    assert!(relocated_pending_path.exists());
+    assert!(!retained_migration_recovery_path(relocated_home.path(), thread_id).exists());
+    let relocated_store =
+        LocalThreadStore::new(test_config(relocated_home.path()), /*state_db*/ None);
+    let original_before = file_tree_snapshot(original_home.path());
+    let relocated_before = file_tree_snapshot(relocated_home.path());
+
+    let refused = relocated_store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("report copied pending recovery conflict without SQLite");
+
+    let outcome = &refused.outcomes[0];
+    assert_eq!(outcome.status, RolloutMigrationStatus::Failed);
+    assert_eq!(
+        outcome.failure_reason,
+        Some(RolloutMigrationFailureReason::RecoveryStateConflict)
+    );
+    assert!(
+        outcome
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("outside this Codex home"))
+    );
+    assert_eq!(file_tree_snapshot(original_home.path()), original_before);
+    assert_eq!(file_tree_snapshot(relocated_home.path()), relocated_before);
+}
+
+#[tokio::test]
+async fn late_preserved_append_is_marked_and_later_migration_refuses_both_generations() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            user_message("split generation question"),
+            agent_message("split generation answer"),
+        ],
+    );
+    let mut old_writer = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open legacy writer before migration");
+    let store = indexed_store(home.path()).await;
+    let migrated = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("migrate before late legacy append");
+    assert_eq!(
+        migrated.outcomes[0].status,
+        RolloutMigrationStatus::Migrated
+    );
+    let published_path = migrated.outcomes[0].rollout_path.clone();
+    let preserved_path = migrated.outcomes[0]
+        .preserved_source_path
+        .clone()
+        .expect("retain legacy source after migration");
+    let retained_path = retained_migration_recovery_path(home.path(), thread_id);
+    let published_before = fs::read(&published_path).expect("read published generation");
+    let preserved_before = fs::read(&preserved_path).expect("read preserved generation");
+
+    let late_record = serialized_response_record(input_response_message(
+        "user",
+        "late append from pre-migration writer",
+    ));
+    old_writer
+        .write_all(&late_record)
+        .expect("append through pre-migration writer");
+    old_writer.sync_all().expect("sync late legacy append");
+    drop(old_writer);
+    let mut preserved_after_append = preserved_before.clone();
+    preserved_after_append.extend_from_slice(&late_record);
+    assert_eq!(
+        fs::read(&preserved_path).expect("read late preserved append"),
+        preserved_after_append
+    );
+    assert_eq!(
+        fs::read(&published_path).expect("read isolated published generation"),
+        published_before
+    );
+
+    let detected = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("detect late legacy append");
+    let detected = &detected.outcomes[0];
+    assert_eq!(detected.status, RolloutMigrationStatus::Failed);
+    assert_eq!(
+        detected.failure_reason,
+        Some(RolloutMigrationFailureReason::RecoveryStateConflict)
+    );
+    assert!(detected.message.as_deref().is_some_and(|message| {
+        message.contains("older writer changed the preserved legacy generation")
+            && message.contains("both generations were preserved")
+    }));
+    let marked_journal = fs::read(&retained_path).expect("read split-generation marker");
+    let marked: serde_json::Value =
+        serde_json::from_slice(&marked_journal).expect("parse split-generation marker");
+    assert_eq!(marked["split_generation_detected"], json!(true));
+    assert!(marked.get("retirement_started").is_none());
+    assert_eq!(
+        fs::read(&published_path).expect("read preserved publication after detection"),
+        published_before
+    );
+    assert_eq!(
+        fs::read(&preserved_path).expect("read preserved legacy after detection"),
+        preserved_after_append
+    );
+
+    let refused = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("refuse marked split generations");
+    let refused = &refused.outcomes[0];
+    assert_eq!(refused.status, RolloutMigrationStatus::Failed);
+    assert_eq!(
+        refused.failure_reason,
+        Some(RolloutMigrationFailureReason::RecoveryStateConflict)
+    );
+    assert!(refused.message.as_deref().is_some_and(|message| {
+        message.contains("legacy and paginated generations have diverged")
+            && message.contains("both were preserved for explicit reconciliation")
+    }));
+    assert_eq!(
+        fs::read(&published_path).expect("read final published generation"),
+        published_before
+    );
+    assert_eq!(
+        fs::read(&preserved_path).expect("read final preserved generation"),
+        preserved_after_append
+    );
+    assert_eq!(
+        fs::read(&retained_path).expect("read monotonic split-generation marker"),
+        marked_journal
+    );
+}
+
+#[tokio::test]
 async fn migration_recovers_a_published_rollout_with_missing_projection() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
@@ -2203,6 +3656,14 @@ async fn migration_recovers_a_compressed_published_rollout() {
     assert!(compressed_path.exists());
     assert!(!journal_path.exists());
     assert_eq!(
+        codex_rollout::read_session_meta_line(&compressed_path)
+            .await
+            .expect("read recovered canonical head")
+            .meta
+            .history_mode,
+        ThreadHistoryMode::PaginatedRefsV1
+    );
+    assert_eq!(
         store
             .state_db
             .as_ref()
@@ -2227,7 +3688,199 @@ async fn migration_recovers_a_compressed_published_rollout() {
 }
 
 #[tokio::test]
-async fn migration_skips_oversized_jsonl_records() {
+async fn migration_repairs_newline_split_json_string_without_losing_text() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(home.path(), thread_id, SessionSource::Cli, Vec::new());
+    let expected_text = [
+        "fragment one",
+        "fragment two",
+        "fragment three",
+        "fragment four",
+        "fragment five",
+        "fragment six",
+        "fragment seven",
+        "fragment eight",
+        "fragment nine",
+    ]
+    .join("\n");
+    let expected_item = ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "split-output".to_string(),
+        name: Some("custom".to_string()),
+        output: FunctionCallOutputPayload::from_text(expected_text.clone()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let fractured =
+        fracture_json_string_newlines(&serialized_response_record(expected_item.clone()));
+    assert_eq!(fractured.iter().filter(|byte| **byte == b'\n').count(), 9);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open legacy rollout")
+        .write_all(&fractured)
+        .expect("append fractured response record");
+    let source_bytes = fs::read(&path).expect("read fractured source");
+    let store = indexed_store(home.path()).await;
+
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions::default())
+        .await
+        .expect("dry-run fractured response record");
+    assert_eq!(dry_run.outcomes[0].status, RolloutMigrationStatus::Eligible);
+    assert_eq!(
+        fs::read(&path).expect("read source after dry-run"),
+        source_bytes
+    );
+
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate fractured response record");
+    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    assert_eq!(
+        read_rollout(&path)
+            .into_iter()
+            .filter_map(|line| match line.item {
+                RolloutItem::ResponseItem(item) => Some(response_item_without_id(item.item)),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![expected_item]
+    );
+}
+
+#[tokio::test]
+async fn newline_repaired_retired_record_fails_closed_instead_of_being_skipped() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(home.path(), thread_id, SessionSource::Cli, Vec::new());
+    let retired_record = format!(
+        r#"{{"timestamp":"{TIMESTAMP}","type":"event_msg","payload":{{"type":"thread_name_updated","name":"before\nafter"}}}}
+"#
+    );
+    let fractured = fracture_json_string_newlines(retired_record.as_bytes());
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open legacy rollout")
+        .write_all(&fractured)
+        .expect("append fractured retired record");
+    let source = source_snapshot(&path);
+    let store = indexed_store(home.path()).await;
+
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions::default())
+        .await
+        .expect("dry-run fractured retired record");
+    let apply = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("apply fractured retired record");
+
+    let dry_run = &dry_run.outcomes[0];
+    let apply = &apply.outcomes[0];
+    assert_failed_with_reason(
+        dry_run,
+        RolloutMigrationFailureReason::MalformedRolloutRecord,
+    );
+    assert_eq!(
+        (
+            dry_run.status,
+            dry_run.failure_reason,
+            dry_run.bytes_processed,
+            dry_run.message.as_deref(),
+        ),
+        (
+            apply.status,
+            apply.failure_reason,
+            apply.bytes_processed,
+            apply.message.as_deref(),
+        )
+    );
+    assert!(dry_run.message.as_deref().is_some_and(|message| {
+        message.contains("newline-repaired record is not a supported rollout line")
+    }));
+    assert_failed_migration_preserved_source(&store, home.path(), thread_id, &path, &source).await;
+}
+
+#[tokio::test]
+async fn newline_repaired_logical_record_over_limit_blocks_dry_run_and_apply() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(home.path(), thread_id, SessionSource::Cli, Vec::new());
+    let response_item = |text: String| ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "oversized-split-output".to_string(),
+        name: Some("custom".to_string()),
+        output: FunctionCallOutputPayload::from_text(text),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let base_text = "prefix\n\nsuffix";
+    let base_record = serialized_response_record(response_item(base_text.to_string()));
+    let observed_bytes = super::MAX_ROLLOUT_LINE_BYTES + 1;
+    let filler_bytes = observed_bytes
+        .checked_sub(base_record.len())
+        .expect("response record fits below migration safety limit");
+    let text = format!("prefix\n{}\nsuffix", "x".repeat(filler_bytes));
+    let logical_record = serialized_response_record(response_item(text));
+    assert_eq!(logical_record.len(), observed_bytes);
+    let fractured = fracture_json_string_newlines(&logical_record);
+    let byte_offset = fs::metadata(&path)
+        .expect("read metadata record size")
+        .len();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open legacy rollout")
+        .write_all(&fractured)
+        .expect("append oversized fractured response record");
+    let source = source_snapshot(&path);
+    let store = indexed_store(home.path()).await;
+
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions::default())
+        .await
+        .expect("dry-run oversized fractured response record");
+    let apply = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("apply oversized fractured response record");
+
+    let dry_run = &dry_run.outcomes[0];
+    let apply = &apply.outcomes[0];
+    assert_failed_with_reason(
+        dry_run,
+        RolloutMigrationFailureReason::OversizedRolloutRecord,
+    );
+    assert_eq!(
+        (
+            dry_run.status,
+            dry_run.failure_reason,
+            dry_run.bytes_processed,
+            dry_run.message.as_deref(),
+        ),
+        (
+            apply.status,
+            apply.failure_reason,
+            apply.bytes_processed,
+            apply.message.as_deref(),
+        )
+    );
+    assert!(
+        dry_run
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(&format!(
+                "rollout record at ordinal 1, byte offset {byte_offset} is {observed_bytes} bytes, exceeding the {}-byte limit",
+                super::MAX_ROLLOUT_LINE_BYTES
+            )))
+    );
+    assert_failed_migration_preserved_source(&store, home.path(), thread_id, &path, &source).await;
+}
+
+#[tokio::test]
+async fn migration_accepts_a_complete_record_at_the_safety_limit() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
     let path = write_rollout(
@@ -2236,34 +3889,83 @@ async fn migration_skips_oversized_jsonl_records() {
         SessionSource::Cli,
         vec![user_message("kept question")],
     );
-    let oversized_output = "x".repeat(super::MAX_ROLLOUT_LINE_BYTES);
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .expect("open legacy rollout");
-    writeln!(
-        file,
-        "{{\"timestamp\":\"{TIMESTAMP}\",\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":\"{oversized_output}\"}}}}"
-    )
-    .expect("write oversized rollout record");
-    drop(file);
+    let original = fs::read(&path).expect("read original rollout");
+    let mut source_bytes = sized_retired_record(super::MAX_ROLLOUT_LINE_BYTES);
+    source_bytes.extend_from_slice(&original);
+    fs::write(&path, source_bytes).expect("prepend safety-limit rollout record");
+    let source = source_snapshot(&path);
     let store = indexed_store(home.path()).await;
+
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions::default())
+        .await
+        .expect("validate safety-limit rollout record");
+    assert_eq!(dry_run.outcomes[0].status, RolloutMigrationStatus::Eligible);
+    assert_eq!(fs::read(&path).expect("read dry-run source"), source.bytes);
 
     let report = store
         .migrate_rollouts(apply_options())
         .await
-        .expect("migrate oversized rollout record");
+        .expect("migrate safety-limit rollout record");
 
     assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
-    assert!(
-        fs::metadata(&path)
-            .expect("read migrated rollout metadata")
-            .len()
-            < super::MAX_ROLLOUT_LINE_BYTES as u64
+    assert!(!migration_journal_path(home.path(), thread_id).exists());
+}
+
+#[tokio::test]
+async fn oversized_record_blocks_dry_run_and_apply_without_mutating_the_source() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![user_message("kept question")],
     );
-    let turns = list_active_summary_turns(&store, thread_id).await;
-    assert_eq!(turns.turns.len(), 1);
-    assert_eq!(turns.turns[0].items.len(), 1);
+    let observed_bytes = super::MAX_ROLLOUT_LINE_BYTES + 1;
+    let original = fs::read(&path).expect("read original rollout");
+    let mut source_bytes = sized_retired_record(observed_bytes);
+    source_bytes.extend_from_slice(&original);
+    fs::write(&path, source_bytes).expect("prepend oversized rollout record");
+    let byte_offset = 0;
+    let source = source_snapshot(&path);
+    let store = indexed_store(home.path()).await;
+
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions::default())
+        .await
+        .expect("dry-run oversized rollout record");
+    let apply = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("apply oversized rollout record");
+
+    let dry_run = &dry_run.outcomes[0];
+    let apply = &apply.outcomes[0];
+    assert_failed_with_reason(
+        dry_run,
+        RolloutMigrationFailureReason::OversizedRolloutRecord,
+    );
+    assert_eq!(
+        (
+            dry_run.status,
+            dry_run.failure_reason,
+            dry_run.bytes_processed,
+            dry_run.message.as_deref(),
+        ),
+        (
+            apply.status,
+            apply.failure_reason,
+            apply.bytes_processed,
+            apply.message.as_deref(),
+        )
+    );
+    let expected_message = format!(
+        "thread-store internal error: rollout migration failed: rollout record at ordinal 0, byte offset {byte_offset} is {observed_bytes} bytes, exceeding the {}-byte limit",
+        super::MAX_ROLLOUT_LINE_BYTES
+    );
+    assert_eq!(dry_run.message.as_deref(), Some(expected_message.as_str()));
+    assert_failed_migration_preserved_source(&store, home.path(), thread_id, &path, &source).await;
 }
 
 #[tokio::test]
@@ -2335,7 +4037,13 @@ async fn migration_reports_invalid_session_metadata() {
     let directory = home.path().join("sessions/2025/01/03");
     fs::create_dir_all(&directory).expect("create rollout directory");
     let path = directory.join(format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl"));
-    fs::write(path, "not a rollout record\n").expect("write malformed rollout");
+    let line = RolloutLine {
+        timestamp: TIMESTAMP.to_string(),
+        ordinal: None,
+        item: user_message("message before missing session metadata"),
+    };
+    let serialized = serde_json::to_string(&line).expect("serialize metadata-free rollout");
+    fs::write(path, format!("{serialized}\n")).expect("write metadata-free rollout");
     let store = indexed_store(home.path()).await;
 
     let report = store
@@ -2350,7 +4058,7 @@ async fn migration_reports_invalid_session_metadata() {
 }
 
 #[tokio::test]
-async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
+async fn complete_malformed_record_blocks_dry_run_and_apply_without_resynchronizing() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
     let path = write_rollout(
@@ -2363,7 +4071,9 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
         .append(true)
         .open(&path)
         .expect("open legacy rollout");
-    writeln!(file, "{{not valid rollout json").expect("append malformed record");
+    let malformed = b"{not valid rollout json\n";
+    let byte_offset = fs::metadata(&path).expect("read rollout metadata").len();
+    file.write_all(malformed).expect("append malformed record");
     let later_valid_line = RolloutLine {
         timestamp: TIMESTAMP.to_string(),
         ordinal: None,
@@ -2375,6 +4085,373 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
         serde_json::to_string(&later_valid_line).expect("serialize later valid record")
     )
     .expect("append later valid record");
+    drop(file);
+    let source = source_snapshot(&path);
+    let store = indexed_store(home.path()).await;
+
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions::default())
+        .await
+        .expect("dry-run malformed legacy rollout");
+    let apply = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("apply malformed legacy rollout");
+
+    let dry_run = &dry_run.outcomes[0];
+    let apply = &apply.outcomes[0];
+    assert_failed_with_reason(
+        dry_run,
+        RolloutMigrationFailureReason::MalformedRolloutRecord,
+    );
+    assert_eq!(
+        (
+            dry_run.status,
+            dry_run.failure_reason,
+            dry_run.bytes_processed,
+            dry_run.message.as_deref(),
+        ),
+        (
+            apply.status,
+            apply.failure_reason,
+            apply.bytes_processed,
+            apply.message.as_deref(),
+        )
+    );
+    assert!(
+        dry_run
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(&format!(
+                "rollout record at ordinal 2, byte offset {byte_offset} is malformed ({} bytes)",
+                malformed.len()
+            )))
+    );
+    assert_failed_migration_preserved_source(&store, home.path(), thread_id, &path, &source).await;
+}
+
+#[tokio::test]
+async fn unresolved_compaction_reference_fails_closed_and_preserves_source() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let missing_id = "msg_missing-compaction-source";
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![RolloutItem::Compacted(CompactedItem {
+            message: "broken checkpoint".to_string(),
+            replacement_history: None,
+            replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
+                item_id: missing_id.to_string(),
+            }]),
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+        })],
+    );
+    let source = source_snapshot(&path);
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("report unresolved compaction reference");
+
+    let outcome = &report.outcomes[0];
+    assert_failed_with_reason(
+        outcome,
+        RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+    );
+    assert!(
+        outcome
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(missing_id))
+    );
+    assert_failed_migration_preserved_source(&store, home.path(), thread_id, &path, &source).await;
+}
+
+#[tokio::test]
+async fn migration_preserves_unresolved_superseded_checkpoint_without_selecting_it() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let missing_id = "msg_missing-superseded-source";
+    let carried_source = input_response_message_with_id(
+        "user",
+        "superseded-inline-source",
+        vec![ContentItem::InputText {
+            text: "selected history".to_string(),
+        }],
+    );
+    let superseded = RolloutItem::Compacted(CompactedItem {
+        message: "superseded checkpoint".to_string(),
+        replacement_history: None,
+        replacement_history_entries: Some(vec![
+            CompactedHistoryEntry::Reference {
+                item_id: missing_id.to_string(),
+            },
+            CompactedHistoryEntry::Inline {
+                item: Box::new(carried_source.clone()),
+                metadata: None,
+            },
+        ]),
+        mcp_resource_origins: None,
+        window_number: Some(1),
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    });
+    let selected = compacted(vec![carried_source.clone()]);
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            superseded,
+            selected,
+            // Force the rollback-aware two-pass path without removing a turn. The reverse replay
+            // selector must validate the newer checkpoint, not every older retained checkpoint.
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 0,
+            })),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate rollout with superseded dangling checkpoint");
+
+    let checkpoints = read_rollout(&path)
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(item) => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 2);
+    assert_eq!(
+        checkpoints[0].replacement_history_entries,
+        Some(vec![
+            CompactedHistoryEntry::Reference {
+                item_id: missing_id.to_string(),
+            },
+            CompactedHistoryEntry::Inline {
+                item: Box::new(carried_source.clone()),
+                metadata: None,
+            },
+        ])
+    );
+    assert_eq!(checkpoints[1].replacement_history_entries, None);
+    assert_eq!(
+        checkpoints[1]
+            .replacement_history
+            .as_ref()
+            .expect("selected checkpoint remains complete")
+            .iter()
+            .map(|item| item.item.clone())
+            .collect::<Vec<_>>(),
+        vec![carried_source]
+    );
+}
+
+#[tokio::test]
+async fn ordinary_migration_ignores_dangling_reference_before_newer_valid_checkpoint() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let missing_id = "msg_missing-ordinary-superseded-source";
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            RolloutItem::Compacted(CompactedItem {
+                message: "superseded checkpoint".to_string(),
+                replacement_history: None,
+                replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
+                    item_id: missing_id.to_string(),
+                }]),
+                mcp_resource_origins: None,
+                window_number: Some(1),
+                first_window_id: None,
+                previous_window_id: None,
+                window_id: None,
+            }),
+            compacted(vec![input_response_message("user", "newer valid history")]),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate ordinary rollout with superseded dangling checkpoint");
+
+    let checkpoints = read_rollout(&path)
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(item) => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 2);
+    assert_eq!(
+        checkpoints[0].replacement_history_entries,
+        Some(vec![CompactedHistoryEntry::Reference {
+            item_id: missing_id.to_string(),
+        }])
+    );
+}
+
+#[tokio::test]
+async fn migration_matches_rollout_loader_when_removing_nested_ghost_snapshot() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(home.path(), thread_id, SessionSource::Cli, Vec::new());
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("append legacy checkpoint");
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "timestamp": TIMESTAMP,
+            "type": "compacted",
+            "payload": {
+                "message": "legacy checkpoint",
+                "replacement_history": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "kept developer"}]
+                    },
+                    {"type": "ghost_snapshot", "ghost_commit": {"id": "deadbeef"}},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "kept user"}]
+                    }
+                ],
+                "replacement_history_metadata": [
+                    {"client_authored": true},
+                    {"client_authored": false},
+                    {"client_authored": false}
+                ]
+            }
+        })
+    )
+    .expect("write legacy checkpoint");
+    drop(file);
+
+    let (loaded, loaded_thread_id, parse_errors) = RolloutRecorder::load_rollout_items(&path)
+        .await
+        .expect("load legacy rollout through recorder");
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 0);
+    let before = loaded
+        .into_iter()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(compacted) => compacted.replacement_history,
+            _ => None,
+        })
+        .expect("loader-normalized history");
+
+    let store = indexed_store(home.path()).await;
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate nested ghost snapshot");
+
+    let after = read_rollout(&path)
+        .into_iter()
+        .find_map(|line| match line.item {
+            RolloutItem::Compacted(compacted) => compacted.replacement_history,
+            _ => None,
+        })
+        .expect("migration-normalized history");
+    assert_eq!(envelopes_without_ids(after.clone()), before);
+    assert_eq!(
+        after
+            .iter()
+            .map(|envelope| envelope
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.client_authored))
+            .collect::<Vec<_>>(),
+        vec![Some(true), Some(false)]
+    );
+}
+
+#[tokio::test]
+async fn rollback_aware_selected_checkpoint_still_fails_on_unresolved_reference() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let missing_id = "msg_missing-selected-source";
+    let selected = RolloutItem::Compacted(CompactedItem {
+        message: "selected broken checkpoint".to_string(),
+        replacement_history: None,
+        replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
+            item_id: missing_id.to_string(),
+        }]),
+        mcp_resource_origins: None,
+        window_number: Some(2),
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    });
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            compacted(vec![input_response_message("user", "older valid history")]),
+            selected,
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 0,
+            })),
+        ],
+    );
+    let source = source_snapshot(&path);
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("report rollback-aware selected dangling checkpoint");
+
+    let outcome = &report.outcomes[0];
+    assert_failed_with_reason(
+        outcome,
+        RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+    );
+    assert!(
+        outcome
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(missing_id))
+    );
+    assert_failed_migration_preserved_source(&store, home.path(), thread_id, &path, &source).await;
+}
+
+#[tokio::test]
+async fn migration_discards_only_a_trailing_partial_record() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![user_message("kept question")],
+    );
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open legacy rollout");
     file.write_all(br#"{"timestamp":"unterminated""#)
         .expect("append partial tail");
     drop(file);
@@ -2383,11 +4460,11 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
     let report = store
         .migrate_rollouts(apply_options())
         .await
-        .expect("migrate malformed legacy rollout");
+        .expect("migrate rollout with partial tail");
 
     assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
     assert!(!migration_journal_path(home.path(), thread_id).exists());
     let turns = list_active_summary_turns(&store, thread_id).await;
     assert_eq!(turns.turns.len(), 1);
-    assert_eq!(turns.turns[0].items.len(), 2);
+    assert_eq!(turns.turns[0].items.len(), 1);
 }

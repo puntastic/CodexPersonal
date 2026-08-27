@@ -10,7 +10,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GitInfo;
-use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::protocol::strip_user_message_prefix;
@@ -203,10 +202,7 @@ impl ThreadMetadataSync {
 
     fn observe_resume_history(&mut self, items: &[RolloutItem]) -> Option<ThreadMetadataPatch> {
         let mut update = self.observe_items_with_update(items, ThreadMetadataPatch::default())?;
-        if matches!(
-            canonical_history_mode_from_rollout_items(items),
-            ThreadHistoryMode::Paginated
-        ) {
+        if canonical_history_mode_from_rollout_items(items).is_paginated() {
             // Paginated rollouts never append metadata-only SessionMeta updates. Do not reapply
             // initial metadata when resume history is flushed after the first append.
             update.git_info = None;
@@ -421,6 +417,7 @@ mod tests {
     use codex_protocol::protocol::ThreadGoal;
     use codex_protocol::protocol::ThreadGoalStatus;
     use codex_protocol::protocol::ThreadGoalUpdatedEvent;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use codex_protocol::protocol::ThreadSettingsAppliedEvent;
     use codex_protocol::protocol::ThreadSettingsSnapshot;
     use codex_protocol::protocol::TurnStartedEvent;
@@ -582,6 +579,7 @@ mod tests {
         let item = RolloutItem::Compacted(CompactedItem {
             message: "compacted".to_string(),
             replacement_history: None,
+            replacement_history_entries: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,

@@ -2,8 +2,21 @@ use super::*;
 use crate::SortDirection;
 use codex_protocol::SanitizedGitUrl;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
+
+/// SQLite exposes the stable public history family to readers that may predate newer rollout
+/// generations. The canonical rollout `SessionMeta` remains authoritative for the exact writer
+/// generation.
+fn sqlite_history_mode_family(history_mode: ThreadHistoryMode) -> &'static str {
+    match history_mode {
+        ThreadHistoryMode::Legacy => ThreadHistoryMode::Legacy.as_str(),
+        ThreadHistoryMode::Paginated | ThreadHistoryMode::PaginatedRefsV1 => {
+            ThreadHistoryMode::Paginated.as_str()
+        }
+    }
+}
 
 impl StateRuntime {
     pub async fn get_thread(&self, id: ThreadId) -> anyhow::Result<Option<crate::ThreadMetadata>> {
@@ -62,12 +75,18 @@ WHERE threads.id = ?
             .transpose()
     }
 
-    /// Permanently promote a thread, preserving its canonical name or a legacy-visible fallback.
+    /// Permanently promote a thread to the stable paginated SQLite family, preserving its canonical
+    /// name or a legacy-visible fallback.
     pub async fn mark_thread_paginated(
         &self,
         thread_id: ThreadId,
+        history_mode: ThreadHistoryMode,
         legacy_name: Option<&str>,
     ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            history_mode.is_paginated(),
+            "cannot promote thread to non-paginated history mode"
+        );
         // Legacy threads display `title`, then fall back to the name index. Paginated threads
         // display `name`; `title` remains derived metadata used for search. Preserve an existing
         // `name`, otherwise carry over the legacy display name.
@@ -75,7 +94,7 @@ WHERE threads.id = ?
             r#"
 UPDATE threads
 SET
-    history_mode = 'paginated',
+    history_mode = ?,
     name = CASE
         WHEN name IS NULL OR trim(name) = '' THEN ?
         ELSE name
@@ -83,6 +102,7 @@ SET
 WHERE id = ?
             "#,
         )
+        .bind(sqlite_history_mode_family(history_mode))
         .bind(legacy_name)
         .bind(thread_id.to_string())
         .execute(self.pool.as_ref())
@@ -658,7 +678,7 @@ ON CONFLICT(id) DO NOTHING
         .bind(datetime_to_epoch_millis(updated_at))
         .bind(datetime_to_epoch_millis(recency_at))
         .bind(metadata.source.as_str())
-        .bind(metadata.history_mode.as_str())
+        .bind(sqlite_history_mode_family(metadata.history_mode))
         .bind(
             metadata
                 .thread_source
@@ -932,9 +952,10 @@ ON CONFLICT(id) DO UPDATE SET
     updated_at_ms = excluded.updated_at_ms,
     recency_at_ms = threads.recency_at_ms,
     source = excluded.source,
-    -- Paginated history is a one-way promotion; stale legacy metadata must not downgrade it.
+    -- Paginated history is a one-way family promotion. SQLite intentionally does not expose the
+    -- exact rollout generation to older readers.
     history_mode = CASE
-        WHEN threads.history_mode = 'paginated' THEN threads.history_mode
+        WHEN threads.history_mode IN ('paginated', 'paginated_refs_v1') THEN 'paginated'
         ELSE excluded.history_mode
     END,
     thread_source = excluded.thread_source,
@@ -968,7 +989,7 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(datetime_to_epoch_millis(updated_at))
         .bind(datetime_to_epoch_millis(insert_recency_at))
         .bind(metadata.source.as_str())
-        .bind(metadata.history_mode.as_str())
+        .bind(sqlite_history_mode_family(metadata.history_mode))
         .bind(
             metadata
                 .thread_source
@@ -1615,7 +1636,11 @@ mod tests {
 
         assert!(
             runtime
-                .mark_thread_paginated(thread_id, /*legacy_name*/ None)
+                .mark_thread_paginated(
+                    thread_id,
+                    ThreadHistoryMode::PaginatedRefsV1,
+                    /*legacy_name*/ None,
+                )
                 .await
                 .expect("mark paginated history")
         );
@@ -1626,6 +1651,13 @@ mod tests {
             .expect("thread should load")
             .expect("thread should exist");
         assert_eq!(metadata.history_mode, ThreadHistoryMode::Paginated);
+        let persisted_mode: String =
+            sqlx::query_scalar("SELECT history_mode FROM threads WHERE id = ?")
+                .bind(thread_id.to_string())
+                .fetch_one(runtime.pool.as_ref())
+                .await
+                .expect("persisted history family should load");
+        assert_eq!(persisted_mode, ThreadHistoryMode::Paginated.as_str());
 
         let mut stale_metadata = metadata;
         stale_metadata.history_mode = ThreadHistoryMode::Legacy;
@@ -1641,6 +1673,83 @@ mod tests {
                 .expect("thread should exist")
                 .history_mode,
             ThreadHistoryMode::Paginated
+        );
+    }
+
+    #[tokio::test]
+    async fn reference_backed_history_persists_as_paginated_family() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let upserted_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000125").expect("valid thread id");
+        let mut metadata =
+            test_thread_metadata(&codex_home, upserted_thread_id, codex_home.clone());
+        metadata.history_mode = ThreadHistoryMode::PaginatedRefsV1;
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("upsert reference-backed thread");
+
+        let upserted_mode: String =
+            sqlx::query_scalar("SELECT history_mode FROM threads WHERE id = ?")
+                .bind(upserted_thread_id.to_string())
+                .fetch_one(runtime.pool.as_ref())
+                .await
+                .expect("upserted history family should load");
+        assert_eq!(upserted_mode, ThreadHistoryMode::Paginated.as_str());
+        assert_eq!(
+            runtime
+                .get_thread(upserted_thread_id)
+                .await
+                .expect("read upserted thread")
+                .expect("upserted thread exists")
+                .history_mode,
+            ThreadHistoryMode::Paginated
+        );
+
+        let inserted_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000126").expect("valid thread id");
+        let mut metadata =
+            test_thread_metadata(&codex_home, inserted_thread_id, codex_home.clone());
+        metadata.history_mode = ThreadHistoryMode::PaginatedRefsV1;
+        assert!(
+            runtime
+                .insert_thread_if_absent(&metadata)
+                .await
+                .expect("insert reference-backed thread")
+        );
+
+        let inserted_mode: String =
+            sqlx::query_scalar("SELECT history_mode FROM threads WHERE id = ?")
+                .bind(inserted_thread_id.to_string())
+                .fetch_one(runtime.pool.as_ref())
+                .await
+                .expect("inserted history family should load");
+        assert_eq!(inserted_mode, ThreadHistoryMode::Paginated.as_str());
+
+        sqlx::query("UPDATE threads SET history_mode = 'paginated_refs_v1' WHERE id = ?")
+            .bind(upserted_thread_id.to_string())
+            .execute(runtime.pool.as_ref())
+            .await
+            .expect("seed pre-normalization history generation");
+        metadata.id = upserted_thread_id;
+        metadata.history_mode = ThreadHistoryMode::Legacy;
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("normalize pre-existing history generation");
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT history_mode FROM threads WHERE id = ?")
+                .bind(upserted_thread_id.to_string())
+                .fetch_one(runtime.pool.as_ref())
+                .await
+                .expect("normalized history family should load"),
+            ThreadHistoryMode::Paginated.as_str()
         );
     }
 

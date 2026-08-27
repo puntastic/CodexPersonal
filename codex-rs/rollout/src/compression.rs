@@ -501,6 +501,21 @@ mod worker {
                     metrics::file("skipped_unreadable_meta");
                     continue;
                 };
+                // Reference-backed histories rely on reverse scanning to hydrate only the
+                // selected checkpoint, its demanded sources, and the newer suffix. The current
+                // compressed reader is forward-only, so compressing these rollouts would turn a
+                // bounded cold resume back into a full-history materialization. They are already
+                // deduplicated on disk; keep them seekable until compressed reverse scanning is
+                // available.
+                if meta
+                    .meta
+                    .history_mode
+                    .supports_compacted_history_references()
+                {
+                    stats.skipped = stats.skipped.saturating_add(1);
+                    metrics::file("skipped_reference_backed");
+                    continue;
+                }
                 if reference_index.reference_count(rollout_id) > 0 {
                     stats.skipped = stats.skipped.saturating_add(1);
                     metrics::file("skipped_referenced");

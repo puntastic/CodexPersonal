@@ -258,24 +258,31 @@ pub fn truncate_rollout_before_turn_id(
 ///
 /// If fewer than or equal to `n_from_end` fork turns exist, this keeps from the first fork-turn
 /// boundary and still drops pre-turn startup context.
+#[cfg(test)]
 pub(crate) fn truncate_rollout_to_last_n_fork_turns(
     mut items: Vec<RolloutItem>,
     n_from_end: usize,
 ) -> Vec<RolloutItem> {
+    let keep_idx = fork_turn_suffix_start(&items, n_from_end);
+    items.split_off(keep_idx)
+}
+
+/// Return the source index at which a last-N fork suffix begins.
+///
+/// Keeping this boundary separate from allocation lets fork preparation continue scanning the
+/// omitted prefix for reference sources without retaining those records in the child rollout.
+pub(crate) fn fork_turn_suffix_start(items: &[RolloutItem], n_from_end: usize) -> usize {
     if n_from_end == 0 {
-        return Vec::new();
+        return items.len();
     }
 
-    let fork_turn_positions = fork_turn_positions_in_rollout(&items);
-    let Some(keep_idx) = fork_turn_positions
+    let fork_turn_positions = fork_turn_positions_in_rollout(items);
+    fork_turn_positions
         .len()
         .checked_sub(n_from_end)
         .map(|position| fork_turn_positions[position])
         .or_else(|| fork_turn_positions.first().copied())
-    else {
-        return Vec::new();
-    };
-    items.split_off(keep_idx)
+        .unwrap_or(items.len())
 }
 
 fn is_real_user_message_boundary(item: &ResponseItem) -> bool {
