@@ -740,7 +740,7 @@ fn v2_reference_rejects_same_id_content_substitution_as_digest_mismatch() {
 fn v2_reference_rejects_same_item_metadata_substitution_as_digest_mismatch() {
     let expected = identified_message("v2-metadata", "same content");
     let reference = integrity_reference(&expected);
-    let mut substituted = expected.clone();
+    let mut substituted = expected;
     substituted.metadata = Some(CodexHarnessMetadata {
         client_authored: true,
     });

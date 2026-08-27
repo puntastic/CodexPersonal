@@ -75,7 +75,7 @@ impl McpConnectionSet {
                         let configured_server = config
                             .mcp_server_catalog
                             .server(name)
-                            .map(|server| server.config());
+                            .map(super::super::catalog::ResolvedMcpServer::config);
                         (
                             Some(mcp_init_error_display(
                                 name,
