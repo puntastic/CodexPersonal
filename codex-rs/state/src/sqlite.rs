@@ -192,6 +192,52 @@ impl SqliteConfig {
             .await
     }
 
+    /// Open a process-local logs database when the optional persistent log store is unavailable.
+    ///
+    /// Keep exactly one connection alive: separate SQLite `:memory:` connections do not share
+    /// state, and allowing the last connection to idle out would discard the migrated schema.
+    pub(super) async fn open_ephemeral_logs_db(
+        &self,
+        migrator: &Migrator,
+        telemetry_override: Option<&dyn DbTelemetry>,
+    ) -> anyhow::Result<SqlitePool> {
+        let started = Instant::now();
+        let pool_result = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .create_if_missing(true)
+                    .synchronous(SqliteSynchronous::Normal)
+                    .log_statements(LevelFilter::Off),
+            )
+            .await
+            .map_err(anyhow::Error::from);
+        telemetry::record_init_result(
+            telemetry_override,
+            DbKind::Logs,
+            "open_logs_fallback",
+            started.elapsed(),
+            &pool_result,
+        );
+        let pool = pool_result?;
+        let started = Instant::now();
+        let migrate_result = migrator.run(&pool).await.map_err(anyhow::Error::from);
+        telemetry::record_init_result(
+            telemetry_override,
+            DbKind::Logs,
+            "migrate_logs_fallback",
+            started.elapsed(),
+            &migrate_result,
+        );
+        if let Err(err) = migrate_result {
+            pool.close().await;
+            return Err(err);
+        }
+        Ok(pool)
+    }
+
     pub(super) async fn open_goals_db(
         &self,
         migrator: &Migrator,

@@ -90,11 +90,19 @@ pub struct StateRuntime {
     default_provider: String,
     pool: Arc<sqlx::SqlitePool>,
     logs_pool: Arc<sqlx::SqlitePool>,
+    logs_db_fallback: Option<LogsDbFallback>,
     thread_goals: GoalStore,
     memories: MemoryStore,
     thread_queue: SqliteQueueStore,
     thread_updated_at_millis: Arc<AtomicI64>,
     thread_recency_at_millis: Arc<AtomicI64>,
+}
+
+/// Why this process is retaining diagnostic logs only in memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogsDbFallback {
+    pub database_path: PathBuf,
+    pub error: String,
 }
 
 impl StateRuntime {
@@ -143,15 +151,41 @@ impl StateRuntime {
                 return Err(err);
             }
         };
-        let logs_pool = match sqlite
+        let (logs_pool, logs_db_fallback) = match sqlite
             .open_logs_db(&logs_migrator, telemetry_override)
             .await
         {
-            Ok(db) => Arc::new(db),
+            Ok(db) => (Arc::new(db), None),
             Err(err) => {
-                warn!("failed to open logs db at {}: {err}", logs_path.display());
-                close_sqlite_pools(&[pool.as_ref()]).await;
-                return Err(err);
+                if recovery::is_sqlite_corruption_error(&err) {
+                    warn!("failed to open logs db at {}: {err}", logs_path.display());
+                    close_sqlite_pools(&[pool.as_ref()]).await;
+                    return Err(err);
+                }
+                let persistent_error = format!("{err:#}");
+                warn!(
+                    "failed to open optional logs db at {}; retaining logs in memory for this process and retrying the persistent store next launch: {persistent_error}",
+                    logs_path.display()
+                );
+                let fallback_pool = match sqlite
+                    .open_ephemeral_logs_db(&logs_migrator, telemetry_override)
+                    .await
+                {
+                    Ok(db) => Arc::new(db),
+                    Err(fallback_err) => {
+                        close_sqlite_pools(&[pool.as_ref()]).await;
+                        return Err(anyhow::anyhow!(
+                            "failed to initialize in-memory logs fallback after persistent logs DB failure: {fallback_err:#}; persistent logs DB error: {persistent_error}"
+                        ));
+                    }
+                };
+                (
+                    fallback_pool,
+                    Some(LogsDbFallback {
+                        database_path: logs_path.clone(),
+                        error: persistent_error,
+                    }),
+                )
             }
         };
         let goals_pool = match sqlite
@@ -254,6 +288,7 @@ impl StateRuntime {
             thread_queue: SqliteQueueStore::new(queue_pool),
             pool,
             logs_pool,
+            logs_db_fallback,
             sqlite,
             default_provider,
             thread_updated_at_millis: Arc::new(AtomicI64::new(thread_updated_at_millis)),
@@ -271,6 +306,11 @@ impl StateRuntime {
     /// Return the SQLite configuration for this runtime.
     pub fn sqlite(&self) -> &SqliteConfig {
         &self.sqlite
+    }
+
+    /// Returns the persistent log-store failure that selected the process-local fallback.
+    pub fn logs_db_fallback(&self) -> Option<&LogsDbFallback> {
+        self.logs_db_fallback.as_ref()
     }
 
     pub fn thread_goals(&self) -> &GoalStore {
@@ -428,6 +468,10 @@ mod tests {
     use super::test_support::unique_temp_dir;
     use crate::DB_INIT_METRIC;
     use crate::DbTelemetry;
+    use crate::LogEntry;
+    use crate::LogQuery;
+    use crate::is_sqlite_corruption_error;
+    use crate::runtime_db_path_for_corruption_error;
     use codex_protocol::ThreadId;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
@@ -499,6 +543,122 @@ mod tests {
             .open_read_write_pool(path)
             .await
             .expect("open sqlite pool")
+    }
+
+    #[tokio::test]
+    async fn unavailable_logs_db_uses_ephemeral_store_without_blocking_state() {
+        let codex_home = unique_temp_dir();
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        let sqlite = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs());
+        let logs_path = sqlite.logs_db_path();
+        tokio::fs::create_dir(&logs_path)
+            .await
+            .expect("block logs database path with a directory");
+        let marker = logs_path.join("leave-me-alone");
+        tokio::fs::write(&marker, b"persistent-store-marker")
+            .await
+            .expect("write marker");
+
+        let runtime = StateRuntime::init(sqlite, "test-provider".to_string())
+            .await
+            .expect("optional logs failure should not block state runtime");
+        let fallback = runtime
+            .logs_db_fallback()
+            .expect("runtime should report the ephemeral logs fallback");
+        assert_eq!(fallback.database_path, logs_path);
+        assert!(!fallback.error.is_empty());
+
+        let thread_id = ThreadId::new();
+        runtime
+            .upsert_thread(&test_thread_metadata(
+                &codex_home,
+                thread_id,
+                codex_home.clone(),
+            ))
+            .await
+            .expect("primary state writes should remain available");
+        runtime
+            .insert_log(&LogEntry {
+                ts: 1,
+                ts_nanos: 0,
+                level: "WARN".to_string(),
+                target: "fallback-test".to_string(),
+                message: Some("ephemeral-log".to_string()),
+                feedback_log_body: Some("ephemeral-log".to_string()),
+                thread_id: Some(thread_id.to_string()),
+                process_uuid: Some("fallback-process".to_string()),
+                module_path: None,
+                file: None,
+                line: None,
+            })
+            .await
+            .expect("ephemeral logs store should accept diagnostics");
+        assert_eq!(
+            runtime
+                .query_logs(&LogQuery::default())
+                .await
+                .expect("query ephemeral logs")
+                .len(),
+            1
+        );
+
+        runtime.close().await;
+        assert_eq!(
+            tokio::fs::read(&marker).await.expect("marker remains"),
+            b"persistent-store-marker"
+        );
+        assert!(logs_path.is_dir(), "persistent logs path must be untouched");
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn unavailable_primary_state_db_remains_fatal() {
+        let codex_home = unique_temp_dir();
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        let sqlite = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs());
+        let state_path = sqlite.state_db_path();
+        tokio::fs::create_dir(&state_path)
+            .await
+            .expect("block state database path with a directory");
+
+        let result = StateRuntime::init(sqlite, "test-provider".to_string()).await;
+        assert!(result.is_err(), "primary state failure must not degrade to memory");
+        assert!(state_path.is_dir(), "failed startup must not replace state path");
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_logs_db_still_routes_to_recovery_instead_of_ephemeral_fallback() {
+        let codex_home = unique_temp_dir();
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        let sqlite = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs());
+        let logs_path = sqlite.logs_db_path();
+        tokio::fs::write(&logs_path, b"not a sqlite database")
+            .await
+            .expect("write corrupt logs db");
+
+        let err = StateRuntime::init(sqlite, "test-provider".to_string())
+            .await
+            .err()
+            .expect("corrupt persistent logs must reach the recovery owner");
+        assert!(is_sqlite_corruption_error(&err));
+        assert_eq!(
+            runtime_db_path_for_corruption_error(&err).as_deref(),
+            Some(logs_path.as_path())
+        );
+        assert_eq!(
+            tokio::fs::read(&logs_path)
+                .await
+                .expect("corrupt source remains for recovery"),
+            b"not a sqlite database"
+        );
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
 
     #[tokio::test]

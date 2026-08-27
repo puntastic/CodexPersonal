@@ -80,6 +80,8 @@ use tracing_subscriber::registry::Registry;
 use tracing_subscriber::util::SubscriberInitExt;
 
 const SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY: &str = "Codex rebuilt its local database.";
+const SQLITE_LOGS_FALLBACK_CONFIG_WARNING_SUMMARY: &str =
+    "Codex could not open its local diagnostic log database.";
 
 fn is_unsupported_untrusted_approval_policy_error(err: &std::io::Error) -> bool {
     err.get_ref().is_some_and(
@@ -616,6 +618,21 @@ pub async fn run_main_with_transport_options(
         config_warnings.push(ConfigWarningNotification {
             summary: SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY.to_string(),
             details: Some(recovery_notice.details),
+            path: None,
+            range: None,
+        });
+    }
+    if let Some(fallback) = state_db
+        .as_ref()
+        .and_then(|state_db| state_db.logs_db_fallback())
+    {
+        config_warnings.push(ConfigWarningNotification {
+            summary: SQLITE_LOGS_FALLBACK_CONFIG_WARNING_SUMMARY.to_string(),
+            details: Some(format!(
+                "Database path: {}\nPersistent log history is unavailable for this run, so new diagnostics will remain in memory. The database was left untouched and Codex will retry it on the next launch.\nError: {}",
+                fallback.database_path.display(),
+                fallback.error
+            )),
             path: None,
             range: None,
         });
