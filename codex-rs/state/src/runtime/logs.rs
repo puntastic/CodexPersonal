@@ -540,7 +540,7 @@ mod tests {
     use super::test_support::unique_temp_dir;
     use crate::LogEntry;
     use crate::LogQuery;
-    use crate::migrations::LOGS_MIGRATOR;
+    use crate::migrations::runtime_logs_migrator;
     use chrono::Utc;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
@@ -610,13 +610,14 @@ mod tests {
             .expect("create codex home");
         let logs_path =
             crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()).logs_db_path();
+        let logs_migrator = runtime_logs_migrator();
         let old_logs_migrator = Migrator {
-            migrations: Cow::Owned(vec![LOGS_MIGRATOR.migrations[0].clone()]),
+            migrations: Cow::Owned(vec![logs_migrator.migrations[0].clone()]),
             ignore_missing: false,
             locking: true,
             no_tx: false,
-            table_name: LOGS_MIGRATOR.table_name.clone(),
-            create_schemas: LOGS_MIGRATOR.create_schemas.clone(),
+            table_name: logs_migrator.table_name.clone(),
+            create_schemas: logs_migrator.create_schemas.clone(),
         };
         let pool = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs())
             .open_read_write_pool(&logs_path)

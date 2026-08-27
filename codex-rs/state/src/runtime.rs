@@ -428,7 +428,6 @@ mod tests {
     use super::test_support::unique_temp_dir;
     use crate::DB_INIT_METRIC;
     use crate::DbTelemetry;
-    use crate::migrations::STATE_MIGRATOR;
     use codex_protocol::ThreadId;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
@@ -601,7 +600,7 @@ mod tests {
             .open_read_write_pool(&state_path)
             .await
             .expect("open state db");
-        STATE_MIGRATOR
+        runtime_state_migrator()
             .run(&pool)
             .await
             .expect("apply current state schema");
@@ -619,7 +618,9 @@ mod tests {
         pool.close().await;
 
         let strict_pool = open_db_pool(state_path.as_path()).await;
-        let strict_err = STATE_MIGRATOR
+        let mut strict_migrator = runtime_state_migrator();
+        strict_migrator.ignore_missing = false;
+        let strict_err = strict_migrator
             .run(&strict_pool)
             .await
             .expect_err("strict migrator should reject newer applied migrations");

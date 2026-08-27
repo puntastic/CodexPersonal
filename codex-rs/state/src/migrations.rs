@@ -1,6 +1,12 @@
 use std::borrow::Cow;
 
+#[cfg(windows)]
+use sqlx::AssertSqlSafe;
+#[cfg(windows)]
+use sqlx::SqlSafeStr;
 use sqlx::SqlitePool;
+#[cfg(windows)]
+use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 
 pub(crate) static STATE_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -18,13 +24,61 @@ pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator = sqlx::migrate!("./thread_h
 /// checksum, so this only relaxes the "database is ahead of me" case.
 fn runtime_migrator(base: &'static Migrator) -> Migrator {
     Migrator {
-        migrations: Cow::Borrowed(base.migrations.as_ref()),
+        migrations: runtime_migrations(base),
         ignore_missing: true,
         locking: base.locking,
         no_tx: base.no_tx,
         table_name: base.table_name.clone(),
         create_schemas: base.create_schemas.clone(),
     }
+}
+
+#[cfg(not(windows))]
+fn runtime_migrations(base: &'static Migrator) -> Cow<'static, [sqlx::migrate::Migration]> {
+    Cow::Borrowed(base.migrations.as_ref())
+}
+
+#[cfg(windows)]
+fn runtime_migrations(base: &'static Migrator) -> Cow<'static, [Migration]> {
+    Cow::Owned(
+        base.migrations
+            .iter()
+            .map(migration_with_windows_crlf)
+            .collect(),
+    )
+}
+
+/// Keep Windows migration checksums stable across source checkouts with
+/// different line-ending settings. Released Windows builds embedded CRLF SQL,
+/// so CRLF is the compatibility-preserving canonical form on that platform.
+#[cfg(windows)]
+fn migration_with_windows_crlf(migration: &Migration) -> Migration {
+    Migration::new(
+        migration.version,
+        migration.description.clone(),
+        migration.migration_type,
+        AssertSqlSafe(normalize_windows_crlf(migration.sql.as_ref())).into_sql_str(),
+        migration.no_tx,
+    )
+}
+
+#[cfg(windows)]
+fn normalize_windows_crlf(sql: &str) -> String {
+    let mut normalized = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                normalized.push_str("\r\n");
+            }
+            '\n' => normalized.push_str("\r\n"),
+            _ => normalized.push(ch),
+        }
+    }
+    normalized
 }
 
 pub(crate) fn runtime_state_migrator() -> Migrator {

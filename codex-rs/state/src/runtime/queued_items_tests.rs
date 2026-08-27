@@ -1,5 +1,5 @@
 use super::*;
-use crate::migrations::QUEUE_MIGRATOR;
+use crate::migrations::runtime_queue_migrator;
 use crate::runtime::test_support::test_thread_metadata;
 use crate::runtime::test_support::unique_temp_dir;
 use codex_utils_absolute_path::test_support::PathExt;
@@ -49,13 +49,14 @@ async fn migrating_existing_queue_backfills_thread_revisions() {
     tokio::fs::create_dir_all(&home).await.unwrap();
     let sqlite = crate::SqliteConfig::new_for_testing(home.as_path().abs());
     let queue_path = sqlite.queue_db_path();
+    let queue_migrator = runtime_queue_migrator();
     let old_queue_migrator = Migrator {
-        migrations: Cow::Owned(vec![QUEUE_MIGRATOR.migrations[0].clone()]),
+        migrations: Cow::Owned(vec![queue_migrator.migrations[0].clone()]),
         ignore_missing: false,
         locking: true,
         no_tx: false,
-        table_name: QUEUE_MIGRATOR.table_name.clone(),
-        create_schemas: QUEUE_MIGRATOR.create_schemas.clone(),
+        table_name: queue_migrator.table_name.clone(),
+        create_schemas: queue_migrator.create_schemas.clone(),
     };
     let pool = sqlite.open_read_write_pool(&queue_path).await.unwrap();
     old_queue_migrator.run(&pool).await.unwrap();

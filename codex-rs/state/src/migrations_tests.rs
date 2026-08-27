@@ -5,10 +5,17 @@ use sqlx::Row;
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 use std::borrow::Cow;
+#[cfg(windows)]
+use std::fmt::Write as _;
 
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
+#[cfg(windows)]
+use super::migration_with_windows_crlf;
+#[cfg(windows)]
+use super::normalize_windows_crlf;
 use super::repair_legacy_recency_migration_version;
+use super::runtime_state_migrator;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::PINNED_THREAD_SECTION_NAME;
 
@@ -29,6 +36,87 @@ fn migrator_through(version: i64) -> Migrator {
         table_name: STATE_MIGRATOR.table_name.clone(),
         create_schemas: STATE_MIGRATOR.create_schemas.clone(),
         no_tx: STATE_MIGRATOR.no_tx,
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn runtime_migrations_use_canonical_crlf_on_windows() {
+    let template = STATE_MIGRATOR
+        .migrations
+        .first()
+        .expect("state migration should exist");
+    let lf_migration = Migration::new(
+        1,
+        Cow::Borrowed("line endings"),
+        template.migration_type,
+        sqlx::SqlStr::from_static("SELECT 1;\nSELECT 2;\n"),
+        template.no_tx,
+    );
+    let crlf_migration = Migration::new(
+        1,
+        Cow::Borrowed("line endings"),
+        template.migration_type,
+        sqlx::SqlStr::from_static("SELECT 1;\r\nSELECT 2;\r\n"),
+        template.no_tx,
+    );
+
+    let normalized_lf = migration_with_windows_crlf(&lf_migration);
+    let normalized_crlf = migration_with_windows_crlf(&crlf_migration);
+
+    assert_eq!(normalized_lf.sql, crlf_migration.sql);
+    assert_eq!(normalized_lf.checksum, crlf_migration.checksum);
+    assert_eq!(normalized_crlf.sql, crlf_migration.sql);
+    assert_eq!(normalized_crlf.checksum, crlf_migration.checksum);
+    assert_eq!(
+        normalize_windows_crlf("one\r\ntwo\nthree\rfour"),
+        "one\r\ntwo\r\nthree\r\nfour"
+    );
+
+    let runtime = runtime_state_migrator();
+    let state_v1 = runtime
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 1)
+        .expect("state migration v1 should exist");
+    let mut state_v1_checksum = String::with_capacity(state_v1.checksum.len() * 2);
+    for byte in state_v1.checksum.iter() {
+        write!(&mut state_v1_checksum, "{byte:02X}")
+            .expect("writing a checksum byte to a String should succeed");
+    }
+    assert_eq!(
+        state_v1_checksum,
+        "54BBD6F47905A4E4C674034575963D82DA7B534E66E9A37A81EC2AFB6A4B56CE6DE9B3ECF3032796A800F650239847D4"
+    );
+    for (actual, embedded) in runtime
+        .migrations
+        .iter()
+        .zip(STATE_MIGRATOR.migrations.iter())
+    {
+        let expected = migration_with_windows_crlf(embedded);
+        assert_eq!(actual.sql, expected.sql);
+        assert_eq!(actual.checksum, expected.checksum);
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn runtime_migrations_preserve_embedded_bytes_off_windows() {
+    let runtime = runtime_state_migrator();
+
+    assert!(matches!(&runtime.migrations, Cow::Borrowed(_)));
+    assert_eq!(runtime.migrations.len(), STATE_MIGRATOR.migrations.len());
+    for (actual, embedded) in runtime
+        .migrations
+        .iter()
+        .zip(STATE_MIGRATOR.migrations.iter())
+    {
+        assert_eq!(actual.version, embedded.version);
+        assert_eq!(actual.description, embedded.description);
+        assert_eq!(actual.migration_type, embedded.migration_type);
+        assert_eq!(actual.sql, embedded.sql);
+        assert_eq!(actual.checksum, embedded.checksum);
+        assert_eq!(actual.no_tx, embedded.no_tx);
     }
 }
 

@@ -606,7 +606,7 @@ pub async fn run_main_with_transport_options(
         Ok(state_db_init) => state_db_init,
         Err(err) => {
             return Err(std::io::Error::other(format!(
-                "failed to initialize sqlite state runtime under {}: {err}",
+                "failed to initialize sqlite state runtime under {}: {err:#}",
                 config.sqlite_config().home().display()
             )));
         }
@@ -1251,11 +1251,11 @@ async fn init_sqlite_state_db_with_fresh_start_on_corruption(
 
         if !attempted_backups.insert(database_path.clone()) {
             return Err(anyhow::anyhow!(
-                "failed to initialize sqlite state runtime after moving damaged database file into a backup folder: {err}"
+                "failed to initialize sqlite state runtime after moving damaged database file into a backup folder: {err:#}"
             ));
         }
 
-        let original_error = err.to_string();
+        let original_error = format!("{err:#}");
         emit_state_db_backup_warning(&format!(
             "Codex local database at {} appears damaged. Moving it into a backup folder so the app server can rebuild it from saved data.",
             database_path.display()
