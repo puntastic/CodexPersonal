@@ -332,6 +332,7 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
             msg: EventMsg::Error(ErrorEvent {
                 message: format!("failed to reconstruct history for rollback replay: {err}"),
                 codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                misalignment: None,
             }),
         })
         .await;
