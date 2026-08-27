@@ -1,6 +1,7 @@
 //! Indexes direct fork references found in local rollout files.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::io;
 use std::path::Path;
@@ -36,7 +37,38 @@ struct IndexedRollout {
 impl RolloutReferenceIndex {
     /// Scans active and archived local rollout metadata without a deadline.
     pub async fn scan(codex_home: &Path) -> io::Result<Self> {
-        let Some(index) = Self::scan_with_deadline(codex_home, ScanDeadline::Unlimited).await?
+        let Some(index) = Self::scan_with_deadline(
+            codex_home,
+            ScanDeadline::Unlimited,
+            UnreadableMetadataPolicy::Ignore,
+        )
+        .await?
+        else {
+            return Err(io::Error::other(
+                "unlimited rollout reference scan exceeded a deadline",
+            ));
+        };
+        Ok(index)
+    }
+
+    /// Scans rollout references before hard-deleting the selected threads.
+    ///
+    /// An unreadable rollout outside the deletion set makes the scan fail closed because it may
+    /// contain a reference to a rollout being deleted. An unreadable rollout in the deletion set
+    /// remains discoverable from its canonical filename, so a damaged target can still be deleted
+    /// while references to its immutable rollout ID continue to block unsafe deletion.
+    pub async fn scan_for_thread_deletion(
+        codex_home: &Path,
+        targeted_thread_ids: &HashSet<ThreadId>,
+    ) -> io::Result<Self> {
+        let Some(index) = Self::scan_with_deadline(
+            codex_home,
+            ScanDeadline::Unlimited,
+            UnreadableMetadataPolicy::FailClosedForDeletion {
+                targeted_thread_ids,
+            },
+        )
+        .await?
         else {
             return Err(io::Error::other(
                 "unlimited rollout reference scan exceeded a deadline",
@@ -59,6 +91,7 @@ impl RolloutReferenceIndex {
                 started_at,
                 max_runtime,
             },
+            UnreadableMetadataPolicy::Ignore,
         )
         .await
     }
@@ -92,6 +125,7 @@ impl RolloutReferenceIndex {
     async fn scan_with_deadline(
         codex_home: &Path,
         deadline: ScanDeadline,
+        unreadable_metadata_policy: UnreadableMetadataPolicy<'_>,
     ) -> io::Result<Option<Self>> {
         let mut rollouts_by_id = HashMap::new();
         let mut stack = vec![
@@ -126,17 +160,47 @@ impl RolloutReferenceIndex {
                 let Some(rollout_file) = RolloutFile::from_path(path) else {
                     continue;
                 };
-                let Some(rollout_id) = crate::rollout_id_from_path(rollout_file.path()) else {
-                    continue;
+                let rollout_file_name = match crate::rollout_file_name::RolloutFileName::parse(
+                    rollout_file.plain_file_name(),
+                ) {
+                    Some(rollout_file_name) => rollout_file_name,
+                    None if unreadable_metadata_policy.fail_closed() => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "cannot safely identify rollout from filename `{}`",
+                                rollout_file.path().display()
+                            ),
+                        ));
+                    }
+                    None => continue,
                 };
-                let Ok(meta) = crate::read_session_meta_line(rollout_file.path()).await else {
-                    continue;
-                };
+                let rollout_id = rollout_file_name.rollout_id();
+                let (thread_id, history_base) =
+                    match crate::read_session_meta_line(rollout_file.path()).await {
+                        Ok(meta) => (meta.meta.id, meta.meta.history_base),
+                        Err(_) if !unreadable_metadata_policy.fail_closed() => continue,
+                        Err(_)
+                            if unreadable_metadata_policy
+                                .allows_unreadable_target(rollout_file_name.thread_id()) =>
+                        {
+                            (rollout_file_name.thread_id(), None)
+                        }
+                        Err(err) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "cannot verify fork references in rollout `{}`: {err}",
+                                    rollout_file.path().display()
+                                ),
+                            ));
+                        }
+                    };
                 if let Entry::Vacant(entry) = rollouts_by_id.entry(rollout_id) {
                     entry.insert(IndexedRollout {
-                        thread_id: meta.meta.id,
+                        thread_id,
                         path: rollout_file.into_path(),
-                        history_base: meta.meta.history_base,
+                        history_base,
                     });
                 }
             }
@@ -158,6 +222,29 @@ impl RolloutReferenceIndex {
             rollouts_by_id,
             reference_counts_by_rollout,
         }))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UnreadableMetadataPolicy<'a> {
+    Ignore,
+    FailClosedForDeletion {
+        targeted_thread_ids: &'a HashSet<ThreadId>,
+    },
+}
+
+impl UnreadableMetadataPolicy<'_> {
+    fn fail_closed(self) -> bool {
+        matches!(self, Self::FailClosedForDeletion { .. })
+    }
+
+    fn allows_unreadable_target(self, thread_id: ThreadId) -> bool {
+        match self {
+            Self::Ignore => false,
+            Self::FailClosedForDeletion {
+                targeted_thread_ids,
+            } => targeted_thread_ids.contains(&thread_id),
+        }
     }
 }
 

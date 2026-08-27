@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -137,6 +138,82 @@ async fn expired_deadline_returns_none() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn lenient_scan_ignores_unreadable_metadata() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let unreadable_id = thread_id(Uuid::from_u128(30))?;
+    let unreadable_path = active_rollout_path(home.path(), Uuid::from_u128(30));
+    fs::create_dir_all(unreadable_path.parent().expect("rollout parent"))?;
+    fs::write(&unreadable_path, "{not json}\n")?;
+
+    let index = RolloutReferenceIndex::scan(home.path()).await?;
+
+    assert_eq!(index.rollouts_for_thread(unreadable_id).count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn deletion_scan_rejects_unreadable_non_target_metadata() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let targeted_thread_id = thread_id(Uuid::from_u128(31))?;
+    let unreadable_path = active_rollout_path(home.path(), Uuid::from_u128(32));
+    fs::create_dir_all(unreadable_path.parent().expect("rollout parent"))?;
+    fs::write(&unreadable_path, "{not json}\n")?;
+
+    let error = RolloutReferenceIndex::scan_for_thread_deletion(
+        home.path(),
+        &HashSet::from([targeted_thread_id]),
+    )
+    .await
+    .expect_err("unreadable non-target metadata must fail closed");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error.to_string().contains(
+            unreadable_path
+                .file_name()
+                .expect("unreadable rollout filename")
+                .to_string_lossy()
+                .as_ref()
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn deletion_scan_indexes_targeted_unreadable_revert_from_filename() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let targeted_thread_id = thread_id(Uuid::from_u128(33))?;
+    let targeted_rollout_id = thread_id(Uuid::from_u128(34))?;
+    let targeted_path =
+        reverted_active_rollout_path(home.path(), Uuid::from_u128(33), Uuid::from_u128(34));
+    fs::create_dir_all(targeted_path.parent().expect("rollout parent"))?;
+    fs::write(&targeted_path, "{not json}\n")?;
+    write_rollout(
+        active_rollout_path(home.path(), Uuid::from_u128(35)),
+        thread_id(Uuid::from_u128(35))?,
+        Some(history_position(targeted_rollout_id)),
+    )?;
+
+    let index = RolloutReferenceIndex::scan_for_thread_deletion(
+        home.path(),
+        &HashSet::from([targeted_thread_id]),
+    )
+    .await?;
+
+    let targeted_rollouts = index
+        .rollouts_for_thread(targeted_thread_id)
+        .map(|(rollout_id, path)| (rollout_id, path.to_path_buf()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        targeted_rollouts,
+        vec![(targeted_rollout_id, targeted_path)]
+    );
+    assert_eq!(index.history_base(targeted_rollout_id), None);
+    assert_eq!(index.reference_count(targeted_rollout_id), 1);
+    Ok(())
+}
+
 fn active_rollout_path(home: &Path, uuid: Uuid) -> PathBuf {
     home.join("sessions/2025/01/03")
         .join(format!("rollout-2025-01-03T12-00-00-{uuid}.jsonl"))
@@ -145,6 +222,12 @@ fn active_rollout_path(home: &Path, uuid: Uuid) -> PathBuf {
 fn archived_rollout_path(home: &Path, uuid: Uuid) -> PathBuf {
     home.join("archived_sessions")
         .join(format!("rollout-2025-01-03T12-00-00-{uuid}.jsonl"))
+}
+
+fn reverted_active_rollout_path(home: &Path, thread_uuid: Uuid, rollout_uuid: Uuid) -> PathBuf {
+    home.join("sessions/2025/01/03").join(format!(
+        "rollout-2025-01-03T12-00-00-{thread_uuid}_{rollout_uuid}.jsonl"
+    ))
 }
 
 fn write_rollout(

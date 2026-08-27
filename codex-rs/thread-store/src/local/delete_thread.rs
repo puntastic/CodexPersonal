@@ -79,7 +79,8 @@ pub(super) async fn delete_thread(
             .ok_or_else(migration_delete_conflict)?;
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
-    let reference_index = scan_reference_index(store).await?;
+    let deleted_thread_ids = HashSet::from([thread_id]);
+    let reference_index = scan_reference_index(store, &deleted_thread_ids).await?;
     let thread_rollouts = ThreadRollouts::from_index(&reference_index, thread_id);
     ensure_no_external_references(&reference_index, std::slice::from_ref(&thread_rollouts))?;
     let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
@@ -118,7 +119,8 @@ pub(super) async fn delete_threads(
         _live_writer_guards.push(store.live_writer_locks.lock(thread_id).await);
     }
 
-    let reference_index = scan_reference_index(store).await?;
+    let deleted_thread_ids = thread_ids.iter().copied().collect::<HashSet<_>>();
+    let reference_index = scan_reference_index(store, &deleted_thread_ids).await?;
     let thread_rollouts = thread_ids
         .iter()
         .map(|thread_id| ThreadRollouts::from_index(&reference_index, *thread_id))
@@ -189,12 +191,21 @@ fn ensure_no_external_references(
 
 async fn scan_reference_index(
     store: &LocalThreadStore,
+    deleted_thread_ids: &HashSet<codex_protocol::ThreadId>,
 ) -> ThreadStoreResult<RolloutReferenceIndex> {
-    RolloutReferenceIndex::scan(store.config.codex_home.as_path())
-        .await
-        .map_err(|err| ThreadStoreError::Internal {
+    RolloutReferenceIndex::scan_for_thread_deletion(
+        store.config.codex_home.as_path(),
+        deleted_thread_ids,
+    )
+    .await
+    .map_err(|err| match err.kind() {
+        ErrorKind::InvalidData => ThreadStoreError::InvalidRequest {
+            message: format!("cannot delete thread history safely: {err}"),
+        },
+        _ => ThreadStoreError::Internal {
             message: format!("failed to scan fork history references: {err}"),
-        })
+        },
+    })
 }
 
 fn referenced_thread_error(thread_id: codex_protocol::ThreadId) -> ThreadStoreError {
@@ -513,7 +524,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_thread_ignores_unreadable_reference_metadata() {
+    async fn delete_thread_rejects_reference_to_targeted_unreadable_revert() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_uuid = Uuid::from_u128(328);
+        let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
+        let rollout_uuid = Uuid::from_u128(329);
+        let rollout_id = ThreadId::from_string(&rollout_uuid.to_string()).expect("rollout id");
+        let unreadable_path = home
+            .path()
+            .join(SESSIONS_SUBDIR)
+            .join("2025/01/03")
+            .join(format!(
+                "rollout-2025-01-03T12-00-00-{thread_uuid}_{rollout_uuid}.jsonl"
+            ));
+        std::fs::create_dir_all(unreadable_path.parent().expect("rollout parent"))
+            .expect("create rollout parent");
+        std::fs::write(&unreadable_path, "{not json}\n").expect("damage reverted rollout");
+        let child_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-03T12-00-01",
+            Uuid::from_u128(330),
+            ThreadHistoryMode::Paginated,
+        )
+        .expect("child session file");
+        set_history_base(
+            child_path.as_path(),
+            HistoryPosition {
+                thread_id: rollout_id,
+                end_ordinal_exclusive: 1,
+                end_byte_offset: 1,
+            },
+        );
+
+        let error = store
+            .delete_thread(DeleteThreadParams { thread_id })
+            .await
+            .expect_err("referenced unreadable revert should not be deleted");
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid thread-store request: cannot delete thread {thread_id}: forked history still references it"
+            )
+        );
+        assert!(unreadable_path.exists());
+        assert!(child_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_thread_rejects_unreadable_non_target_reference_metadata() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let source_uuid = Uuid::from_u128(305);
@@ -525,16 +585,30 @@ mod tests {
             "rollout-2025-01-03T12-00-01-{}.jsonl",
             Uuid::from_u128(306)
         ));
-        std::fs::write(unreadable_path, "{not json}\n").expect("unreadable rollout metadata");
+        std::fs::write(&unreadable_path, "{not json}\n").expect("unreadable rollout metadata");
 
-        store
+        let error = store
             .delete_thread(DeleteThreadParams {
                 thread_id: source_thread_id,
             })
             .await
-            .expect("unreadable metadata should not block delete");
+            .expect_err("unreadable non-target metadata should block delete");
 
-        assert!(!source_path.exists());
+        let ThreadStoreError::InvalidRequest { message } = error else {
+            panic!("expected invalid request");
+        };
+        assert!(message.contains("cannot delete thread history safely"));
+        assert!(
+            message.contains(
+                unreadable_path
+                    .file_name()
+                    .expect("unreadable rollout filename")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert!(source_path.exists());
+        assert!(unreadable_path.exists());
     }
 
     #[tokio::test]
@@ -675,6 +749,67 @@ mod tests {
             .expect("delete rollout with unreadable metadata");
 
         assert!(!rollout_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_threads_rejects_unreadable_non_target_before_deleting_any_target() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let first_uuid = Uuid::from_u128(323);
+        let first_thread_id =
+            ThreadId::from_string(&first_uuid.to_string()).expect("first thread id");
+        let first_path = write_session_file(home.path(), "2025-01-03T12-00-00", first_uuid)
+            .expect("first session file");
+        let second_uuid = Uuid::from_u128(324);
+        let second_thread_id =
+            ThreadId::from_string(&second_uuid.to_string()).expect("second thread id");
+        let second_path = write_session_file(home.path(), "2025-01-03T12-00-01", second_uuid)
+            .expect("second session file");
+        let unreadable_path = second_path.with_file_name(format!(
+            "rollout-2025-01-03T12-00-02-{}.jsonl",
+            Uuid::from_u128(325)
+        ));
+        std::fs::write(&unreadable_path, "{not json}\n").expect("unreadable rollout metadata");
+
+        let error = store
+            .delete_threads(DeleteThreadsParams {
+                thread_ids: vec![first_thread_id, second_thread_id],
+            })
+            .await
+            .expect_err("unreadable non-target metadata should block the batch");
+
+        assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
+        assert!(first_path.exists());
+        assert!(second_path.exists());
+        assert!(unreadable_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_threads_allows_targeted_unreadable_metadata_in_atomic_batch() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let readable_uuid = Uuid::from_u128(326);
+        let readable_thread_id =
+            ThreadId::from_string(&readable_uuid.to_string()).expect("readable thread id");
+        let readable_path = write_session_file(home.path(), "2025-01-03T12-00-00", readable_uuid)
+            .expect("readable session file");
+        let unreadable_uuid = Uuid::from_u128(327);
+        let unreadable_thread_id =
+            ThreadId::from_string(&unreadable_uuid.to_string()).expect("unreadable thread id");
+        let unreadable_path =
+            write_session_file(home.path(), "2025-01-03T12-00-01", unreadable_uuid)
+                .expect("unreadable session file");
+        std::fs::write(&unreadable_path, "{not json}\n").expect("damage rollout metadata");
+
+        store
+            .delete_threads(DeleteThreadsParams {
+                thread_ids: vec![readable_thread_id, unreadable_thread_id],
+            })
+            .await
+            .expect("targeted unreadable metadata should not block the batch");
+
+        assert!(!readable_path.exists());
+        assert!(!unreadable_path.exists());
     }
 
     #[tokio::test]
