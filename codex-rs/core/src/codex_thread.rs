@@ -787,6 +787,18 @@ impl CodexThread {
             .await
     }
 
+    /// Observes this thread's published MCP connections and their latest startup failures.
+    pub async fn mcp_connection_status_details(
+        &self,
+        config: &codex_mcp::McpConfig,
+    ) -> std::collections::HashMap<String, codex_mcp::McpServerConnectionStatusSnapshot> {
+        self.session
+            .services
+            .mcp_runtime
+            .connection_status_details(config)
+            .await
+    }
+
     /// Resolves MCP configuration and environment bindings from the same config snapshot.
     pub async fn runtime_mcp_config_and_context(
         &self,

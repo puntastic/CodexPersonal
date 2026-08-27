@@ -7,9 +7,18 @@ import type { ResourceTemplate } from "../ResourceTemplate";
 import type { Tool } from "../Tool";
 import type { McpAuthStatus } from "./McpAuthStatus";
 import type { McpServerConnectionStatus } from "./McpServerConnectionStatus";
+import type { McpServerStartupFailureReason } from "./McpServerStartupFailureReason";
 
 export type McpServerStatus = { name: string,
 /**
  * Current thread-runtime connection state; null when unavailable or the configuration changed.
  */
-runtimeStatus: McpServerConnectionStatus | null, pluginId: string | null, serverInfo: McpServerInfo | null, tools: { [key in string]?: Tool }, resources: Array<Resource>, resourceTemplates: Array<ResourceTemplate>, authStatus: McpAuthStatus, };
+runtimeStatus: McpServerConnectionStatus | null,
+/**
+ * User-safe detail for the current thread-runtime startup failure, when one is retained.
+ */
+error?: string,
+/**
+ * Typed recovery reason for the current thread-runtime startup failure, when known.
+ */
+failureReason?: McpServerStartupFailureReason, pluginId: string | null, serverInfo: McpServerInfo | null, tools: { [key in string]?: Tool }, resources: Array<Resource>, resourceTemplates: Array<ResourceTemplate>, authStatus: McpAuthStatus, };

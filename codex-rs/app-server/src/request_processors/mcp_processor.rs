@@ -337,7 +337,7 @@ impl McpRequestProcessor {
         .await;
 
         let runtime_statuses = match thread {
-            Some(thread) => thread.mcp_connection_statuses(&mcp_config).await,
+            Some(thread) => thread.mcp_connection_status_details(&mcp_config).await,
             None => HashMap::new(),
         };
         let McpServerStatusSnapshot {
@@ -380,29 +380,36 @@ impl McpRequestProcessor {
 
         let data: Vec<McpServerStatus> = server_names[start..end]
             .iter()
-            .map(|name| McpServerStatus {
-                name: name.clone(),
-                runtime_status: runtime_statuses.get(name).copied().map(Into::into),
-                plugin_id: mcp_config.mcp_server_catalog.server(name).and_then(
-                    |server| match server.source() {
-                        McpServerSource::Plugin(plugin)
-                        | McpServerSource::SelectedPlugin(plugin) => {
-                            Some(plugin.plugin_id().to_owned())
-                        }
-                        McpServerSource::Config
-                        | McpServerSource::Compatibility { .. }
-                        | McpServerSource::Extension { .. } => None,
-                    },
-                ),
-                server_info: server_infos.get(name).cloned(),
-                tools: tools_by_server.get(name).cloned().unwrap_or_default(),
-                resources: resources.get(name).cloned().unwrap_or_default(),
-                resource_templates: resource_templates.get(name).cloned().unwrap_or_default(),
-                auth_status: auth_statuses
-                    .get(name)
-                    .cloned()
-                    .unwrap_or(CoreMcpAuthStatus::Unsupported)
-                    .into(),
+            .map(|name| {
+                let runtime = runtime_statuses.get(name);
+                McpServerStatus {
+                    name: name.clone(),
+                    runtime_status: runtime.map(|details| details.status.into()),
+                    error: runtime.and_then(|details| details.error.clone()),
+                    failure_reason: runtime
+                        .and_then(|details| details.failure_reason.map(Into::into)),
+                    plugin_id: mcp_config
+                        .mcp_server_catalog
+                        .server(name)
+                        .and_then(|server| match server.source() {
+                            McpServerSource::Plugin(plugin)
+                            | McpServerSource::SelectedPlugin(plugin) => {
+                                Some(plugin.plugin_id().to_owned())
+                            }
+                            McpServerSource::Config
+                            | McpServerSource::Compatibility { .. }
+                            | McpServerSource::Extension { .. } => None,
+                        }),
+                    server_info: server_infos.get(name).cloned(),
+                    tools: tools_by_server.get(name).cloned().unwrap_or_default(),
+                    resources: resources.get(name).cloned().unwrap_or_default(),
+                    resource_templates: resource_templates.get(name).cloned().unwrap_or_default(),
+                    auth_status: auth_statuses
+                        .get(name)
+                        .cloned()
+                        .unwrap_or(CoreMcpAuthStatus::Unsupported)
+                        .into(),
+                }
             })
             .collect();
 

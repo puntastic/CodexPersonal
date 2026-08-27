@@ -25,6 +25,8 @@ fn mcp_inventory_connection_states() {
     .map(|(name, runtime_status)| McpServerStatus {
         name: name.to_string(),
         runtime_status,
+        error: None,
+        failure_reason: None,
         plugin_id: None,
         server_info: None,
         tools: HashMap::new(),

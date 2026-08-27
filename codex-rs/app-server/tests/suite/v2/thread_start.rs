@@ -15,6 +15,7 @@ use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::ListMcpServerStatusParams;
 use codex_app_server_protocol::ListMcpServerStatusResponse;
+use codex_app_server_protocol::McpServerConnectionStatus;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
@@ -1363,18 +1364,42 @@ async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<
     let ServerNotification::McpServerStatusUpdated(failed) = failed else {
         anyhow::bail!("unexpected notification variant");
     };
-    assert_eq!(failed.thread_id, Some(start_response.thread.id));
+    assert_eq!(failed.thread_id, Some(start_response.thread.id.clone()));
     assert_eq!(failed.name, "optional_broken");
     assert_eq!(failed.status, McpServerStartupState::Failed);
     assert_eq!(failed.failure_reason, None);
+    let failed_error = failed
+        .error
+        .clone()
+        .expect("startup failure should explain itself");
     assert!(
-        failed
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("MCP client for `optional_broken` failed to start")),
+        failed_error.contains("MCP client for `optional_broken` failed to start"),
         "unexpected MCP startup error: {:?}",
         failed.error
     );
+
+    let statuses: ListMcpServerStatusResponse = mcp
+        .request(|request_id| ClientRequest::McpServerStatusList {
+            request_id,
+            params: ListMcpServerStatusParams {
+                cursor: None,
+                limit: None,
+                detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
+                thread_id: Some(start_response.thread.id),
+            },
+        })
+        .await?;
+    let status = statuses
+        .data
+        .iter()
+        .find(|status| status.name == "optional_broken")
+        .expect("optional_broken status");
+    assert_eq!(
+        status.runtime_status,
+        Some(McpServerConnectionStatus::Failed)
+    );
+    assert_eq!(status.error.as_deref(), Some(failed_error.as_str()));
+    assert_eq!(status.failure_reason, failed.failure_reason);
 
     Ok(())
 }

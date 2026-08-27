@@ -263,6 +263,8 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
         Ok(vec![McpServerStatus {
             name: "docs".to_string(),
             runtime_status: None,
+            error: None,
+            failure_reason: None,
             plugin_id: None,
             server_info: None,
             tools: HashMap::new(),

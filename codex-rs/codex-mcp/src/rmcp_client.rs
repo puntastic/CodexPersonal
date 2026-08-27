@@ -53,6 +53,7 @@ use codex_connectors::ConnectorRuntimeContext;
 use codex_connectors::ConnectorRuntimeFetchSource;
 use codex_exec_server::Environment;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::mcp::McpServerConnectionStatus;
 use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -149,6 +150,12 @@ impl ManagedClient {
 
 pub(crate) type ManagedClientFuture =
     Shared<BoxFuture<'static, Result<ManagedClient, StartupOutcomeError>>>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct McpConnectionStatusObservation {
+    pub status: McpServerConnectionStatus,
+    pub startup_error: Option<StartupOutcomeError>,
+}
 
 #[derive(Default)]
 struct CodexAppsStartupReconnectState {

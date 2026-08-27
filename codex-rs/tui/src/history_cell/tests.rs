@@ -972,6 +972,8 @@ fn mcp_tools_output_from_statuses_renders_status_only_servers() {
     let statuses = vec![McpServerStatus {
         name: "plugin_docs".to_string(),
         runtime_status: None,
+        error: None,
+        failure_reason: None,
         plugin_id: None,
         server_info: None,
         tools: HashMap::from([(
@@ -1004,6 +1006,8 @@ fn mcp_tools_output_from_statuses_renders_verbose_inventory() {
     let statuses = vec![McpServerStatus {
         name: "plugin_docs".to_string(),
         runtime_status: None,
+        error: None,
+        failure_reason: None,
         plugin_id: None,
         server_info: None,
         tools: HashMap::from([(

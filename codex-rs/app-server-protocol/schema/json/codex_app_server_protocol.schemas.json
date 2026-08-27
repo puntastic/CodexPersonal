@@ -14278,6 +14278,24 @@
           "authStatus": {
             "$ref": "#/definitions/v2/McpAuthStatus"
           },
+          "error": {
+            "description": "User-safe detail for the current thread-runtime startup failure, when one is retained.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failureReason": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/McpServerStartupFailureReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed recovery reason for the current thread-runtime startup failure, when known."
+          },
           "name": {
             "type": "string"
           },

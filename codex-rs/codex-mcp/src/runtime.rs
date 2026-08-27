@@ -29,9 +29,11 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::McpResourceOriginCheckpoint;
+use codex_protocol::mcp::McpServerConnectionStatus;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::McpStartupFailureReason;
 use codex_rmcp_client::ElicitationResponse;
 use codex_rmcp_client::with_http_headers_helper;
 use codex_utils_path_uri::PathUri;
@@ -62,6 +64,14 @@ pub enum McpStartupPolicy {
     Eager,
     /// Start servers with cached tool definitions on first use.
     LazyWhenCached,
+}
+
+/// Read-only view of one published MCP connection and its latest startup failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServerConnectionStatusSnapshot {
+    pub status: McpServerConnectionStatus,
+    pub error: Option<String>,
+    pub failure_reason: Option<McpStartupFailureReason>,
 }
 
 /// Everything needed to materialize one exact MCP configuration.
@@ -549,6 +559,26 @@ impl McpRuntime {
             return HashMap::new();
         };
         let mut statuses = current.connections.connection_statuses().await;
+        statuses.retain(|name, _| {
+            published_config
+                .mcp_server_catalog
+                .server(name)
+                .is_some_and(|server| config.mcp_server_catalog.server(name) == Some(server))
+        });
+        statuses
+    }
+
+    /// Observes matching published registrations and their latest startup failures without
+    /// starting or reconnecting servers.
+    pub async fn connection_status_details(
+        &self,
+        config: &McpConfig,
+    ) -> HashMap<String, McpServerConnectionStatusSnapshot> {
+        let current = self.current.load_full();
+        let Some(published_config) = current.config.as_ref() else {
+            return HashMap::new();
+        };
+        let mut statuses = current.connections.connection_status_details(config).await;
         statuses.retain(|name, _| {
             published_config
                 .mcp_server_catalog

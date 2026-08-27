@@ -7,6 +7,7 @@ use crate::elicitation::ElicitationReviewRequest;
 use crate::elicitation::ElicitationReviewer;
 use crate::elicitation::elicitation_is_rejected_by_policy;
 use crate::mcp::tests::test_elicitation_config;
+use crate::mcp::tests::test_mcp_config;
 use crate::rmcp_client::AsyncManagedClient;
 use crate::rmcp_client::CODEX_APPS_RECONNECT_INITIAL_BACKOFF;
 use crate::rmcp_client::CodexAppsStartupReconnect;
@@ -619,6 +620,37 @@ async fn connection_statuses_observe_clients_without_starting_them() {
     ]);
     assert_eq!(statuses, expected);
     assert!(!*trigger.borrow());
+
+    let config = test_mcp_config(PathBuf::new());
+    let details = tokio::time::timeout(
+        Duration::from_millis(/*millis*/ 100),
+        manager.connection_status_details(&config),
+    )
+    .await
+    .expect("status details must not await or start startup");
+    assert_eq!(
+        details
+            .iter()
+            .map(|(name, details)| (name.clone(), details.status))
+            .collect::<HashMap<_, _>>(),
+        expected
+    );
+    assert!(
+        details["failed"]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("broken"))
+    );
+    assert!(
+        details["auth"]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("is not logged in"))
+    );
+    assert_eq!(details["connected"].error, None);
+    assert_eq!(details["deferred"].error, None);
+    assert!(!*trigger.borrow());
+
     manager.test_client("connected").cancel_token.cancel();
     expected.insert("connected".to_string(), Status::Cancelled);
     assert_eq!(manager.connection_statuses().await, expected);
@@ -628,6 +660,7 @@ async fn connection_statuses_observe_clients_without_starting_them() {
 async fn connection_statuses_follow_latest_reconnect_outcome() {
     use codex_protocol::mcp::McpServerConnectionStatus as Status;
 
+    let config = test_mcp_config(PathBuf::new());
     let recovered = create_test_managed_client(Vec::new()).await;
     let attempts = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(Notify::new());
@@ -650,7 +683,7 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
                 finished.notify_one();
                 match attempt {
                     0 | 1 => Err(StartupOutcomeError::Failed {
-                        error: "retry failed".to_string(),
+                        error: format!("retry attempt {attempt} failed"),
                         is_authentication_required: attempt == 0,
                     }),
                     _ => Ok(recovered),
@@ -668,11 +701,24 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
         manager.connection_statuses().await,
         expected(Status::Failed)
     );
+    let initial_details = manager.connection_status_details(&config).await;
+    let initial_details = initial_details
+        .get(CODEX_APPS_MCP_SERVER_NAME)
+        .expect("Apps status details");
+    assert_eq!(initial_details.status, Status::Failed);
+    assert!(
+        initial_details
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("startup failed"))
+    );
+    assert_eq!(initial_details.failure_reason, None);
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
 
-    for status in [
-        Status::AuthenticationRequired,
-        Status::Failed,
-        Status::Connected,
+    for (attempt, status) in [
+        (0, Status::AuthenticationRequired),
+        (1, Status::Failed),
+        (2, Status::Connected),
     ] {
         client.reconnect_failed_startup().await;
         started.notified().await;
@@ -680,9 +726,42 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
             manager.connection_statuses().await,
             expected(Status::Starting)
         );
+        let starting_details = manager.connection_status_details(&config).await;
+        let starting_details = starting_details
+            .get(CODEX_APPS_MCP_SERVER_NAME)
+            .expect("Apps starting details");
+        assert_eq!(starting_details.status, Status::Starting);
+        assert_eq!(starting_details.error, None);
+        assert_eq!(starting_details.failure_reason, None);
+        assert_eq!(attempts.load(Ordering::SeqCst), attempt + 1);
         release.notify_one();
         finished.notified().await;
         assert_eq!(manager.connection_statuses().await, expected(status));
+        let completed_details = manager.connection_status_details(&config).await;
+        let completed_details = completed_details
+            .get(CODEX_APPS_MCP_SERVER_NAME)
+            .expect("Apps completed details");
+        assert_eq!(completed_details.status, status);
+        if status == Status::Connected {
+            assert_eq!(completed_details.error, None);
+            assert_eq!(completed_details.failure_reason, None);
+        } else {
+            let expected_error = if status == Status::AuthenticationRequired {
+                "is not logged in".to_string()
+            } else {
+                format!("retry attempt {attempt} failed")
+            };
+            assert!(
+                completed_details
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(&expected_error)),
+                "unexpected attempt {attempt} error: {:?}",
+                completed_details.error
+            );
+            assert_eq!(completed_details.failure_reason, None);
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), attempt + 1);
         tokio::time::advance(CODEX_APPS_RECONNECT_INITIAL_BACKOFF * 2).await;
     }
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
@@ -4248,6 +4327,28 @@ fn mcp_startup_failure_reason_requires_existing_oauth_and_auth_failure() {
             mcp_startup_failure_reason(auth_state, &error),
             expected,
             "auth_state={auth_state:?}, is_authentication_required={is_authentication_required}"
+        );
+    }
+}
+
+#[test]
+fn connection_status_failure_reason_requires_retained_oauth_and_auth_failure() {
+    for (has_retained_oauth, is_authentication_required, expected) in [
+        (
+            true,
+            true,
+            Some(McpStartupFailureReason::ReauthenticationRequired),
+        ),
+        (true, false, None),
+        (false, true, None),
+    ] {
+        let error = StartupOutcomeError::Failed {
+            error: "startup failed".to_string(),
+            is_authentication_required,
+        };
+        assert_eq!(
+            super::status::failure_reason_from_retained_oauth(has_retained_oauth, &error),
+            expected
         );
     }
 }

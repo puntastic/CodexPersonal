@@ -2557,6 +2557,8 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
         data: vec![McpServerStatus {
             name: "not-ready".to_string(),
             runtime_status: None,
+            error: None,
+            failure_reason: None,
             plugin_id: None,
             server_info: None,
             tools: HashMap::new(),
@@ -2602,6 +2604,8 @@ fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
         McpServerStatus {
             name: "older-server".to_string(),
             runtime_status: None,
+            error: None,
+            failure_reason: None,
             plugin_id: None,
             server_info: None,
             tools: HashMap::new(),
@@ -2609,6 +2613,38 @@ fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
             resource_templates: Vec::new(),
             auth_status: McpAuthStatus::Unknown,
         }
+    );
+}
+
+#[test]
+fn mcp_server_status_serializes_runtime_failure_detail() {
+    let status = McpServerStatus {
+        name: "expired-oauth".to_string(),
+        runtime_status: Some(McpServerConnectionStatus::AuthenticationRequired),
+        error: Some("The expired-oauth MCP server requires OAuth reauthentication.".to_string()),
+        failure_reason: Some(McpServerStartupFailureReason::ReauthenticationRequired),
+        plugin_id: None,
+        server_info: None,
+        tools: HashMap::new(),
+        resources: Vec::new(),
+        resource_templates: Vec::new(),
+        auth_status: McpAuthStatus::NotLoggedIn,
+    };
+
+    assert_eq!(
+        serde_json::to_value(status).expect("status should serialize"),
+        json!({
+            "name": "expired-oauth",
+            "runtimeStatus": "authenticationRequired",
+            "error": "The expired-oauth MCP server requires OAuth reauthentication.",
+            "failureReason": "reauthenticationRequired",
+            "pluginId": null,
+            "serverInfo": null,
+            "tools": {},
+            "resources": [],
+            "resourceTemplates": [],
+            "authStatus": "notLoggedIn",
+        })
     );
 }
 
@@ -2673,6 +2709,8 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
         data: vec![McpServerStatus {
             name: "initialized".to_string(),
             runtime_status: None,
+            error: None,
+            failure_reason: None,
             plugin_id: Some("lookup@test".to_string()),
             server_info: Some(McpServerInfo {
                 name: "lookup-server".to_string(),

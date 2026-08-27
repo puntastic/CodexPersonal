@@ -1558,6 +1558,8 @@ mod tests {
             McpServerStatus {
                 name: "docs".to_string(),
                 runtime_status: None,
+                error: None,
+                failure_reason: None,
                 plugin_id: None,
                 server_info: None,
                 tools: HashMap::from([(
@@ -1580,6 +1582,8 @@ mod tests {
             McpServerStatus {
                 name: "disabled".to_string(),
                 runtime_status: None,
+                error: None,
+                failure_reason: None,
                 plugin_id: None,
                 server_info: None,
                 tools: HashMap::new(),
