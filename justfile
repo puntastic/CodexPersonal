@@ -41,6 +41,12 @@ code-mode-host *args:
 assemble-codex-package *args:
     {{ python }} {{ justfile_directory() }}/scripts/build_codex_package.py {args}
 
+# Develop, build, stage, activate, verify, or roll back a local Windows Desktop override.
+[no-cd]
+[windows]
+desktop-dev *args:
+    pwsh -NoLogo -NoProfile -File {{ justfile_directory() }}/codex-dev.ps1 {args}
+
 # Build the CLI and run the app-server test client
 app-server-test-client *args:
     cargo build -p codex-cli
