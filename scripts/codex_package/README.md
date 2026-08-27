@@ -10,6 +10,7 @@ Run the builder through `just`:
 just assemble-codex-package --help
 just assemble-codex-package --variant codex-app-server
 just assemble-codex-package --target x86_64-unknown-linux-gnu
+just assemble-codex-package --target x86_64-pc-windows-msvc --cargo-native-host --cargo-locked
 ```
 
 The builder creates a canonical Codex package directory:
@@ -60,6 +61,20 @@ fast, small builds. Release jobs should pass `--cargo-profile release` and an
 explicit target. Release jobs that already built and signed/notarized the
 entrypoint should pass `--entrypoint-bin` so the package contains that exact
 binary instead of rebuilding it.
+
+For a native-host Cargo build, pass `--cargo-native-host` together with the
+exact package target reported as `host:` by `cargo -vV`. The builder verifies
+that exact match before building, omits Cargo's `--target` option, ignores an
+inherited `CARGO_BUILD_TARGET`, and reads artifacts from `target/<profile>`.
+It also refuses native-host mode when the standard ancestor or `CARGO_HOME`
+Cargo configuration chain declares `build.target` or `build.target-dir`, because
+either would redirect artifacts away from the modeled native output directory.
+Without this option, source builds keep using `--target <package-target>` and
+`target/<package-target>/<profile>` as before.
+
+Pass `--cargo-locked` when package builds must refuse dependency resolution
+that would change `Cargo.lock`. The personal Windows Desktop lane enables it by
+default.
 
 Release jobs should likewise pass `--code-mode-host-bin` so the package contains
 the signed host executable beside the signed entrypoint.

@@ -106,6 +106,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--cargo-native-host",
+        action="store_true",
+        help=(
+            "Build source artifacts for Cargo's native host without passing "
+            "--target. The selected package target must exactly match the host "
+            "reported by 'cargo -vV'."
+        ),
+    )
+    parser.add_argument(
+        "--cargo-locked",
+        action="store_true",
+        help="Pass --locked to Cargo when source artifacts must be built.",
+    )
+    parser.add_argument(
         "--entrypoint-bin",
         type=Path,
         help=(
@@ -188,6 +202,8 @@ def main() -> int:
         variant,
         cargo=args.cargo,
         profile=args.cargo_profile,
+        cargo_native_host=args.cargo_native_host,
+        cargo_locked=args.cargo_locked,
         entrypoint_bin=resolve_optional_input_path(
             args.entrypoint_bin,
             "prebuilt entrypoint executable",
