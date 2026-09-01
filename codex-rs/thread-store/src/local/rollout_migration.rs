@@ -2562,6 +2562,7 @@ fn inspect_rollout_reader<R: StdBufRead>(
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_)
@@ -2735,6 +2736,7 @@ fn collect_response_item_ids(item: &RolloutItem, item_ids: &mut HashSet<String>)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::TurnContext(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_)

@@ -1,3 +1,70 @@
+function Get-CodexDevBazeliskAsset {
+    param([string]$HostTarget = (Get-CodexDevHostTarget))
+
+    # Keep this pin aligned with .github/actions/setup-bazel-ci/action.yml.
+    $version = "1.28.1"
+    $asset = switch ($HostTarget) {
+        "x86_64-pc-windows-msvc" {
+            @{
+                FileName = "bazelisk-windows-amd64.exe"
+                Sha256 = "b9d65a1f7c2d7af885a96a4fd5aa36b40fb41816d30944390569eef908bdc954"
+            }
+        }
+        "aarch64-pc-windows-msvc" {
+            @{
+                FileName = "bazelisk-windows-arm64.exe"
+                Sha256 = "85ba3d92a8bdcbecc06657b8c0ae30f4307b552d601d9d6246f8a98aec36c346"
+            }
+        }
+        default { throw "Unsupported Bazelisk host target: $HostTarget" }
+    }
+    return [pscustomobject]@{
+        Version = $version
+        FileName = $asset.FileName
+        Sha256 = $asset.Sha256
+        Uri = "https://github.com/bazelbuild/bazelisk/releases/download/v$version/$($asset.FileName)"
+    }
+}
+
+function Install-CodexDevBazelisk {
+    param(
+        [string]$Python,
+        [string]$Destination = (Join-Path (Get-CodexDevLocalToolRoot) "bin\bazel.exe"),
+        [string]$HostTarget = (Get-CodexDevHostTarget)
+    )
+
+    $asset = Get-CodexDevBazeliskAsset -HostTarget $HostTarget
+    $destinationPath = [System.IO.Path]::GetFullPath($Destination)
+    $destinationRoot = Split-Path -Parent $destinationPath
+    New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
+    $temporaryPath = "$destinationPath.download-$([guid]::NewGuid().ToString('N'))"
+    try {
+        $downloadScript = @'
+import shutil
+import sys
+from urllib.request import urlopen
+
+with urlopen(sys.argv[1], timeout=120) as response, open(sys.argv[2], "wb") as output:
+    shutil.copyfileobj(response, output)
+'@
+        Invoke-CodexDevNative -FilePath $Python -ArgumentList @(
+            "-c", $downloadScript, $asset.Uri, $temporaryPath
+        )
+        $actualHash = (Get-FileHash -LiteralPath $temporaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne $asset.Sha256) {
+            throw "Bazelisk checksum mismatch for $($asset.Uri). Expected $($asset.Sha256), got $actualHash."
+        }
+        $actualTarget = Get-CodexDevWindowsExecutableTarget $temporaryPath
+        if ($actualTarget -ne $HostTarget) {
+            throw "Bazelisk target '$actualTarget' does not match the host target '$HostTarget'."
+        }
+        Move-Item -LiteralPath $temporaryPath -Destination $destinationPath -Force
+    } finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    }
+    return $destinationPath
+}
+
 function Get-CodexDevToolStatus {
     $justError = $null
     $justVersion = $null
@@ -29,6 +96,18 @@ function Get-CodexDevToolStatus {
             $dotslashError = $_.Exception.Message
         }
     }
+    $bazelError = $null
+    $bazel = try { Resolve-CodexDevBazel } catch { $bazelError = $_.Exception.Message; $null }
+    if (-not [string]::IsNullOrWhiteSpace($bazel)) {
+        try {
+            $actualTarget = Get-CodexDevWindowsExecutableTarget $bazel
+            if ($actualTarget -ne (Get-CodexDevHostTarget)) {
+                throw "Bazel target '$actualTarget' does not match the host target '$(Get-CodexDevHostTarget)'."
+            }
+        } catch {
+            $bazelError = $_.Exception.Message
+        }
+    }
     return [pscustomobject]@{
         Root = Get-CodexDevLocalToolRoot
         Just = $just
@@ -40,6 +119,10 @@ function Get-CodexDevToolStatus {
         Dotslash = $dotslash
         DotslashVersion = $dotslashVersion
         DotslashError = $dotslashError
+        Bazel = $bazel
+        BazelError = $bazelError
+        BazelReady = -not [string]::IsNullOrWhiteSpace($bazel) -and
+            [string]::IsNullOrWhiteSpace($bazelError)
         FormatReady = [string]::IsNullOrWhiteSpace($justError) -and
             [string]::IsNullOrWhiteSpace($uvError) -and
             [string]::IsNullOrWhiteSpace($dotslashError) -and
@@ -101,6 +184,15 @@ function Invoke-CodexDevToolSetup {
             )
         }
     }
+    if (-not $before.BazelReady) {
+        $planned += if ([string]::IsNullOrWhiteSpace($before.Bazel)) { "bazelisk" } else { "bazelisk-repair" }
+        $bazelDestination = Join-Path $root "bin\bazel.exe"
+        if ($PSCmdlet.ShouldProcess($bazelDestination, "Install the repository-pinned Bazelisk binary")) {
+            $null = Install-CodexDevBazelisk `
+                -Python $environment.Python `
+                -Destination $bazelDestination
+        }
+    }
 
     $installedUv = Resolve-CodexDevInstalledUvForExposure $root
     $localUv = Join-Path $root "bin\uv.exe"
@@ -134,6 +226,7 @@ function Invoke-CodexDevToolSetup {
             @{ Name = "just"; Path = $after.Just; Error = $after.JustError },
             @{ Name = "uv"; Path = $after.Uv; Error = $after.UvError },
             @{ Name = "dotslash"; Path = $after.Dotslash; Error = $after.DotslashError }
+            @{ Name = "bazel"; Path = $after.Bazel; Error = $after.BazelError }
         )) {
             if ([string]::IsNullOrWhiteSpace([string]$tool.Path)) {
                 "$($tool.Name) missing"
@@ -145,10 +238,14 @@ function Invoke-CodexDevToolSetup {
     if (-not $WhatIfPreference -and -not $after.FormatReady) {
         throw "Local tool setup finished without a complete format toolchain. $($problems -join ' | ')"
     }
+    if (-not $WhatIfPreference -and -not $after.BazelReady) {
+        throw "Local tool setup finished without Bazel. $($problems -join ' | ')"
+    }
     $versions = [ordered]@{
         Just = $after.JustVersion
         Uv = $after.UvVersion
         Dotslash = $after.DotslashVersion
+        Bazelisk = if ($after.BazelReady) { (Get-CodexDevBazeliskAsset).Version } else { $null }
     }
     $receipt = $null
     $receiptError = $null

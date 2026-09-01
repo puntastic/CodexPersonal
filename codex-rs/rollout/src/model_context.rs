@@ -28,7 +28,8 @@ pub enum ModelContextScanProgress {
 /// The scan stops once it has both:
 ///
 /// - `saw_compaction`: a `CompactedItem` with one replacement-history form and `window_number`;
-/// - `saw_completed_turn_context`: a completed user turn with a compatible `TurnContextItem`.
+/// - `saw_completed_turn_context`: a completed turn with a compatible `TurnContextItem` and a
+///   durable context baseline.
 ///
 /// An entry-backed replacement history is only a bounded base once every `Reference` has found an
 /// older source item. Sources may be top-level response items, legacy replacement-history items,
@@ -36,17 +37,17 @@ pub enum ModelContextScanProgress {
 ///
 /// Before the newest usable checkpoint is found, the scan retains the complete suffix. Older
 /// records are retained only when they are an explicit source requested by that checkpoint or are
-/// needed to reconstruct one completed user-turn context. This keeps a successful scan bounded by
-/// the context it will actually replay, even when a requested source is very old.
+/// needed to reconstruct one completed turn's durable context baseline. This keeps a successful
+/// scan bounded by the context it will actually replay, even when a requested source is very old.
 ///
-/// `TurnContextItem` does not identify whether it came from a user turn, so one only counts after
-/// the same turn also proves a user-turn boundary: a paginated
-/// `ItemCompleted(UserMessage)` marker, agent message, or inter-agent message. Paginated writers
-/// persist that marker for real user turns; older rollouts without it conservatively scan to the
-/// beginning. A raw `role=user` response item is not sufficient because contextual user fragments
-/// use that role but do not count as turn boundaries during reconstruction. The compaction restores
-/// model-visible items; the turn context restores previous settings (`model`, `comp_hash`, and
-/// `realtime_active`) and the reference baseline.
+/// A turn establishes a context baseline with a user-turn boundary (a paginated
+/// `ItemCompleted(UserMessage)` marker, agent message, or inter-agent message), or a full
+/// `WorldState` snapshot newer than that turn's latest compaction. The snapshot also lets turns
+/// with empty input supply resume metadata, matching rollout reconstruction. Without either,
+/// the scan continues to older turns. A raw `role=user` response item is not sufficient because
+/// contextual user fragments use that role but do not count as turn boundaries during reconstruction.
+/// The compaction restores model-visible items; the turn context restores previous settings
+/// (`model`, `comp_hash`, and `realtime_active`) and the reference baseline.
 ///
 /// These paginated shapes disable the bounded cutoff:
 ///
@@ -145,6 +146,7 @@ impl ModelContextScan {
                 } else {
                     let is_selected_base = !self.saw_compaction;
                     self.saw_compaction = true;
+                    self.active_segment.saw_compaction = true;
                     if is_selected_base {
                         // Register references only after examining the selected checkpoint. An
                         // inline entry in that same checkpoint is not an older explicit source.
@@ -227,12 +229,16 @@ impl ModelContextScan {
             RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
                 self.active_segment.has_user_turn = true;
             }
+            RolloutItem::WorldState(state) => {
+                self.active_segment.has_full_world_state |=
+                    state.full && !self.active_segment.saw_compaction;
+            }
             RolloutItem::EventMsg(_)
             | RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::SecurityRiskScore(_)
-            | RolloutItem::WorldState(_) => {}
+            | RolloutItem::TokenUsageRecord(_) => {}
         }
 
         observation
@@ -241,8 +247,8 @@ impl ModelContextScan {
     fn finalize_active_segment(&mut self) {
         let active_segment = std::mem::take(&mut self.active_segment);
         let retain_context_metadata = !self.saw_completed_turn_context
-            && active_segment.has_user_turn
-            && active_segment.has_turn_context;
+            && active_segment.has_turn_context
+            && (active_segment.has_user_turn || active_segment.has_full_world_state);
         if retain_context_metadata {
             self.saw_completed_turn_context = true;
         }
@@ -340,7 +346,8 @@ impl ModelContextScan {
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_)
-            | RolloutItem::RealtimeItem(_) => None,
+            | RolloutItem::RealtimeItem(_)
+            | RolloutItem::TokenUsageRecord(_) => None,
         }
     }
 
@@ -358,6 +365,8 @@ struct ActiveTurnSegment {
     has_user_turn: bool,
     has_turn_context: bool,
     retained_items_newest_first: Vec<RetainedPreBaseItem>,
+    has_full_world_state: bool,
+    saw_compaction: bool,
 }
 
 #[derive(Debug)]
@@ -392,7 +401,9 @@ fn response_item_counts_as_user_turn(response_item: &ResponseItemEnvelope) -> bo
 
 fn item_is_completed_turn_context_metadata(item: &RolloutItem) -> bool {
     match item {
-        RolloutItem::TurnContext(_) | RolloutItem::InterAgentCommunication(_) => true,
+        RolloutItem::TurnContext(_)
+        | RolloutItem::InterAgentCommunication(_)
+        | RolloutItem::WorldState(_) => true,
         RolloutItem::ResponseItem(response_item) => match &response_item.item {
             ResponseItem::AgentMessage { .. } => true,
             ResponseItem::Message { role, content, .. } => {
@@ -410,10 +421,10 @@ fn item_is_completed_turn_context_metadata(item: &RolloutItem) -> bool {
         RolloutItem::SessionMeta(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
-        | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_)
-        | RolloutItem::RealtimeItem(_) => false,
+        | RolloutItem::RealtimeItem(_)
+        | RolloutItem::TokenUsageRecord(_) => false,
     }
 }
 

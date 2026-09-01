@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import json
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlopen
 
-from .targets import REPO_ROOT, TargetSpec
+from .targets import REPO_ROOT, TARGET_SPECS, TargetSpec
 
 DOWNLOAD_TIMEOUT_SECS = 120
 V8_ARTIFACT_PROFILE = "ptrcomp_sandbox_release"
@@ -72,9 +74,21 @@ def fetch_codex_v8_artifacts(
     archive = cache_dir / archive_name
     binding = cache_dir / binding_name
     checksums = cache_dir / checksums_name
+    artifacts = RustyV8ArtifactPair(archive=archive, binding=binding)
+    artifact_names = {archive.name, binding.name}
+
+    try:
+        cached_checksums = load_checksums(checksums, artifact_names)
+    except (OSError, UnicodeError, RuntimeError):
+        cached_checksums = None
+    if cached_checksums is not None and all(
+        has_checksum(artifact, cached_checksums[artifact.name])
+        for artifact in [archive, binding]
+    ):
+        return artifacts
 
     download_file(f"{release_url}/{checksums.name}", checksums)
-    expected_checksums = load_checksums(checksums, {archive.name, binding.name})
+    expected_checksums = load_checksums(checksums, artifact_names)
     for artifact in [archive, binding]:
         ensure_valid_artifact(
             artifact,
@@ -82,7 +96,7 @@ def fetch_codex_v8_artifacts(
             f"{release_url}/{artifact.name}",
         )
 
-    return RustyV8ArtifactPair(archive=archive, binding=binding)
+    return artifacts
 
 
 def resolved_v8_crate_version() -> str:
@@ -177,3 +191,27 @@ def download_file(url: str, dest: Path) -> None:
         temp_path.replace(dest)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", required=True, choices=sorted(TARGET_SPECS))
+    parser.add_argument("--cache-root", required=True, type=Path)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    cargo_env = resolve_codex_v8_cargo_env(
+        TARGET_SPECS[args.target],
+        cache_root=args.cache_root.expanduser().resolve(),
+    )
+    absolute_cargo_env = {
+        name: str(Path(path).resolve()) for name, path in cargo_env.items()
+    }
+    print(json.dumps(absolute_cargo_env, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

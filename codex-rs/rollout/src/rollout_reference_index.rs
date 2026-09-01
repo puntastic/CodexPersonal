@@ -38,7 +38,10 @@ impl RolloutReferenceIndex {
     /// Scans active and archived local rollout metadata without a deadline.
     pub async fn scan(codex_home: &Path) -> io::Result<Self> {
         let Some(index) = Self::scan_with_deadline(
-            codex_home,
+            vec![
+                codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
+                codex_home.join(SESSIONS_SUBDIR),
+            ],
             ScanDeadline::Unlimited,
             UnreadableMetadataPolicy::Ignore,
         )
@@ -62,7 +65,10 @@ impl RolloutReferenceIndex {
         targeted_thread_ids: &HashSet<ThreadId>,
     ) -> io::Result<Self> {
         let Some(index) = Self::scan_with_deadline(
-            codex_home,
+            vec![
+                codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
+                codex_home.join(SESSIONS_SUBDIR),
+            ],
             ScanDeadline::Unlimited,
             UnreadableMetadataPolicy::FailClosedForDeletion {
                 targeted_thread_ids,
@@ -77,6 +83,20 @@ impl RolloutReferenceIndex {
         Ok(index)
     }
 
+    /// Scans only unarchived rollouts to locate files that still need to be archived.
+    ///
+    /// Reference counts exclude archived history and must not be used to decide whether a
+    /// rollout can be deleted or compressed.
+    pub async fn scan_unarchived(codex_home: &Path) -> io::Result<Self> {
+        Self::scan_with_deadline(
+            vec![codex_home.join(SESSIONS_SUBDIR)],
+            ScanDeadline::Unlimited,
+            UnreadableMetadataPolicy::Ignore,
+        )
+        .await?
+        .ok_or_else(|| io::Error::other("unlimited rollout reference scan exceeded a deadline"))
+    }
+
     /// Scans active and archived local rollout metadata until the worker deadline expires.
     ///
     /// Returns None instead of a partial index when the deadline expires.
@@ -86,7 +106,10 @@ impl RolloutReferenceIndex {
         max_runtime: Duration,
     ) -> io::Result<Option<Self>> {
         Self::scan_with_deadline(
-            codex_home,
+            vec![
+                codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
+                codex_home.join(SESSIONS_SUBDIR),
+            ],
             ScanDeadline::Until {
                 started_at,
                 max_runtime,
@@ -123,15 +146,11 @@ impl RolloutReferenceIndex {
     }
 
     async fn scan_with_deadline(
-        codex_home: &Path,
+        mut stack: Vec<PathBuf>,
         deadline: ScanDeadline,
         unreadable_metadata_policy: UnreadableMetadataPolicy<'_>,
     ) -> io::Result<Option<Self>> {
         let mut rollouts_by_id = HashMap::new();
-        let mut stack = vec![
-            codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
-            codex_home.join(SESSIONS_SUBDIR),
-        ];
         while let Some(directory) = stack.pop() {
             if deadline.expired() {
                 return Ok(None);

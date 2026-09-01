@@ -14,6 +14,7 @@ use super::THREAD_HISTORY_MIGRATOR;
 use super::migration_with_windows_crlf;
 #[cfg(windows)]
 use super::normalize_windows_crlf;
+use super::repair_legacy_history_mode_migration_version;
 use super::repair_legacy_recency_migration_version;
 use super::runtime_state_migrator;
 use crate::PINNED_THREAD_SECTION_ID;
@@ -134,7 +135,7 @@ async fn history_mode_family_migration_normalizes_reference_generation() {
         .open_read_write_pool(&sqlite.state_db_path())
         .await
         .expect("sqlite database should open");
-    migrator_through(/*version*/ 51)
+    migrator_through(/*version*/ 52)
         .run(&pool)
         .await
         .expect("pre-normalization migrations should apply");
@@ -208,6 +209,106 @@ INSERT INTO threads (
             ),
         ]
     );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn repairs_history_mode_migration_that_was_applied_as_version_52() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("sqlite database should open");
+    let runtime_migrator = runtime_state_migrator();
+    let pre_collision_migrator = Migrator {
+        migrations: Cow::Owned(
+            runtime_migrator
+                .migrations
+                .iter()
+                .filter(|migration| migration.version <= 51)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: runtime_migrator.ignore_missing,
+        locking: runtime_migrator.locking,
+        table_name: runtime_migrator.table_name.clone(),
+        create_schemas: runtime_migrator.create_schemas.clone(),
+        no_tx: runtime_migrator.no_tx,
+    };
+    pre_collision_migrator
+        .run(&pool)
+        .await
+        .expect("pre-collision migrations should apply");
+
+    let history_mode_migration = runtime_migrator
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 53)
+        .expect("history-mode migration should exist");
+    let mut legacy_migrations = runtime_migrator
+        .migrations
+        .iter()
+        .filter(|migration| migration.version <= 51)
+        .cloned()
+        .collect::<Vec<_>>();
+    legacy_migrations.push(Migration::new(
+        52,
+        history_mode_migration.description.clone(),
+        history_mode_migration.migration_type,
+        history_mode_migration.sql.clone(),
+        history_mode_migration.no_tx,
+    ));
+    Migrator::with_migrations(legacy_migrations)
+        .run(&pool)
+        .await
+        .expect("legacy history-mode migration should apply as version 52");
+
+    repair_legacy_history_mode_migration_version(&pool, &runtime_migrator)
+        .await
+        .expect("legacy migration history should be repaired");
+    runtime_migrator
+        .run(&pool)
+        .await
+        .expect("current migrations should apply after repair");
+
+    let applied = sqlx::query(
+        "SELECT version, checksum FROM _sqlx_migrations WHERE version >= 52 ORDER BY version",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("applied migrations should load")
+    .into_iter()
+    .map(|row| {
+        (
+            row.get::<i64, _>("version"),
+            row.get::<Vec<u8>, _>("checksum"),
+        )
+    })
+    .collect::<Vec<_>>();
+    let expected = runtime_state_migrator()
+        .migrations
+        .iter()
+        .filter(|migration| migration.version >= 52)
+        .map(|migration| (migration.version, migration.checksum.to_vec()))
+        .collect::<Vec<_>>();
+    assert_eq!(applied, expected);
+
+    let project_recency_index_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_threads_project_recency'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("project recency index lookup should succeed")
+    .is_some();
+    assert!(project_recency_index_exists);
 
     pool.close().await;
 }

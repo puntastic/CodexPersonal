@@ -254,8 +254,16 @@ pub struct ConversationStartParams {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConversationStartTransport {
     Websocket,
-    Webrtc { sdp: String },
-    ExistingCall { call_id: String },
+    Webrtc {
+        sdp: String,
+    },
+    ExistingCall {
+        call_id: String,
+        /// Endpoint selected by the embedding runtime for this call's sideband.
+        /// This is an in-process override, not a client-supplied API parameter.
+        /// `None` uses the configured endpoint or the default public API.
+        sideband_base_url: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -440,6 +448,13 @@ pub enum RealtimeEvent {
     ConversationItemDone {
         item_id: String,
     },
+    /// Canonical display history produced by Core, separate from provider events.
+    HistoryItemStarted(crate::realtime::RealtimeItem),
+    HistoryTranscriptDelta {
+        item_id: String,
+        delta: String,
+    },
+    HistoryItemCompleted(crate::realtime::RealtimeItem),
     HandoffRequested(RealtimeHandoffRequested),
     NoopRequested(RealtimeNoopRequested),
     Error(String),
@@ -739,6 +754,8 @@ pub enum Op {
     RunUserShellCommand {
         /// The raw command string after '!'
         command: String,
+        /// Maximum execution time in milliseconds. Defaults to one hour.
+        timeout_ms: Option<u64>,
     },
 }
 
@@ -1375,6 +1392,12 @@ pub enum EventMsg {
     /// Warning issued while processing a submission. Unlike `Error`, this
     /// indicates the turn continued but the user should still be notified.
     Warning(WarningEvent),
+
+    /// Provider-owned authentication recovery has started for the current turn.
+    AuthRecoveryStarted(AuthRecoveryEvent),
+
+    /// Provider-owned authentication recovery has completed for the current turn.
+    AuthRecoveryCompleted(AuthRecoveryEvent),
 
     /// Warning issued by the guardian automatic approval reviewer.
     GuardianWarning(WarningEvent),
@@ -2089,6 +2112,15 @@ pub struct WarningEvent {
     pub message: String,
 }
 
+/// User-facing progress for provider-owned authentication recovery.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct AuthRecoveryEvent {
+    /// Display name of the model provider whose authentication is recovering.
+    pub provider: String,
+    /// User-facing description of the authentication recovery stage.
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
@@ -2177,6 +2209,11 @@ pub struct TurnStartedEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ThreadSettingsAppliedEvent {
+    /// Logical task that owns this snapshot, independent of the physical rollout file.
+    /// Absent in older histories; copied snapshots retain their original owner's ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thread_id: Option<ThreadId>,
     pub thread_settings: ThreadSettingsSnapshot,
 }
 
@@ -2222,6 +2259,19 @@ pub struct TokenUsage {
     #[schemars(skip)]
     #[ts(skip)]
     pub codex_rollout_budget_units: Option<serde_json::Number>,
+}
+
+/// Best-effort Responses API usage observed for one completed response.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct TokenUsageRecord {
+    pub thread_id: ThreadId,
+    pub turn_id: String,
+    pub session_id: SessionId,
+    pub root_turn_id: String,
+    pub response_id: String,
+    pub usage: TokenUsage,
+    pub turn_token_usage: TokenUsage,
+    pub thread_token_usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -3009,6 +3059,7 @@ pub struct HistoryPosition {
 /// and should be used when there is no config override.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct SessionMeta {
+    /// session_id is equal to the root thread's ID.
     pub session_id: SessionId,
     pub id: ThreadId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3172,6 +3223,10 @@ pub struct TurnContextNetworkItem {
 pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// Root turn that owns this subagent turn's attribution.
+    /// Only set for subagent turns; persisted so resume keeps the scope frozen at turn start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_turn_id: Option<String>,
     pub cwd: AbsolutePathBuf,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
@@ -5988,6 +6043,7 @@ mod tests {
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
+            root_turn_id: None,
             cwd: test_path_buf("/tmp").abs(),
             workspace_roots: None,
             current_date: None,

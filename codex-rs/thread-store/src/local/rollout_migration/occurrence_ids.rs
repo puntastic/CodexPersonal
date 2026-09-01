@@ -166,6 +166,7 @@ impl MigrationOccurrenceIds {
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_)

@@ -21,6 +21,7 @@ use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::CompactedHistoryEntry;
 use codex_rollout::CompactedItem;
@@ -135,6 +136,144 @@ async fn loads_model_context_from_the_exact_resolved_rollout() {
         !serialized.contains("independently resolved rollout"),
         "{serialized}"
     );
+}
+
+#[tokio::test]
+async fn loads_recent_context_after_many_empty_wake_turns() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 1008);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_paginated_rollout(
+        home.path(),
+        "2025-01-03T13-00-07",
+        uuid,
+        [
+            turn_started("user-turn"),
+            user_message("keep working"),
+            completed_user_message("user-turn", "keep working"),
+            turn_context(home.path(), "user-turn"),
+            turn_complete("user-turn"),
+        ],
+    );
+    let mut expected_suffix = Vec::new();
+    for index in 0..32 {
+        let turn_id = format!("wake-{index}");
+        let mut items = vec![turn_started(&turn_id)];
+        if index % 8 == 0 {
+            expected_suffix.clear();
+            items.extend([
+                compacted(&format!("checkpoint-{index}"), Some(Vec::new())),
+                RolloutItem::WorldState(WorldStateItem::full(Default::default())),
+            ]);
+        }
+        items.extend([
+            turn_context(home.path(), &turn_id),
+            contextual_user_message(),
+            turn_complete(&turn_id),
+        ]);
+        append_items(&path, items.clone());
+        expected_suffix.extend(items);
+    }
+    let session_meta = codex_rollout::read_session_meta_line(&path)
+        .await
+        .expect("read session metadata");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load model context");
+    expected_suffix.insert(0, RolloutItem::SessionMeta(session_meta));
+
+    assert_eq!(
+        serde_json::to_value(context.items).expect("serialize context"),
+        serde_json::to_value(expected_suffix).expect("serialize expected context")
+    );
+}
+
+#[tokio::test]
+async fn empty_wake_requires_surviving_full_world_state_and_matching_context() {
+    enum MissingBaseline {
+        SnapshotBeforeCompaction,
+        PatchOnly,
+        MissingContext,
+        IncompatibleContext,
+    }
+    for baseline in [
+        MissingBaseline::SnapshotBeforeCompaction,
+        MissingBaseline::PatchOnly,
+        MissingBaseline::MissingContext,
+        MissingBaseline::IncompatibleContext,
+    ] {
+        let home = TempDir::new().expect("temp dir");
+        let path = write_paginated_rollout(
+            home.path(),
+            "2025-01-03T13-00-08",
+            Uuid::from_u128(/*v*/ 1009),
+            [
+                turn_started("user-turn"),
+                completed_user_message("user-turn", "keep working"),
+                turn_context(home.path(), "user-turn"),
+                turn_complete("user-turn"),
+                turn_started("wake"),
+            ],
+        );
+        let full = RolloutItem::WorldState(WorldStateItem::full(Default::default()));
+        let checkpoint = compacted("checkpoint", Some(Vec::new()));
+        let context = turn_context(home.path(), "wake");
+        let snapshot_precedes_checkpoint =
+            matches!(&baseline, MissingBaseline::SnapshotBeforeCompaction);
+        let items = match baseline {
+            MissingBaseline::SnapshotBeforeCompaction => vec![full, checkpoint, context],
+            MissingBaseline::PatchOnly => vec![
+                checkpoint,
+                RolloutItem::WorldState(WorldStateItem::patch(Default::default())),
+                context,
+            ],
+            MissingBaseline::MissingContext => vec![checkpoint, full],
+            MissingBaseline::IncompatibleContext => {
+                vec![
+                    checkpoint,
+                    full,
+                    turn_context(home.path(), "different-turn"),
+                ]
+            }
+        };
+        let expected_wake_suffix = if snapshot_precedes_checkpoint {
+            items[1..].to_vec()
+        } else {
+            items.clone()
+        };
+        append_items(&path, items);
+        append_items(&path, [turn_complete("wake")]);
+
+        let session_meta = codex_rollout::read_session_meta_line(&path)
+            .await
+            .expect("read session metadata");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let context = store
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id: session_meta.meta.id,
+                include_archived: false,
+            })
+            .await
+            .expect("load bounded model context");
+        let mut expected = vec![
+            RolloutItem::SessionMeta(session_meta),
+            turn_started("user-turn"),
+            turn_context(home.path(), "user-turn"),
+            turn_complete("user-turn"),
+        ];
+        expected.extend(expected_wake_suffix);
+        expected.push(turn_complete("wake"));
+
+        assert_eq!(
+            serde_json::to_value(context.items).expect("serialize bounded context"),
+            serde_json::to_value(expected).expect("serialize expected bounded context")
+        );
+    }
 }
 
 #[tokio::test]
@@ -280,11 +419,10 @@ async fn bounded_context_drops_large_unrelated_pre_base_payloads() {
         path.as_path(),
         [source_response("selected-source", "source")],
     );
-    append_item_vec(
+    append_items(
         path.as_path(),
         (0..128)
-            .map(|index| source_response(&format!("unrelated-{index}"), &"x".repeat(32 * 1024)))
-            .collect(),
+            .map(|index| source_response(&format!("unrelated-{index}"), &"x".repeat(32 * 1024))),
     );
     let selected = entry_compacted(
         "selected checkpoint",
@@ -559,8 +697,33 @@ async fn replays_nested_archived_lineage_from_frozen_prefix() {
         turn_complete("child-turn"),
     ];
     assert_eq!(
-        serde_json::to_value(context.items).expect("serialize context"),
+        serde_json::to_value(&context.items).expect("serialize context"),
+        serde_json::to_value(&expected).expect("serialize expected context")
+    );
+    // The same frozen lineage must replay from compressed files, without materializing or
+    // accidentally including the archived root's records after the inherited cutoff.
+    for path in [&archived_root, &middle_path, &child_path] {
+        let input = std::fs::File::open(path).expect("open rollout");
+        let output = std::fs::File::create(path.with_extension("jsonl.zst"))
+            .expect("create compressed rollout");
+        zstd::stream::copy_encode(input, output, /*level*/ 3).expect("compress rollout");
+        std::fs::remove_file(path).expect("remove plain rollout");
+    }
+    let compressed_context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: child_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load compressed lineage model context");
+    assert_eq!(
+        serde_json::to_value(compressed_context.items).expect("serialize compressed context"),
         serde_json::to_value(expected).expect("serialize expected context")
+    );
+    assert!(
+        [archived_root, middle_path, child_path]
+            .iter()
+            .all(|path| !path.exists())
     );
 }
 
@@ -671,11 +834,7 @@ async fn assert_reverse_scan_matches_full_history(home: &Path, path: &Path) {
     );
 }
 
-fn append_items<const N: usize>(path: &Path, items: [RolloutItem; N]) {
-    append_item_vec(path, items.into_iter().collect());
-}
-
-fn append_item_vec(path: &Path, items: Vec<RolloutItem>) {
+fn append_items(path: &Path, items: impl IntoIterator<Item = RolloutItem>) {
     let mut file = OpenOptions::new()
         .append(true)
         .open(path)
@@ -720,6 +879,8 @@ fn entry_compacted(message: &str, entries: Vec<CompactedHistoryEntry>) -> Rollou
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     })
 }
 
@@ -800,6 +961,7 @@ fn agent_message(message: &str) -> RolloutItem {
 fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
     RolloutItem::TurnContext(TurnContextItem {
         turn_id: Some(turn_id.to_string()),
+        root_turn_id: None,
         cwd: serde_json::from_value(serde_json::json!(root)).expect("absolute cwd"),
         workspace_roots: None,
         current_date: None,
@@ -835,5 +997,7 @@ fn compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> R
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     })
 }

@@ -239,6 +239,7 @@ impl CompactedHistoryResolver {
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::RealtimeItem(_) => {}
         }
@@ -291,6 +292,7 @@ impl CompactedHistoryResolver {
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::RealtimeItem(_) => {}
         }
@@ -365,6 +367,7 @@ impl CompactedHistoryResolver {
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::RealtimeItem(_) => {}
         }
@@ -470,6 +473,7 @@ impl CompactedHistoryResolver {
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::RealtimeItem(_) => {}
         }
@@ -653,6 +657,7 @@ fn latest_explicit_sources_for_ids(
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::RealtimeItem(_) => {}
         }

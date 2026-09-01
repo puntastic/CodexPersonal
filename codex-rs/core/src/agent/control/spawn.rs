@@ -20,7 +20,7 @@ use codex_protocol::protocol::EnvironmentConfigState;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashSet;
 
-const AGENT_NAMES: &str = include_str!("../agent_names.txt");
+const AGENT_NAMES: &str = include_str!("../../../assets/agent/agent_names.txt");
 
 struct SpawnAgentThreadInheritance {
     environments: Option<TurnEnvironmentSnapshot>,
@@ -97,6 +97,8 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
         // so they must rebuild context on their first child turn.
         RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_reference_context_item,
+        // Child threads inherit model context, not the parent's cumulative usage state.
+        RolloutItem::TokenUsageRecord(_) => false,
         RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
     }
 }
@@ -445,6 +447,7 @@ impl AgentControl {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
         }
+        config.service_tier = self.root_service_tier();
         if let Some(model) = stored_model {
             config.model = Some(model);
         }
@@ -923,8 +926,11 @@ impl AgentControl {
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if multi_agent_version == MultiAgentVersion::V2 {
                 let parent_config = parent_thread.session.get_config().await;
-                let parent_usage_hints =
-                    resolve_usage_hints(&parent_config.multi_agent_v2, /*catalog*/ None);
+                let parent_usage_hints = resolve_usage_hints(
+                    &parent_config.multi_agent_v2,
+                    /*catalog*/ None,
+                    !parent_config.update_plan_enabled,
+                );
                 [parent_usage_hints.root, parent_usage_hints.subagent]
                     .into_iter()
                     .flatten()
@@ -1073,6 +1079,8 @@ impl AgentControl {
                     retain_forked_item(response_item, &mut replaced_parent_developer_instructions)
                 }
                 RolloutItem::Compacted(compacted) => {
+                    // This checkpoint belongs to the inherited parent prefix.
+                    compacted.latest_token_usage_record = None;
                     if let Some(mut replacement_history) = resolved_parent_history {
                         // Matches before this checkpoint cannot survive its replacement history.
                         replaced_parent_developer_instructions = false;
@@ -1125,7 +1133,7 @@ impl AgentControl {
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
-                RolloutItem::SecurityRiskScore(_) => false,
+                RolloutItem::TokenUsageRecord(_) | RolloutItem::SecurityRiskScore(_) => false,
             };
             if !keep_item {
                 continue;
@@ -1164,7 +1172,12 @@ impl AgentControl {
                 .as_ref()
                 .map(|hints| hints.subagent.clone())
                 .unwrap_or_else(|| {
-                    resolve_usage_hints(&config.multi_agent_v2, /*catalog*/ None).subagent
+                    resolve_usage_hints(
+                        &config.multi_agent_v2,
+                        /*catalog*/ None,
+                        !config.update_plan_enabled,
+                    )
+                    .subagent
                 })
         {
             let subagent_usage_hint_message = ContextualUserFragment::into(subagent_usage_hint);

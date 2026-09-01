@@ -1053,6 +1053,7 @@ async fn start_test_conversation_with_history_mode(
     let mut builder = test_codex()
         .with_history_mode(history_mode)
         .with_config(move |config| {
+            config.update_plan_enabled = true;
             config
                 .features
                 .enable(Feature::Sqlite)

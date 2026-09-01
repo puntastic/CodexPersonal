@@ -387,6 +387,8 @@ fn compacted(replacement_history: Vec<ResponseItem>) -> RolloutItem {
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     })
 }
 
@@ -752,6 +754,8 @@ async fn paginated_containment_does_not_resolve_or_rewrite_a_dangling_checkpoint
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     };
     let path = write_inline_paginated_rollout(
         home.path(),
@@ -1258,6 +1262,8 @@ async fn migration_uses_only_older_sources_and_reuses_prior_checkpoint_inlines()
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     };
     let mut first_checkpoint = checkpoint("first checkpoint");
     first_checkpoint.replacement_history_entries = Some(vec![
@@ -2038,6 +2044,8 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     };
     checkpoint.mcp_resource_origins = Some(McpResourceOriginCheckpoint {
         origins: vec![McpResourceOrigin {
@@ -2139,6 +2147,8 @@ async fn rollback_rewrite_resolves_requested_source_outside_selected_checkpoint(
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     });
     let path = write_rollout(
         home.path(),
@@ -2486,6 +2496,8 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                compaction_response_id: None,
+                latest_token_usage_record: None,
             }),
             RolloutItem::Compacted(CompactedItem {
                 message: "latest checkpoint".to_string(),
@@ -2507,10 +2519,13 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                compaction_response_id: None,
+                latest_token_usage_record: None,
             }),
             started("child-turn"),
             RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("child-turn".to_string()),
+                root_turn_id: None,
                 cwd: serde_json::from_value(json!(home.path())).expect("absolute cwd"),
                 workspace_roots: None,
                 current_date: None,
@@ -4150,6 +4165,8 @@ async fn unresolved_compaction_reference_fails_closed_and_preserves_source() {
             first_window_id: None,
             previous_window_id: None,
             window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
         })],
     );
     let source = source_snapshot(&path);
@@ -4203,6 +4220,8 @@ async fn migration_preserves_unresolved_superseded_checkpoint_without_selecting_
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     });
     let selected = compacted(vec![carried_source.clone()]);
     let path = write_rollout(
@@ -4280,6 +4299,8 @@ async fn ordinary_migration_ignores_dangling_reference_before_newer_valid_checkp
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                compaction_response_id: None,
+                latest_token_usage_record: None,
             }),
             compacted(vec![input_response_message("user", "newer valid history")]),
         ],
@@ -4403,6 +4424,8 @@ async fn rollback_aware_selected_checkpoint_still_fails_on_unresolved_reference(
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     });
     let path = write_rollout(
         home.path(),

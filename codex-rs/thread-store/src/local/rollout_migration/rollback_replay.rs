@@ -78,6 +78,7 @@ impl ModelReplayPlanner {
             | RolloutItem::EventMsg(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::RealtimeItem(_)
+            | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::WorldState(_) => return,
         };

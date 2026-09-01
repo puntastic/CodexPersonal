@@ -852,6 +852,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::PluginInstalledResponse,
     },
+    PluginReconcile => "plugin/reconcile" {
+        params: v2::PluginReconcileParams,
+        serialization: None,
+        response: v2::PluginReconcileResponse,
+    },
     PluginRead => "plugin/read" {
         params: v2::PluginReadParams,
         serialization: None,
@@ -1912,6 +1917,8 @@ server_notification_definitions! {
     ContextCompacted => "thread/compacted" (v2::ContextCompactedNotification),
     ModelRerouted => "model/rerouted" (v2::ModelReroutedNotification),
     ModelVerification => "model/verification" (v2::ModelVerificationNotification),
+    AuthRecoveryStarted => "modelProvider/authRecoveryStarted" (v2::AuthRecoveryNotification),
+    AuthRecoveryCompleted => "modelProvider/authRecoveryCompleted" (v2::AuthRecoveryNotification),
     #[experimental("turn/moderationMetadata")]
     TurnModerationMetadata => "turn/moderationMetadata" (v2::TurnModerationMetadataNotification),
     ModelSafetyBufferingUpdated => "model/safetyBuffering/updated" (v2::ModelSafetyBufferingUpdatedNotification),

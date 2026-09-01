@@ -20,22 +20,26 @@ The lane deliberately reuses repository owners:
 ```
 
 Doctor reports the bounded Git-visible source state, discovered
-Cargo/Rustup/Python/MSVC/just environment, separate build/format/deploy
+Cargo/Rustup/Python/MSVC/Just/Bazel environment, separate build/format/deploy
 capabilities, deployment-state consistency, configured override, live process
 override, restart requirement, and free space. It does not install or change
-anything. If it reports `needs_tooling`, provision the two repository helpers
-that the upstream formatter expects into the ignored local tool cache:
+anything. If it reports `needs_tooling`, provision the repository-owned local
+helpers into the ignored tool cache:
 
 ```powershell
 .\codex-dev.ps1 -Action Setup -WhatIf
 .\codex-dev.ps1 -Action Setup
 ```
 
-Setup installs DotSlash through Cargo and uv through pip under
+Setup installs DotSlash through Cargo, uv through pip, and the same pinned
+Bazelisk release used by CI under
 `.tooling/repo-tools`; it does not modify the user PATH or require an
 administrator shell. The resulting paths and versions are recorded in a local
 receipt. Their download caches also stay under that ignored directory, so
 sandboxed runs do not depend on writable user-level cache folders.
+Bazelisk's workspace wrapper keeps Bazel's output-user root under the system
+temporary directory rather than relying on Bazel's profile-root default or an
+embedded-JDK path beneath a OneDrive checkout.
 
 The workstation may keep downloaded tools under the ignored `.tooling/`
 directory. Cargo's cache defaults to the existing `C:\tmp\codex-cargo` when
@@ -50,11 +54,18 @@ Run existing `just` recipes inside the discovered MSVC/Rust environment:
 ```powershell
 .\codex-dev.ps1 -Action Just -JustArguments @("test", "-p", "codex-state")
 .\codex-dev.ps1 -Action Just -JustArguments @("fmt")
+.\codex-dev.ps1 -Action Just -JustArguments @("bazel-lock-update")
 ```
 
 The lane does not guess a crate or invent a validation matrix. Choose focused
 tests from the changed surface and the repository `AGENTS.md`; a full suite
 remains an explicit consequential choice.
+
+On a Codex host with a managed filesystem boundary, Bazel-backed recipes may
+need an approved unsandboxed run: Bazel's embedded JDK resolves its generated
+install tree through a DOS 8.3 alias that the host may not equate with the
+allowed long path. This is a host execution exception, not a reason to run
+ordinary Rust recipes unsandboxed.
 
 ## Build
 

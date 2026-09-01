@@ -28,7 +28,6 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 
-const FIXED_CWD: &str = "/tmp/codex_remote_compaction_parity_workspace";
 const IMAGE_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 const SUMMARY: &str = "REMOTE_COMPACTION_PARITY_ENCRYPTED_SUMMARY";
 const DUMMY_FUNCTION_NAME: &str = "test_tool";
@@ -154,6 +153,7 @@ async fn remote_compaction_parity_manual_transcripts() -> Result<()> {
 async fn remote_compaction_parity_v2_api_key_sends_service_tier_upgrade() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
+    let workspace = tempfile::tempdir()?;
     let scenario = Scenario {
         name: "api_key_service_tier",
         steps: TOOL_MIX,
@@ -162,8 +162,8 @@ async fn remote_compaction_parity_v2_api_key_sends_service_tier_upgrade() -> Res
         auth: AuthCase::ApiKey,
         service_tier_fast: true,
     };
-    let legacy = run_manual_session(&scenario, Mode::Legacy, settings).await?;
-    let v2 = run_manual_session(&scenario, Mode::V2, settings).await?;
+    let legacy = run_manual_session(&scenario, Mode::Legacy, settings, workspace.path()).await?;
+    let v2 = run_manual_session(&scenario, Mode::V2, settings, workspace.path()).await?;
 
     assert_eq!(
         legacy.compact_body.get("service_tier"),
@@ -185,8 +185,9 @@ async fn remote_compaction_parity_v2_api_key_sends_service_tier_upgrade() -> Res
 async fn remote_compaction_parity_manual_hooks() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let legacy = run_manual_hook_session(Mode::Legacy).await?;
-    let v2 = run_manual_hook_session(Mode::V2).await?;
+    let workspace = tempfile::tempdir()?;
+    let legacy = run_manual_hook_session(Mode::Legacy, workspace.path()).await?;
+    let v2 = run_manual_hook_session(Mode::V2, workspace.path()).await?;
     assert_json_eq("manual compact hook payload parity mismatch", &legacy, &v2);
     Ok(())
 }
@@ -195,8 +196,9 @@ async fn remote_compaction_parity_manual_hooks() -> Result<()> {
 async fn remote_compaction_parity_pre_turn_auto() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let legacy = run_pre_turn_auto_session(Mode::Legacy).await?;
-    let v2 = run_pre_turn_auto_session(Mode::V2).await?;
+    let workspace = tempfile::tempdir()?;
+    let legacy = run_pre_turn_auto_session(Mode::Legacy, workspace.path()).await?;
+    let v2 = run_pre_turn_auto_session(Mode::V2, workspace.path()).await?;
     assert_capture_eq("pre-turn auto", &legacy, &v2);
     Ok(())
 }
@@ -205,15 +207,17 @@ async fn remote_compaction_parity_pre_turn_auto() -> Result<()> {
 async fn remote_compaction_parity_mid_turn_auto() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let legacy = run_mid_turn_auto_session(Mode::Legacy).await?;
-    let v2 = run_mid_turn_auto_session(Mode::V2).await?;
+    let workspace = tempfile::tempdir()?;
+    let legacy = run_mid_turn_auto_session(Mode::Legacy, workspace.path()).await?;
+    let v2 = run_mid_turn_auto_session(Mode::V2, workspace.path()).await?;
     assert_capture_eq("mid-turn auto", &legacy, &v2);
     Ok(())
 }
 
 async fn compare_manual_scenario(scenario: &Scenario, settings: RunSettings) -> Result<()> {
-    let legacy = run_manual_session(scenario, Mode::Legacy, settings).await?;
-    let v2 = run_manual_session(scenario, Mode::V2, settings).await?;
+    let workspace = tempfile::tempdir()?;
+    let legacy = run_manual_session(scenario, Mode::Legacy, settings, workspace.path()).await?;
+    let v2 = run_manual_session(scenario, Mode::V2, settings, workspace.path()).await?;
     assert_capture_eq(scenario.name, &legacy, &v2);
     Ok(())
 }
@@ -300,6 +304,7 @@ async fn run_manual_session(
     scenario: &Scenario,
     mode: Mode,
     settings: RunSettings,
+    cwd: &Path,
 ) -> Result<Capture> {
     let mut response_bodies = response_bodies_for_scenario(scenario);
     if mode == Mode::V2 {
@@ -307,7 +312,7 @@ async fn run_manual_session(
     }
     response_bodies.push(after_compact_response_body(scenario.name));
 
-    let harness = build_harness(mode, settings, /*hooks*/ false).await?;
+    let harness = build_harness(mode, settings, /*hooks*/ false, cwd).await?;
     let rollout_path = rollout_path(&harness);
     let codex = harness.test().codex.clone();
 
@@ -341,7 +346,7 @@ async fn run_manual_session(
     .await
 }
 
-async fn run_pre_turn_auto_session(mode: Mode) -> Result<Capture> {
+async fn run_pre_turn_auto_session(mode: Mode, cwd: &Path) -> Result<Capture> {
     let response_bodies = match mode {
         Mode::Legacy => vec![
             responses::sse(vec![
@@ -365,7 +370,7 @@ async fn run_pre_turn_auto_session(mode: Mode) -> Result<Capture> {
             after_compact_response_body("pre_turn_auto"),
         ],
     };
-    let harness = build_auto_harness(mode).await?;
+    let harness = build_auto_harness(mode, cwd).await?;
     let rollout_path = rollout_path(&harness);
     let codex = harness.test().codex.clone();
     let responses_mock = responses::mount_sse_sequence(harness.server(), response_bodies).await;
@@ -399,7 +404,7 @@ async fn run_pre_turn_auto_session(mode: Mode) -> Result<Capture> {
     .await
 }
 
-async fn run_mid_turn_auto_session(mode: Mode) -> Result<Capture> {
+async fn run_mid_turn_auto_session(mode: Mode, cwd: &Path) -> Result<Capture> {
     let response_bodies = match mode {
         Mode::Legacy => vec![
             responses::sse(vec![
@@ -423,7 +428,7 @@ async fn run_mid_turn_auto_session(mode: Mode) -> Result<Capture> {
             after_compact_response_body("mid_turn_auto"),
         ],
     };
-    let harness = build_auto_harness(mode).await?;
+    let harness = build_auto_harness(mode, cwd).await?;
     let rollout_path = rollout_path(&harness);
     let codex = harness.test().codex.clone();
     let responses_mock = responses::mount_sse_sequence(harness.server(), response_bodies).await;
@@ -449,7 +454,7 @@ async fn run_mid_turn_auto_session(mode: Mode) -> Result<Capture> {
     .await
 }
 
-async fn run_manual_hook_session(mode: Mode) -> Result<Value> {
+async fn run_manual_hook_session(mode: Mode, cwd: &Path) -> Result<Value> {
     let response_bodies = match mode {
         Mode::Legacy => vec![responses::sse(vec![
             responses::ev_assistant_message("hook-first-message", "HOOK_FIRST_REPLY"),
@@ -463,7 +468,7 @@ async fn run_manual_hook_session(mode: Mode) -> Result<Value> {
             compaction_v2_response_body(),
         ],
     };
-    let harness = build_harness(mode, RunSettings::default(), /*hooks*/ true).await?;
+    let harness = build_harness(mode, RunSettings::default(), /*hooks*/ true, cwd).await?;
     let codex = harness.test().codex.clone();
     responses::mount_sse_sequence(harness.server(), response_bodies).await;
     let compact_mock = mount_legacy_compact_if_needed(&harness, mode).await;
@@ -492,18 +497,24 @@ async fn run_manual_hook_session(mode: Mode) -> Result<Value> {
     }))
 }
 
-async fn build_auto_harness(mode: Mode) -> Result<TestCodexHarness> {
+async fn build_auto_harness(mode: Mode, cwd: &Path) -> Result<TestCodexHarness> {
     build_harness_inner(
         mode,
         RunSettings::default(),
         /*hooks*/ false,
         Some(200),
+        cwd,
     )
     .await
 }
 
-async fn build_harness(mode: Mode, settings: RunSettings, hooks: bool) -> Result<TestCodexHarness> {
-    build_harness_inner(mode, settings, hooks, /*auto_compact_limit*/ None).await
+async fn build_harness(
+    mode: Mode,
+    settings: RunSettings,
+    hooks: bool,
+    cwd: &Path,
+) -> Result<TestCodexHarness> {
+    build_harness_inner(mode, settings, hooks, /*auto_compact_limit*/ None, cwd).await
 }
 
 async fn build_harness_inner(
@@ -511,8 +522,10 @@ async fn build_harness_inner(
     settings: RunSettings,
     hooks: bool,
     auto_compact_limit: Option<i64>,
+    cwd: &Path,
 ) -> Result<TestCodexHarness> {
-    fs::create_dir_all(FIXED_CWD)?;
+    fs::create_dir_all(cwd)?;
+    let cwd = cwd.to_path_buf();
     let mut builder = test_codex()
         .with_auth(settings.auth.build())
         .with_pre_build_hook(allow_echo_commands)
@@ -524,10 +537,8 @@ async fn build_harness_inner(
         builder = builder.with_pre_build_hook(write_manual_compact_hooks);
     }
     TestCodexHarness::with_builder(builder.with_config(move |config| {
-        config.cwd = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(PathBuf::from(
-            FIXED_CWD,
-        ))
-        .expect("fixed cwd should be absolute");
+        config.cwd = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(&cwd)
+            .expect("shared parity cwd should be absolute");
         config.developer_instructions = Some("PARITY_DEVELOPER_INSTRUCTIONS".to_string());
         if settings.service_tier_fast {
             config.service_tier = Some(ServiceTier::Fast.request_value().to_string());

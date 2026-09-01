@@ -166,6 +166,7 @@ async fn revert_preserves_refs_v1_and_resolves_bounded_model_context() {
     let selected_turn_started = turn_started("turn-1");
     let selected_turn_context = RolloutItem::TurnContext(TurnContextItem {
         turn_id: Some("turn-1".to_string()),
+        root_turn_id: None,
         cwd: serde_json::from_value(serde_json::json!(home.path())).expect("absolute cwd"),
         workspace_roots: None,
         current_date: None,
@@ -199,6 +200,8 @@ async fn revert_preserves_refs_v1_and_resolves_bounded_model_context() {
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     });
     let selected_source_envelope = match &selected_source {
         RolloutItem::ResponseItem(envelope) => envelope.clone(),

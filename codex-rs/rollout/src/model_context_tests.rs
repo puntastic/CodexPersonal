@@ -252,6 +252,8 @@ fn entry_checkpoint(entries: Vec<CompactedHistoryEntry>) -> RolloutItem {
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     })
 }
 
@@ -265,6 +267,8 @@ fn legacy_checkpoint(items: Vec<ResponseItem>) -> RolloutItem {
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
     })
 }
 
@@ -324,6 +328,7 @@ fn turn_context() -> RolloutItem {
     let cwd = std::env::current_dir().expect("current directory");
     RolloutItem::TurnContext(TurnContextItem {
         turn_id: Some("turn-1".to_string()),
+        root_turn_id: None,
         cwd: AbsolutePathBuf::from_absolute_path(cwd).expect("absolute current directory"),
         workspace_roots: None,
         current_date: None,

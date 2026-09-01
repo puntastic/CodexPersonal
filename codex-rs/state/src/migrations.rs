@@ -111,10 +111,29 @@ pub(crate) async fn repair_legacy_recency_migration_version(
     pool: &SqlitePool,
     migrator: &Migrator,
 ) -> anyhow::Result<()> {
-    let Some(recency_migration) = migrator
+    repair_legacy_migration_version(pool, migrator, 38, 39).await
+}
+
+/// The desktop repair branch shipped history-mode normalization as migration
+/// 52 before upstream assigned that version to project recency. Move only the
+/// exact legacy checksum to its canonical version so both migrations can run.
+pub(crate) async fn repair_legacy_history_mode_migration_version(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    repair_legacy_migration_version(pool, migrator, 52, 53).await
+}
+
+async fn repair_legacy_migration_version(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+    legacy_version: i64,
+    canonical_version: i64,
+) -> anyhow::Result<()> {
+    let Some(canonical_migration) = migrator
         .migrations
         .iter()
-        .find(|migration| migration.version == 39)
+        .find(|migration| migration.version == canonical_version)
     else {
         return Ok(());
     };
@@ -128,7 +147,7 @@ pub(crate) async fn repair_legacy_recency_migration_version(
         return Ok(());
     }
 
-    let legacy_recency_needs_repair = sqlx::query_scalar::<_, i64>(
+    let legacy_migration_needs_repair = sqlx::query_scalar::<_, i64>(
         r#"
 SELECT 1
 FROM _sqlx_migrations
@@ -139,13 +158,13 @@ WHERE version = ?
   )
         "#,
     )
-    .bind(38_i64)
-    .bind(recency_migration.checksum.as_ref())
-    .bind(recency_migration.version)
+    .bind(legacy_version)
+    .bind(canonical_migration.checksum.as_ref())
+    .bind(canonical_migration.version)
     .fetch_optional(pool)
     .await?
     .is_some();
-    if !legacy_recency_needs_repair {
+    if !legacy_migration_needs_repair {
         return Ok(());
     }
 
@@ -160,11 +179,11 @@ WHERE version = ?
   )
         "#,
     )
-    .bind(recency_migration.version)
-    .bind(recency_migration.description.as_ref())
-    .bind(38_i64)
-    .bind(recency_migration.checksum.as_ref())
-    .bind(recency_migration.version)
+    .bind(canonical_migration.version)
+    .bind(canonical_migration.description.as_ref())
+    .bind(legacy_version)
+    .bind(canonical_migration.checksum.as_ref())
+    .bind(canonical_migration.version)
     .execute(pool)
     .await?;
     Ok(())

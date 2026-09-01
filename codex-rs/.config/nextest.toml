@@ -28,6 +28,9 @@ max-threads = 1
 [test-groups.windows_sandbox_legacy_sessions]
 max-threads = 1
 
+[test-groups.windows_sandbox_elevated_helpers]
+max-threads = 1
+
 [test-groups.windows_process_heavy]
 max-threads = 2
 
@@ -67,6 +70,13 @@ test-group = 'core_apply_patch_cli_integration'
 # Serialize them to avoid exhausting Windows session/global desktop resources in CI.
 filter = 'package(codex-windows-sandbox) & test(legacy_)'
 test-group = 'windows_sandbox_legacy_sessions'
+
+[[profile.default.overrides]]
+# These tests stage and launch the same elevated sandbox helper executable.
+# Serialize the full helper lifetime because nextest runs each test in a separate process.
+platform = 'cfg(windows)'
+filter = 'package(codex-core) & test(suite::windows_sandbox::windows_elevated_)'
+test-group = 'windows_sandbox_elevated_helpers'
 
 [[profile.default.overrides]]
 # This Codex-home startup path still exceeded the broader Windows-heavy ceiling

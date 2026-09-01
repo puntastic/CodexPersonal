@@ -85,14 +85,17 @@ function Get-CodexDevDoctorReport {
         JustReady = $environmentReady -and
             -not [string]::IsNullOrWhiteSpace($tooling.Just) -and
             [string]::IsNullOrWhiteSpace($tooling.JustError)
+        BazelReady = $environmentReady -and $tooling.BazelReady
         DeployReady = $configuredExists -and $deployment.Status -in @("consistent", "unmanaged")
     }
     $driveName = [System.IO.Path]::GetPathRoot($script:CodexDevRepositoryRoot).TrimEnd("\").TrimEnd(":")
     $repoDrive = Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue
     return [pscustomobject]@{
-        Status = if ($capabilities.BuildReady -and $capabilities.FormatReady -and $capabilities.DeployReady) {
+        Status = if ($capabilities.BuildReady -and $capabilities.FormatReady -and
+            $capabilities.BazelReady -and $capabilities.DeployReady) {
             "ready"
-        } elseif ($capabilities.BuildReady -and $capabilities.DeployReady -and -not $capabilities.FormatReady) {
+        } elseif ($capabilities.BuildReady -and $capabilities.DeployReady -and
+            (-not $capabilities.FormatReady -or -not $capabilities.BazelReady)) {
             "needs_tooling"
         } elseif ($capabilities.BuildReady -or $capabilities.FormatReady -or $capabilities.DeployReady) {
             "partial"
@@ -154,7 +157,7 @@ CodexPersonal Windows Desktop lane
   .\codex-dev.ps1 -Action Rollback [-WhatIf]
   .\codex-dev.ps1 -Action SelfTest
 
-Setup installs missing formatter helpers into the ignored local tool cache.
+Setup installs missing formatter and Bazel helpers into the ignored local tool cache.
 Build defaults to a fresh, ignored package directory, records its hashes and
 source provenance, and advances only this task's last-stable package pointer.
 Deploy stages an immutable copy, serializes config/state changes through a
@@ -187,7 +190,15 @@ Rollback selects that prior entrypoint; it does not delete packages or data.
         }
         "Just" {
             if ($JustArguments.Count -eq 0) { throw "Pass one or more -JustArguments." }
-            $environment = Initialize-CodexDevEnvironment -CargoPath $CargoPath -CargoHome $CargoHome -RustupHome $RustupHome -PythonPath $PythonPath -RequireJust
+            $requiresBazel = $JustArguments[0] -in @("bazel-lock-update", "bazel-lock-check")
+            $environment = Initialize-CodexDevEnvironment `
+                -CargoPath $CargoPath `
+                -CargoHome $CargoHome `
+                -RustupHome $RustupHome `
+                -PythonPath $PythonPath `
+                -RequireJust `
+                -RequireBazel:$requiresBazel `
+                -RequireRustyV8Artifacts
             Invoke-CodexDevNative -FilePath $environment.Just -ArgumentList $JustArguments
         }
         "Build" {

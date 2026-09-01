@@ -121,6 +121,7 @@ function Import-CodexDevEnvironmentRows {
     param([string[]]$Rows)
 
     $pathValue = $null
+    $canonicalPathValue = $null
     foreach ($row in $Rows) {
         $separator = $row.IndexOf("=")
         if ($separator -lt 1) {
@@ -130,6 +131,9 @@ function Import-CodexDevEnvironmentRows {
         $value = $row.Substring($separator + 1)
         if ($name -ieq "Path") {
             $pathValue = $value
+            if ($name -ceq "PATH") {
+                $canonicalPathValue = $value
+            }
             continue
         }
         [Environment]::SetEnvironmentVariable($name, $value, "Process")
@@ -137,7 +141,7 @@ function Import-CodexDevEnvironmentRows {
     if ($null -eq $pathValue) {
         return $false
     }
-    $env:PATH = $pathValue
+    $env:PATH = if ($null -ne $canonicalPathValue) { $canonicalPathValue } else { $pathValue }
     return $true
 }
 
@@ -236,6 +240,27 @@ function Resolve-CodexDevPython {
     return $python
 }
 
+function Initialize-CodexDevPython3Shim {
+    param(
+        [string]$Python,
+        [string]$BinRoot = (Join-Path (Get-CodexDevLocalToolRoot) "bin")
+    )
+
+    $resolvedPython = [System.IO.Path]::GetFullPath($Python)
+    $shim = Join-Path $BinRoot "python3.cmd"
+    $content = "@echo off`r`n`"$resolvedPython`" %*`r`n"
+    New-Item -ItemType Directory -Path $BinRoot -Force | Out-Null
+    $current = if (Test-Path -LiteralPath $shim -PathType Leaf) {
+        Get-Content -LiteralPath $shim -Raw
+    } else {
+        $null
+    }
+    if ($current -cne $content) {
+        [System.IO.File]::WriteAllText($shim, $content, [System.Text.UTF8Encoding]::new($false))
+    }
+    return [System.IO.Path]::GetFullPath($shim)
+}
+
 function Resolve-CodexDevCargo {
     param([string]$ExplicitPath)
 
@@ -254,6 +279,14 @@ function Resolve-CodexDevJust {
         "just.exe",
         "just"
     ) -Description "just"
+}
+
+function Resolve-CodexDevBazel {
+    return Resolve-CodexDevFile -Candidates @(
+        (Join-Path (Get-CodexDevLocalToolRoot) "bin\bazel.exe"),
+        "bazel.exe",
+        "bazel"
+    ) -Description "Bazel (Bazelisk)"
 }
 
 function Resolve-CodexDevUv {
@@ -303,13 +336,85 @@ function Resolve-CodexDevRipgrep {
     return $ripgrep
 }
 
+function Resolve-CodexDevRustyV8CargoEnvironment {
+    param(
+        [string]$Python,
+        [string]$HostTarget = (Get-CodexDevHostTarget),
+        [string]$CacheRoot = (Join-Path (Get-CodexDevLocalToolRoot) "cache\rusty-v8")
+    )
+
+    $oldRepoRoot = $env:CODEX_REPO_ROOT
+    try {
+        $env:CODEX_REPO_ROOT = $script:CodexDevRepositoryRoot
+        $output = @(Invoke-CodexDevNative `
+            -FilePath $Python `
+            -ArgumentList @(
+                "-m", "codex_package.v8",
+                "--target", $HostTarget,
+                "--cache-root", $CacheRoot
+            ) `
+            -WorkingDirectory (Join-Path $script:CodexDevRepositoryRoot "scripts") `
+            -Capture)
+    } finally {
+        if ($null -eq $oldRepoRoot) {
+            Remove-Item Env:CODEX_REPO_ROOT -ErrorAction SilentlyContinue
+        } else {
+            $env:CODEX_REPO_ROOT = $oldRepoRoot
+        }
+    }
+
+    $json = ($output -join "`n").Trim()
+    if ([string]::IsNullOrWhiteSpace($json)) {
+        throw "The Codex V8 artifact resolver returned no result."
+    }
+    try {
+        $resolved = $json | ConvertFrom-Json -AsHashtable
+    } catch {
+        throw "The Codex V8 artifact resolver returned invalid JSON: $json"
+    }
+    if ($resolved.Count -eq 0) {
+        return @{}
+    }
+
+    $required = @("RUSTY_V8_ARCHIVE", "RUSTY_V8_SRC_BINDING_PATH")
+    if ($resolved.Count -ne $required.Count -or @($required | Where-Object { -not $resolved.ContainsKey($_) }).Count -ne 0) {
+        throw "The Codex V8 artifact resolver must return both Rusty V8 paths or neither."
+    }
+    foreach ($name in $required) {
+        $path = [string]$resolved[$name]
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "The Codex V8 artifact resolver returned a missing $name file: $path"
+        }
+        $resolved[$name] = [System.IO.Path]::GetFullPath($path)
+    }
+    return $resolved
+}
+
+function Enable-CodexDevRustyV8CargoEnvironment {
+    param(
+        [string]$Python,
+        [string]$HostTarget = (Get-CodexDevHostTarget)
+    )
+
+    $resolved = Resolve-CodexDevRustyV8CargoEnvironment `
+        -Python $Python `
+        -HostTarget $HostTarget
+    foreach ($name in @("RUSTY_V8_ARCHIVE", "RUSTY_V8_SRC_BINDING_PATH")) {
+        if ($resolved.ContainsKey($name)) {
+            [Environment]::SetEnvironmentVariable($name, [string]$resolved[$name], "Process")
+        }
+    }
+}
+
 function Initialize-CodexDevEnvironment {
     param(
         [string]$CargoPath,
         [string]$CargoHome,
         [string]$RustupHome,
         [string]$PythonPath,
-        [switch]$RequireJust
+        [switch]$RequireJust,
+        [switch]$RequireBazel,
+        [switch]$RequireRustyV8Artifacts
     )
 
     $cargo = Resolve-CodexDevCargo $CargoPath
@@ -341,6 +446,9 @@ function Initialize-CodexDevEnvironment {
     $env:CARGO_HOME = $resolvedCargoHome
     $env:DOTSLASH_CACHE = Join-Path (Get-CodexDevLocalToolRoot) "cache\dotslash"
     $env:UV_CACHE_DIR = Join-Path (Get-CodexDevLocalToolRoot) "cache\uv"
+    $env:BAZELISK_HOME = Join-Path (Get-CodexDevLocalToolRoot) "cache\bazelisk"
+    $env:CODEX_BAZEL_OUTPUT_USER_ROOT = Join-Path ([System.IO.Path]::GetTempPath()) "CodexPersonal\bazel-output"
+    $python3Shim = Initialize-CodexDevPython3Shim -Python $python
     Add-CodexDevPathSegment (Join-Path (Get-CodexDevLocalToolRoot) "bin")
     Add-CodexDevPathSegment ([System.IO.Path]::GetDirectoryName($python))
     Add-CodexDevPathSegment ([System.IO.Path]::GetDirectoryName($cargo))
@@ -367,6 +475,9 @@ function Initialize-CodexDevEnvironment {
     $cl = $msvcTools.Cl
     $link = $msvcTools.Link
     $just = if ($RequireJust) { Resolve-CodexDevJust } else { $null }
+    $bazel = if ($RequireBazel) { Resolve-CodexDevBazel } else {
+        try { Resolve-CodexDevBazel } catch { $null }
+    }
     $cargoVerbose = (Invoke-CodexDevNative -FilePath $cargo -ArgumentList @("-vV") -Capture) -join "`n"
     $cargoHostMatch = [regex]::Match($cargoVerbose, '(?m)^host:\s*(?<host>\S+)\s*$')
     if (-not $cargoHostMatch.Success) {
@@ -384,6 +495,9 @@ function Initialize-CodexDevEnvironment {
     if (-not [string]::IsNullOrWhiteSpace($dotslash)) {
         Add-CodexDevPathSegment ([System.IO.Path]::GetDirectoryName($dotslash))
     }
+    if ($RequireRustyV8Artifacts) {
+        Enable-CodexDevRustyV8CargoEnvironment -Python $python -HostTarget $cargoHost
+    }
 
     return [pscustomobject]@{
         Cargo = $cargo
@@ -392,7 +506,11 @@ function Initialize-CodexDevEnvironment {
         RustupHome = $resolvedRustupHome
         Rustc = $rustc
         Python = $python
+        Python3Shim = $python3Shim
         Just = $just
+        Bazel = $bazel
+        BazeliskHome = $env:BAZELISK_HOME
+        BazelOutputUserRoot = $env:CODEX_BAZEL_OUTPUT_USER_ROOT
         Uv = $uv
         Dotslash = $dotslash
         DotslashCache = $env:DOTSLASH_CACHE

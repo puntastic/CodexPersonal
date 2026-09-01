@@ -354,6 +354,7 @@ mod goal_menu;
 mod ide_context;
 use self::ide_context::IdeContextState;
 mod input_queue;
+mod reconnect;
 use self::input_queue::InputQueueState;
 mod input_flow;
 mod input_restore;
@@ -384,6 +385,7 @@ use self::plugins::PluginListFetchState;
 use self::plugins::PluginsCacheState;
 mod plan_implementation;
 use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
+mod model_popup_state;
 mod model_popups;
 mod notifications;
 use self::notifications::Notification;
@@ -392,6 +394,7 @@ mod permission_shortcuts;
 mod permissions_menu;
 pub(crate) use self::permissions_menu::auto_review_available;
 pub(crate) use self::permissions_menu::cyber_model_approval_reviewer;
+mod backend_banners;
 mod protocol;
 mod protocol_requests;
 mod rate_limits;
@@ -565,6 +568,8 @@ pub(crate) struct ChatWidget {
     has_chatgpt_account: bool,
     has_codex_backend_auth: bool,
     model_catalog: Arc<ModelCatalog>,
+    model_popup_request_id: Option<uuid::Uuid>,
+    model_popup_model_ids: Vec<String>,
     session_telemetry: SessionTelemetry,
     session_header: SessionHeader,
     initial_user_message: Option<UserMessage>,
@@ -591,9 +596,11 @@ pub(crate) struct ChatWidget {
     codex_rate_limit_reached_type: Option<RateLimitReachedType>,
     codex_spend_control_reached: Option<bool>,
     rate_limit_warnings: RateLimitWarningState,
+    backend_banner_state: backend_banners::BackendBannerState,
+    backend_banner_notice_model: Option<String>,
     warning_display_state: WarningDisplayState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
-    add_credits_nudge_email_in_flight: Option<AddCreditsNudgeCreditType>,
+    add_credits_nudge_email_in_flight: Option<rate_limits::PendingCreditsNudge>,
     adaptive_chunking: AdaptiveChunkingPolicy,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
@@ -1197,9 +1204,6 @@ impl ChatWidget {
     pub(crate) fn pre_draw_tick(&mut self) {
         self.update_due_hook_visibility();
         self.schedule_hook_timer_if_needed();
-        if self.bottom_pane.has_active_view() {
-            self.flush_completed_command_activity();
-        }
         self.bottom_pane.pre_draw_tick();
         if let Some(pet) = self.ambient_pet.as_ref() {
             pet.schedule_next_frame();
