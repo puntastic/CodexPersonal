@@ -86,7 +86,11 @@ function Get-CodexDevDoctorReport {
             -not [string]::IsNullOrWhiteSpace($tooling.Just) -and
             [string]::IsNullOrWhiteSpace($tooling.JustError)
         BazelReady = $environmentReady -and $tooling.BazelReady
-        DeployReady = $configuredExists -and $deployment.Status -in @("consistent", "unmanaged")
+        DeployReady = $configuredExists -and $deployment.Status -in @(
+            "consistent",
+            "unmanaged",
+            "previous_configured_state_stale"
+        )
     }
     $driveName = [System.IO.Path]::GetPathRoot($script:CodexDevRepositoryRoot).TrimEnd("\").TrimEnd(":")
     $repoDrive = Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue

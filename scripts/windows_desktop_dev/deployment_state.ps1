@@ -287,6 +287,10 @@ function Get-CodexDevDeploymentStatusUnlocked {
     $stateCurrentEntrypoint = [string](
         Get-CodexDevObjectProperty -Value $stateCurrent -Name "Entrypoint"
     )
+    $statePrevious = Get-CodexDevObjectProperty -Value $stateRead.Value -Name "Previous"
+    $statePreviousEntrypoint = [string](
+        Get-CodexDevObjectProperty -Value $statePrevious -Name "Entrypoint"
+    )
     $stateConfigPath = [string](
         Get-CodexDevObjectProperty -Value $stateRead.Value -Name "ConfigPath"
     )
@@ -437,6 +441,15 @@ function Get-CodexDevDeploymentStatusUnlocked {
         $driftReasons.Add("Deployment state is bound to a different config path.")
     } elseif (Test-CodexDevPathEqual -Left $configured -Right $stateCurrentEntrypoint) {
         $status = "consistent"
+    } elseif (-not [string]::IsNullOrWhiteSpace($statePreviousEntrypoint) -and
+        -not (Test-CodexDevPathEqual `
+            -Left $stateCurrentEntrypoint `
+            -Right $statePreviousEntrypoint) -and
+        (Test-CodexDevPathEqual -Left $configured -Right $statePreviousEntrypoint)) {
+        $status = "previous_configured_state_stale"
+        $driftReasons.Add(
+            "Configured entrypoint matches deployment state Previous rather than Current."
+        )
     } else {
         $status = "drift"
         $driftReasons.Add(
@@ -452,6 +465,7 @@ function Get-CodexDevDeploymentStatusUnlocked {
         PendingPath = $paths.Pending
         ConfiguredEntrypoint = $configured
         StateCurrentEntrypoint = $stateCurrentEntrypoint
+        StatePreviousEntrypoint = $statePreviousEntrypoint
         StateExists = [bool]$stateRead.Exists
         PendingExists = [bool]$pendingRead.Exists
         PendingDisposition = $pendingDisposition
@@ -505,6 +519,7 @@ function Get-CodexDevDeploymentStatus {
             PendingPath = $paths.Pending
             ConfiguredEntrypoint = $null
             StateCurrentEntrypoint = $null
+            StatePreviousEntrypoint = $null
             StateExists = $null
             PendingExists = $null
             PendingDisposition = "unknown_while_locked"

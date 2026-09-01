@@ -119,6 +119,16 @@ config/state drift fails closed and is reported by Doctor and Verify.
 This is a process/interpreter interruption guarantee, not a claim of durable
 write ordering across sudden machine power loss.
 
+One drift-shaped state is recoverable without guessing: config names the exact
+recorded `Previous` entrypoint while state still names a different `Current`.
+Deploy can settle that observed selector before continuing, and Rollback can
+settle it as the completed rollback after validating the candidate. Settlement
+atomically swaps `Current` and `Previous` in state without rewriting config or
+claiming a new config backup. Before the state move the condition remains
+recognizably recoverable; after it, config and `Current` agree, and the displaced
+release remains available as `Previous`. All other ordinary drift still fails
+closed.
+
 Receipts are evidence, not the transaction owner. A completed setup, build, or
 selection is not undone or reported as unperformed merely because its receipt
 could not be written; the result carries `ReceiptError` so that evidence loss

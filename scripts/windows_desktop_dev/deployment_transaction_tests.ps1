@@ -781,6 +781,248 @@ try {
         ).Pending)) `
         "Ordinary drift created an unrecoverable pending transaction."
 
+    $externalRollback = New-TransactionTestFixture `
+        -Root (Join-Path $testRoot "external-rollback-adoption")
+    $externalRollbackDeploy = Install-CodexDevPackage `
+        -PackageDirectory $externalRollback.Package `
+        -ConfigPath $externalRollback.Config `
+        -DeploymentRoot $externalRollback.DeploymentRoot `
+        -SkipSmoke
+    Set-CodexCliPathInConfig `
+        -ConfigPath $externalRollback.Config `
+        -Entrypoint $externalRollback.OldEntrypoint
+    $externalRollbackPaths = Get-CodexDevDeploymentPaths $externalRollback.DeploymentRoot
+    $externalRollbackConfigBefore = Get-Content -LiteralPath $externalRollback.Config -Raw
+    $externalRollbackStateBefore = Get-TransactionStateJson $externalRollbackPaths.State
+    $externalRollbackStatus = Get-CodexDevDeploymentStatus `
+        -ConfigPath $externalRollback.Config `
+        -DeploymentRoot $externalRollback.DeploymentRoot
+    Assert-TransactionTestEqual `
+        "previous_configured_state_stale" `
+        $externalRollbackStatus.Status `
+        "A config matching recorded Previous was classified as arbitrary drift."
+    $externalRollbackPlan = Invoke-CodexDevRollback `
+        -ConfigPath $externalRollback.Config `
+        -DeploymentRoot $externalRollback.DeploymentRoot `
+        -WhatIf
+    Assert-TransactionTestEqual `
+        "planned_with_recovery" `
+        $externalRollbackPlan.Status `
+        "Rollback WhatIf did not plan adoption of an external previous selection."
+    Assert-TransactionTestEqual `
+        "settle_configured_previous" `
+        $externalRollbackPlan.RecoveryDisposition `
+        "Rollback WhatIf returned the wrong external-selection disposition."
+    Assert-TransactionTestEqual `
+        $externalRollbackConfigBefore `
+        (Get-Content -LiteralPath $externalRollback.Config -Raw) `
+        "External rollback WhatIf mutated config."
+    Assert-TransactionTestEqual `
+        $externalRollbackStateBefore `
+        (Get-TransactionStateJson $externalRollbackPaths.State) `
+        "External rollback WhatIf mutated deployment state."
+    $externalRollbackAdopted = Invoke-CodexDevRollback `
+        -ConfigPath $externalRollback.Config `
+        -DeploymentRoot $externalRollback.DeploymentRoot
+    Assert-TransactionTestEqual `
+        "configured_previous_settled" `
+        $externalRollbackAdopted.Status `
+        "Rollback did not adopt the already-selected previous entrypoint."
+    Assert-TransactionTestEqual `
+        $externalRollbackConfigBefore `
+        (Get-Content -LiteralPath $externalRollback.Config -Raw) `
+        "External rollback adoption rewrote config."
+    $externalRollbackSettled = Get-CodexDevDeploymentStatus `
+        -ConfigPath $externalRollback.Config `
+        -DeploymentRoot $externalRollback.DeploymentRoot
+    Assert-TransactionTestEqual `
+        "consistent" `
+        $externalRollbackSettled.Status `
+        "External rollback adoption did not settle deployment state."
+    Assert-TransactionTestEqual `
+        $externalRollback.OldEntrypoint `
+        $externalRollbackSettled.State.Current.Entrypoint `
+        "External rollback adoption did not promote the observed selector to Current."
+    Assert-TransactionTestEqual `
+        $externalRollbackDeploy.Release.Entrypoint `
+        $externalRollbackSettled.State.Previous.Entrypoint `
+        "External rollback adoption did not retain the displaced release as Previous."
+    Assert-TransactionTestTrue `
+        (-not (Test-Path -LiteralPath $externalRollbackPaths.Pending)) `
+        "External rollback adoption created a pending config transaction."
+
+    $managedSettlement = New-TransactionTestFixture `
+        -Root (Join-Path $testRoot "managed-previous-settlement")
+    $managedSettlementPackageTwo = New-TransactionTestPackage `
+        -Path (Join-Path $managedSettlement.Root "package-two") `
+        -Marker "managed-settlement-two" `
+        -BuildId "managed-settlement-build-two"
+    $managedSettlementFirst = Install-CodexDevPackage `
+        -PackageDirectory $managedSettlement.Package `
+        -ConfigPath $managedSettlement.Config `
+        -DeploymentRoot $managedSettlement.DeploymentRoot `
+        -SkipSmoke
+    $managedSettlementSecond = Install-CodexDevPackage `
+        -PackageDirectory $managedSettlementPackageTwo `
+        -ConfigPath $managedSettlement.Config `
+        -DeploymentRoot $managedSettlement.DeploymentRoot `
+        -SkipSmoke
+    $managedSettlementPaths = Get-CodexDevDeploymentPaths $managedSettlement.DeploymentRoot
+    $managedSettlementStateBefore = Read-CodexDevJsonFile $managedSettlementPaths.State
+    $managedSettlementCurrentBefore = $managedSettlementStateBefore.Value.Current
+    $managedSettlementPreviousBefore = $managedSettlementStateBefore.Value.Previous
+    $managedSettlementStateBefore.Value | Add-Member `
+        -MemberType NoteProperty `
+        -Name "TestSentinel" `
+        -Value "retain-me" `
+        -Force
+    Write-CodexDevJson `
+        -Path $managedSettlementPaths.State `
+        -Value $managedSettlementStateBefore.Value
+    $managedSettlementLastBackup = $managedSettlementStateBefore.Value.LastConfigBackup
+    $managedSettlementBackupCount = @(
+        Get-ChildItem `
+            -LiteralPath (Join-Path $managedSettlement.DeploymentRoot "config-backups") `
+            -File
+    ).Count
+    Set-CodexCliPathInConfig `
+        -ConfigPath $managedSettlement.Config `
+        -Entrypoint $managedSettlementPreviousBefore.Entrypoint
+    $managedSettlementConfigBefore = Get-Content -LiteralPath $managedSettlement.Config -Raw
+    $managedSettlementResult = Invoke-CodexDevRollback `
+        -ConfigPath $managedSettlement.Config `
+        -DeploymentRoot $managedSettlement.DeploymentRoot
+    Assert-TransactionTestEqual `
+        "configured_previous_settled" `
+        $managedSettlementResult.Status `
+        "Managed configured-Previous settlement did not complete."
+    Assert-TransactionTestEqual `
+        $managedSettlementConfigBefore `
+        (Get-Content -LiteralPath $managedSettlement.Config -Raw) `
+        "Managed configured-Previous settlement rewrote config."
+    $managedSettlementStateAfter = Read-CodexDevJsonFile $managedSettlementPaths.State
+    Assert-TransactionTestEqual `
+        (Get-TransactionReleaseIdentityJson $managedSettlementPreviousBefore) `
+        (Get-TransactionReleaseIdentityJson $managedSettlementStateAfter.Value.Current) `
+        "Managed configured-Previous settlement did not promote Previous exactly."
+    Assert-TransactionTestEqual `
+        (Get-TransactionReleaseIdentityJson $managedSettlementCurrentBefore) `
+        (Get-TransactionReleaseIdentityJson $managedSettlementStateAfter.Value.Previous) `
+        "Managed configured-Previous settlement did not retain displaced Current exactly."
+    Assert-TransactionTestEqual `
+        $managedSettlementLastBackup `
+        $managedSettlementStateAfter.Value.LastConfigBackup `
+        "Managed configured-Previous settlement changed the retained backup pointer."
+    Assert-TransactionTestEqual `
+        "retain-me" `
+        $managedSettlementStateAfter.Value.TestSentinel `
+        "Managed configured-Previous settlement discarded an unknown state property."
+    Assert-TransactionTestEqual `
+        $managedSettlementBackupCount `
+        @(
+            Get-ChildItem `
+                -LiteralPath (Join-Path $managedSettlement.DeploymentRoot "config-backups") `
+                -File
+        ).Count `
+        "Managed configured-Previous settlement created a config backup."
+    $managedSettlementNextRollback = Invoke-CodexDevRollback `
+        -ConfigPath $managedSettlement.Config `
+        -DeploymentRoot $managedSettlement.DeploymentRoot `
+        -WhatIf
+    Assert-TransactionTestEqual `
+        "planned" `
+        $managedSettlementNextRollback.Status `
+        "Managed settlement did not preserve a usable rollback candidate."
+    Assert-TransactionTestEqual `
+        $managedSettlementCurrentBefore.Entrypoint `
+        $managedSettlementNextRollback.ConfiguredAfter `
+        "Managed settlement did not make displaced Current the next rollback candidate."
+
+    $deploySettlement = New-TransactionTestFixture `
+        -Root (Join-Path $testRoot "deploy-with-previous-settlement")
+    $deploySettlementFirst = Install-CodexDevPackage `
+        -PackageDirectory $deploySettlement.Package `
+        -ConfigPath $deploySettlement.Config `
+        -DeploymentRoot $deploySettlement.DeploymentRoot `
+        -SkipSmoke
+    Set-CodexCliPathInConfig `
+        -ConfigPath $deploySettlement.Config `
+        -Entrypoint $deploySettlement.OldEntrypoint
+    $deploySettlementPlan = Install-CodexDevPackage `
+        -PackageDirectory $deploySettlement.Package `
+        -ConfigPath $deploySettlement.Config `
+        -DeploymentRoot $deploySettlement.DeploymentRoot `
+        -SkipSmoke `
+        -WhatIf
+    Assert-TransactionTestEqual `
+        "planned_with_recovery" `
+        $deploySettlementPlan.Status `
+        "Deploy WhatIf did not include configured-Previous settlement."
+    Assert-TransactionTestEqual `
+        "settle_configured_previous" `
+        $deploySettlementPlan.RecoveryDisposition `
+        "Deploy WhatIf returned the wrong settlement disposition."
+    $deploySettlementResult = Install-CodexDevPackage `
+        -PackageDirectory $deploySettlement.Package `
+        -ConfigPath $deploySettlement.Config `
+        -DeploymentRoot $deploySettlement.DeploymentRoot `
+        -SkipSmoke
+    Assert-TransactionTestEqual `
+        "selected_for_restart" `
+        $deploySettlementResult.Status `
+        "Deploy did not continue after configured-Previous settlement."
+    Assert-TransactionTestEqual `
+        "configured_previous_settled" `
+        $deploySettlementResult.Recovery.Status `
+        "Deploy did not report its configured-Previous settlement."
+    Assert-TransactionTestEqual `
+        $deploySettlementFirst.Release.Entrypoint `
+        (Get-CodexCliPathFromConfig $deploySettlement.Config) `
+        "Deploy did not select the requested release after settlement."
+    Assert-TransactionTestEqual `
+        "consistent" `
+        (Get-CodexDevDeploymentStatus `
+            -ConfigPath $deploySettlement.Config `
+            -DeploymentRoot $deploySettlement.DeploymentRoot).Status `
+        "Deploy did not leave state consistent after settlement."
+
+    $deploySettledCandidate = New-TransactionTestFixture `
+        -Root (Join-Path $testRoot "deploy-settled-candidate")
+    $deploySettledCandidatePackageTwo = New-TransactionTestPackage `
+        -Path (Join-Path $deploySettledCandidate.Root "package-two") `
+        -Marker "deploy-settled-candidate-two" `
+        -BuildId "deploy-settled-candidate-build-two"
+    $deploySettledCandidateFirst = Install-CodexDevPackage `
+        -PackageDirectory $deploySettledCandidate.Package `
+        -ConfigPath $deploySettledCandidate.Config `
+        -DeploymentRoot $deploySettledCandidate.DeploymentRoot `
+        -SkipSmoke
+    $null = Install-CodexDevPackage `
+        -PackageDirectory $deploySettledCandidatePackageTwo `
+        -ConfigPath $deploySettledCandidate.Config `
+        -DeploymentRoot $deploySettledCandidate.DeploymentRoot `
+        -SkipSmoke
+    Set-CodexCliPathInConfig `
+        -ConfigPath $deploySettledCandidate.Config `
+        -Entrypoint $deploySettledCandidateFirst.Release.Entrypoint
+    $deploySettledCandidateResult = Install-CodexDevPackage `
+        -PackageDirectory $deploySettledCandidate.Package `
+        -ConfigPath $deploySettledCandidate.Config `
+        -DeploymentRoot $deploySettledCandidate.DeploymentRoot `
+        -SkipSmoke
+    Assert-TransactionTestEqual `
+        "already_selected" `
+        $deploySettledCandidateResult.Status `
+        "Deploy did not recognize the candidate selected by state settlement."
+    Assert-TransactionTestEqual `
+        "configured_previous_settled" `
+        $deploySettledCandidateResult.Recovery.Status `
+        "Already-selected Deploy did not retain its settlement evidence."
+    Assert-TransactionTestEqual `
+        "written" `
+        $deploySettledCandidateResult.ReceiptStatus `
+        "Already-selected Deploy with settlement did not write a recovery receipt."
+
     $adoption = New-TransactionTestFixture -Root (Join-Path $testRoot "state-only-adoption")
     $adoptionPlan = Install-CodexDevPackage `
         -PackageDirectory $adoption.Package `

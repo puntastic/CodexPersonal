@@ -19,10 +19,29 @@ function Install-CodexDevPackage {
         -ConfigPath $config `
         -DeploymentRoot $root
     $configuredForPlan = $planDeployment.ConfiguredEntrypoint
+    $configuredPreviousSettlement = if (
+        $planDeployment.Status -eq "previous_configured_state_stale"
+    ) {
+        Get-CodexDevConfiguredPreviousSettlementPlan `
+            -DeploymentStatus $planDeployment `
+            -ConfigPath $config
+    } else {
+        $null
+    }
     $planBlockers = @(
-        if ($planDeployment.Status -notin @("consistent", "unmanaged")) {
+        if ($planDeployment.Status -notin @(
+            "consistent",
+            "unmanaged",
+            "previous_configured_state_stale"
+        )) {
             "Deployment is not settled: $($planDeployment.Status). " +
             ($planDeployment.DriftReasons -join " ")
+        }
+        if ($null -ne $configuredPreviousSettlement -and
+            $configuredPreviousSettlement.Status -eq "blocked") {
+            foreach ($settlementBlocker in $configuredPreviousSettlement.Blockers) {
+                [string]$settlementBlocker
+            }
         }
         if (Test-Path -LiteralPath $releasePath -PathType Container) {
             try {
@@ -40,13 +59,25 @@ function Install-CodexDevPackage {
 
     if (-not $PSCmdlet.ShouldProcess($config, "Stage $releaseId and select it for the next Codex Desktop restart")) {
         return [pscustomobject]@{
-            Status = if ($planBlockers.Count -eq 0) { "planned" } else { "blocked" }
+            Status = if ($planBlockers.Count -gt 0) {
+                "blocked"
+            } elseif ($null -ne $configuredPreviousSettlement) {
+                "planned_with_recovery"
+            } else {
+                "planned"
+            }
             SourcePackage = $package.PackageRoot
             ReleasePath = $releasePath
             ConfigPath = $config
             ConfiguredBefore = $configuredForPlan
             ConfiguredAfter = $entrypoint
             DeploymentStatus = $planDeployment.Status
+            RecoveryDisposition = if ($null -ne $configuredPreviousSettlement) {
+                "settle_configured_previous"
+            } else {
+                "none"
+            }
+            ConfiguredPreviousSettlement = $configuredPreviousSettlement
             Blockers = $planBlockers
         }
     }
@@ -60,6 +91,24 @@ function Install-CodexDevPackage {
         $deploymentStatus = Get-CodexDevDeploymentStatusUnlocked `
             -ConfigPath $config `
             -DeploymentRoot $root
+        if ($deploymentStatus.Status -eq "previous_configured_state_stale") {
+            $freshSettlementPlan = Get-CodexDevConfiguredPreviousSettlementPlan `
+                -DeploymentStatus $deploymentStatus `
+                -ConfigPath $config
+            if ($freshSettlementPlan.Status -eq "blocked") {
+                throw (
+                    "Cannot deploy after settling the configured Previous entrypoint: " +
+                    ($freshSettlementPlan.Blockers -join " ")
+                )
+            }
+            $recovery = Complete-CodexDevConfiguredPreviousSettlement `
+                -SettlementPlan $freshSettlementPlan `
+                -ConfigPath $config `
+                -DeploymentRoot $root
+            $deploymentStatus = Get-CodexDevDeploymentStatusUnlocked `
+                -ConfigPath $config `
+                -DeploymentRoot $root
+        }
         if ($deploymentStatus.Status -notin @("consistent", "unmanaged")) {
             throw (
                 "Cannot deploy while config and deployment state are not settled: " +
@@ -621,6 +670,140 @@ function Get-CodexDevRollbackCandidateValidation {
     }
 }
 
+function Get-CodexDevConfiguredPreviousSettlementPlan {
+    param(
+        [object]$DeploymentStatus,
+        [string]$ConfigPath
+    )
+
+    $blockers = [System.Collections.Generic.List[string]]::new()
+    if ($DeploymentStatus.Status -ne "previous_configured_state_stale") {
+        $blockers.Add(
+            "Deployment does not have the recorded Previous entrypoint configured: " +
+            "$($DeploymentStatus.Status)."
+        )
+    }
+    $stateBefore = $DeploymentStatus.State
+    $currentBefore = Get-CodexDevObjectProperty -Value $stateBefore -Name "Current"
+    $previousBefore = Get-CodexDevObjectProperty -Value $stateBefore -Name "Previous"
+    $lastConfigBackup = Get-CodexDevObjectProperty `
+        -Value $stateBefore `
+        -Name "LastConfigBackup"
+    $stateAfter = if ($blockers.Count -eq 0) {
+        New-CodexDevDeploymentState `
+            -StateBefore $stateBefore `
+            -ConfigPath $ConfigPath `
+            -Current $previousBefore `
+            -Previous $currentBefore `
+            -LastConfigBackup $lastConfigBackup
+    } else {
+        $null
+    }
+    if ($blockers.Count -eq 0 -and
+        -not (Test-CodexDevStateSchema -State $stateAfter -ConfigPath $ConfigPath)) {
+        $blockers.Add("Projected deployment state is invalid.")
+    }
+    $configured = $DeploymentStatus.ConfiguredEntrypoint
+    $projectedCurrent = Get-CodexDevObjectProperty -Value $stateAfter -Name "Current"
+    $projectedEntrypoint = [string](
+        Get-CodexDevObjectProperty -Value $projectedCurrent -Name "Entrypoint"
+    )
+    if ($blockers.Count -eq 0 -and
+        -not (Test-CodexDevPathEqual -Left $configured -Right $projectedEntrypoint)) {
+        $blockers.Add("Projected deployment state does not match the configured entrypoint.")
+    }
+    return [pscustomobject]@{
+        Status = if ($blockers.Count -eq 0) { "ready" } else { "blocked" }
+        ConfigPath = $ConfigPath
+        ConfiguredEntrypoint = $configured
+        ConfigSha256 = $DeploymentStatus.ConfigSha256
+        StateBefore = $stateBefore
+        StateAfter = $stateAfter
+        Blockers = @($blockers.ToArray())
+    }
+}
+
+function Complete-CodexDevConfiguredPreviousSettlement {
+    param(
+        [object]$SettlementPlan,
+        [string]$ConfigPath,
+        [string]$DeploymentRoot
+    )
+
+    if ($SettlementPlan.Status -ne "ready") {
+        throw "Cannot settle the configured Previous entrypoint: $($SettlementPlan.Blockers -join ' ')"
+    }
+    $paths = Get-CodexDevDeploymentPaths $DeploymentRoot
+    $configBeforeSettlement = Read-CodexCliConfigSnapshot $ConfigPath
+    $stateBeforeSettlement = Read-CodexDevJsonFile $paths.State
+    $alreadySettled = $configBeforeSettlement.Sha256 -eq $SettlementPlan.ConfigSha256 -and
+        (Test-CodexDevStateSnapshot `
+            -StateRead $stateBeforeSettlement `
+            -ExpectedExists $true `
+            -ExpectedValue $SettlementPlan.StateAfter)
+    if ($alreadySettled) {
+        return [pscustomobject]@{
+            Status = "configured_previous_already_settled"
+            Action = "StateSettlement"
+            ConfiguredBefore = $SettlementPlan.ConfiguredEntrypoint
+            ConfiguredAfter = $SettlementPlan.ConfiguredEntrypoint
+            ConfiguredEntrypoint = $SettlementPlan.ConfiguredEntrypoint
+            ConfigBackup = $null
+            RetainedLastConfigBackup = Get-CodexDevObjectProperty `
+                -Value $SettlementPlan.StateAfter `
+                -Name "LastConfigBackup"
+        }
+    }
+    $settlementStatus = Get-CodexDevDeploymentStatusUnlocked `
+        -ConfigPath $ConfigPath `
+        -DeploymentRoot $DeploymentRoot
+    if ($settlementStatus.Status -ne "previous_configured_state_stale") {
+        throw (
+            "Cannot settle the configured Previous entrypoint because deployment state changed: " +
+            "$($settlementStatus.Status). $($settlementStatus.DriftReasons -join ' ')"
+        )
+    }
+    if ($configBeforeSettlement.Sha256 -ne $SettlementPlan.ConfigSha256 -or
+        -not (Test-CodexDevStateSnapshot `
+            -StateRead $stateBeforeSettlement `
+            -ExpectedExists $true `
+            -ExpectedValue $SettlementPlan.StateBefore)) {
+        throw "Config or deployment state changed while previous-state settlement was prepared."
+    }
+    $configAtSettlementCommit = Read-CodexCliConfigSnapshot $ConfigPath
+    $stateAtSettlementCommit = Read-CodexDevJsonFile $paths.State
+    if ($configAtSettlementCommit.Sha256 -ne $SettlementPlan.ConfigSha256 -or
+        -not (Test-CodexDevStateSnapshot `
+            -StateRead $stateAtSettlementCommit `
+            -ExpectedExists $true `
+            -ExpectedValue $SettlementPlan.StateBefore)) {
+        throw "Config or deployment state changed before previous-state settlement could commit."
+    }
+    Write-CodexDevJson -Path $paths.State -Value $SettlementPlan.StateAfter
+
+    $configAfterSettlement = Read-CodexCliConfigSnapshot $ConfigPath
+    $stateAfterSettlement = Read-CodexDevJsonFile $paths.State
+    if ($configAfterSettlement.Sha256 -ne $SettlementPlan.ConfigSha256 -or
+        -not (Test-CodexDevStateSnapshot `
+            -StateRead $stateAfterSettlement `
+            -ExpectedExists $true `
+            -ExpectedValue $SettlementPlan.StateAfter)) {
+        throw "Previous-state settlement could not be verified after writing deployment state."
+    }
+
+    return [pscustomobject]@{
+        Status = "configured_previous_settled"
+        Action = "StateSettlement"
+        ConfiguredBefore = $SettlementPlan.ConfiguredEntrypoint
+        ConfiguredAfter = $SettlementPlan.ConfiguredEntrypoint
+        ConfiguredEntrypoint = $SettlementPlan.ConfiguredEntrypoint
+        ConfigBackup = $null
+        RetainedLastConfigBackup = Get-CodexDevObjectProperty `
+            -Value $SettlementPlan.StateAfter `
+            -Name "LastConfigBackup"
+    }
+}
+
 function Get-CodexDevRollbackPlan {
     param(
         [object]$DeploymentStatus,
@@ -637,6 +820,7 @@ function Get-CodexDevRollbackPlan {
     $pendingConfigAfterSha256 = $null
     $pendingConfiguredBefore = $null
     $pendingConfigBackup = $null
+    $configuredPreviousSettlement = $null
 
     switch ($DeploymentStatus.Status) {
         "consistent" {
@@ -667,6 +851,21 @@ function Get-CodexDevRollbackPlan {
             $configured = [string]$pending.ConfiguredAfter
             $state = $pending.StateAfter
             $recoveryCompletesRequest = [string]$pending.Action -eq "Rollback"
+        }
+        "previous_configured_state_stale" {
+            $configuredPreviousSettlement = Get-CodexDevConfiguredPreviousSettlementPlan `
+                -DeploymentStatus $DeploymentStatus `
+                -ConfigPath $ConfigPath
+            if ($configuredPreviousSettlement.Status -eq "blocked") {
+                foreach ($settlementBlocker in $configuredPreviousSettlement.Blockers) {
+                    $blockers.Add([string]$settlementBlocker)
+                }
+            } else {
+                $state = $configuredPreviousSettlement.StateAfter
+                $configured = $DeploymentStatus.ConfiguredEntrypoint
+                $recoveryDisposition = "settle_configured_previous"
+                $recoveryCompletesRequest = $true
+            }
         }
         default {
             $blockers.Add(
@@ -740,6 +939,7 @@ function Get-CodexDevRollbackPlan {
         PendingConfigAfterSha256 = $pendingConfigAfterSha256
         PendingConfiguredBefore = $pendingConfiguredBefore
         PendingConfigBackup = $pendingConfigBackup
+        ConfiguredPreviousSettlement = $configuredPreviousSettlement
         Blockers = @($blockers.ToArray())
     }
 }
@@ -772,6 +972,25 @@ function Invoke-CodexDevRollback {
 
     $operation = Invoke-WithCodexDevDeploymentLock -DeploymentRoot $root -Body {
         Invoke-WithCodexDevConfigLock -ConfigPath $config -Body {
+        if ($rollbackPlan.RecoveryDisposition -eq "settle_configured_previous") {
+            $settlementCandidate = Get-CodexDevRollbackCandidateValidation `
+                -Candidate $rollbackPlan.Current
+            if (-not $settlementCandidate.Valid) {
+                throw "Cannot settle Rollback to configured Previous: $($settlementCandidate.Error)"
+            }
+            $recovery = Complete-CodexDevConfiguredPreviousSettlement `
+                -SettlementPlan $rollbackPlan.ConfiguredPreviousSettlement `
+                -ConfigPath $config `
+                -DeploymentRoot $root
+            return [pscustomobject]@{
+                Status = "configured_previous_settled"
+                ConfiguredBefore = $rollbackPlan.ConfiguredBefore
+                ConfiguredEntrypoint = $rollbackPlan.ConfiguredAfter
+                ConfigBackup = $null
+                Recovery = $recovery
+                RestartRequired = $env:CODEX_CLI_PATH -ne $rollbackPlan.ConfiguredAfter
+            }
+        }
         if ($rollbackPlan.RecoveryCompletesRequest) {
             $recoveryCandidate = Get-CodexDevRollbackCandidateValidation `
                 -Candidate $rollbackPlan.Current

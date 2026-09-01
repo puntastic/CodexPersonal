@@ -6,6 +6,10 @@ use std::time::Duration;
 use chrono::Utc;
 use codex_app_server_protocol::ThreadItem;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Settings;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem;
@@ -13,7 +17,9 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -22,6 +28,8 @@ use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -2110,6 +2118,176 @@ async fn catch_up_preserves_trailing_partial_line_boundaries() {
 }
 
 #[tokio::test]
+async fn catch_up_skips_colliding_thread_settings_without_consuming_an_ordinal() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist session metadata");
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    append_suffix(
+        rollout_path.as_path(),
+        format!("{}\n", rollout_line(Some(1), token_count_marker())).as_str(),
+    );
+    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+        .await
+        .expect("project preceding token count");
+    assert_eq!(projection_state(&pool, thread_id).await.1, 2);
+
+    append_suffix(
+        rollout_path.as_path(),
+        format!(
+            "{}\n{}\n",
+            rollout_line(Some(1), thread_settings_applied(thread_id)),
+            rollout_line(Some(2), turn_started("turn-1")),
+        )
+        .as_str(),
+    );
+    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+        .await
+        .expect("skip colliding thread settings during catch-up");
+
+    let rollout_len = i64::try_from(fs::metadata(rollout_path).expect("rollout metadata").len())
+        .expect("rollout length");
+    assert_eq!(projection_state(&pool, thread_id).await, (rollout_len, 3));
+    let turn_ordinal = sqlx::query_scalar::<_, i64>(
+        "SELECT rollout_ordinal FROM thread_turns WHERE thread_id = ? AND turn_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .bind("turn-1")
+    .fetch_one(&pool)
+    .await
+    .expect("read projected turn");
+    assert_eq!(turn_ordinal, 2);
+}
+
+#[tokio::test]
+async fn cold_rebuild_skips_colliding_thread_settings_after_another_record() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist session metadata");
+
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    append_suffix(
+        rollout_path.as_path(),
+        format!(
+            "{}\n{}\n{}\n",
+            rollout_line(Some(1), token_count_marker()),
+            rollout_line(Some(1), thread_settings_applied(thread_id)),
+            rollout_line(Some(2), turn_started("turn-1")),
+        )
+        .as_str(),
+    );
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    sqlx::query("DELETE FROM thread_history_projection_state WHERE thread_id = ?")
+        .bind(thread_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("remove projection checkpoint");
+
+    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+        .await
+        .expect("rebuild projection with colliding thread settings");
+
+    let rollout_len = i64::try_from(fs::metadata(rollout_path).expect("rollout metadata").len())
+        .expect("rollout length");
+    assert_eq!(projection_state(&pool, thread_id).await, (rollout_len, 3));
+    let turn_ordinal = sqlx::query_scalar::<_, i64>(
+        "SELECT rollout_ordinal FROM thread_turns WHERE thread_id = ? AND turn_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .bind("turn-1")
+    .fetch_one(&pool)
+    .await
+    .expect("read projected turn");
+    assert_eq!(turn_ordinal, 2);
+}
+
+#[tokio::test]
+async fn catch_up_rejects_all_other_duplicate_or_out_of_order_records() {
+    let cases = [
+        (
+            "ordinary duplicate",
+            rollout_line(Some(2), turn_started("duplicate-turn")),
+        ),
+        (
+            "older thread settings",
+            rollout_line(Some(1), thread_settings_applied(ThreadId::default())),
+        ),
+        (
+            "rejected line before colliding thread settings",
+            format!(
+                "{{not json}}\n{}",
+                rollout_line(Some(2), thread_settings_applied(ThreadId::default()))
+            ),
+        ),
+    ];
+    for (name, stale_line) in cases {
+        let home = TempDir::new().expect("temp dir");
+        let store = projection_store(home.path()).await;
+        let thread_id = ThreadId::default();
+        create_paginated_thread(&store, thread_id).await;
+        store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .expect("persist session metadata");
+
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("rollout path");
+        append_suffix(
+            rollout_path.as_path(),
+            format!(
+                "{}\n{}\n",
+                rollout_line(Some(1), thread_settings_applied(thread_id)),
+                rollout_line(Some(2), turn_started("turn-1")),
+            )
+            .as_str(),
+        );
+        super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+            .await
+            .expect("project valid prefix");
+        let pool = codex_state::open_thread_history_db(
+            &codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        )
+        .await
+        .expect("open thread history db");
+        let before = projection_state(&pool, thread_id).await;
+        append_suffix(rollout_path.as_path(), format!("{stale_line}\n").as_str());
+
+        super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+            .await
+            .expect_err(name);
+        assert_eq!(projection_state(&pool, thread_id).await, before, "{name}");
+    }
+}
+
+#[tokio::test]
 async fn catch_up_rejects_invalid_complete_suffixes_without_advancing_state() {
     let cases = [
         (
@@ -2711,6 +2889,45 @@ fn turn_completed(turn_id: &str) -> RolloutItem {
         completed_at: Some(20),
         duration_ms: Some(10_000),
         time_to_first_token_ms: None,
+    }))
+}
+
+fn thread_settings_applied(thread_id: ThreadId) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+        ThreadSettingsAppliedEvent {
+            thread_id: Some(thread_id),
+            thread_settings: ThreadSettingsSnapshot {
+                model: "test-model".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::OnRequest,
+                approvals_reviewer: ApprovalsReviewer::User,
+                permission_profile: PermissionProfile::default(),
+                active_permission_profile: None,
+                cwd: std::env::current_dir()
+                    .expect("current directory")
+                    .try_into()
+                    .expect("absolute settings cwd"),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                personality: None,
+                collaboration_mode: CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: "test-model".to_string(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                },
+            },
+        },
+    ))
+}
+
+fn token_count_marker() -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+        info: None,
+        rate_limits: None,
     }))
 }
 

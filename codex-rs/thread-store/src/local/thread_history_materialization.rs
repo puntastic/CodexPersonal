@@ -191,6 +191,25 @@ async fn read_projection_steps(
             }
         };
         if ordinal < next_ordinal {
+            // Durable rollouts can contain a startup settings marker colliding with the ordinal
+            // just consumed by the preceding record. ThreadSettingsApplied currently has no
+            // thread-history projection effect, so consume only its bytes. Revisit this exception
+            // if that event ever gains a projection effect.
+            let is_colliding_thread_settings_marker = pending_rejected_line_count == 0
+                && ordinal.checked_add(1) == Some(next_ordinal)
+                && line.as_ref().is_some_and(|line| {
+                    matches!(
+                        &line.item,
+                        RolloutItem::EventMsg(
+                            codex_protocol::protocol::EventMsg::ThreadSettingsApplied(_)
+                        )
+                    )
+                });
+            if is_colliding_thread_settings_marker {
+                next_offset = line_end_offset;
+                line_start_offset = line_end_offset;
+                continue;
+            }
             return Err(ThreadStoreError::Internal {
                 message: format!(
                     "thread history projection for {thread_id} expected ordinal {next_ordinal}, got {ordinal}"
