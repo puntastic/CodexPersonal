@@ -5,13 +5,32 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "environment.ps1")
 . (Join-Path $PSScriptRoot "package.ps1")
 . (Join-Path $PSScriptRoot "deployment_config.ps1")
+. (Join-Path $PSScriptRoot "deployment_selector.ps1")
 . (Join-Path $PSScriptRoot "deployment_state.ps1")
 . (Join-Path $PSScriptRoot "deployment_transaction.ps1")
 . (Join-Path $PSScriptRoot "deployment.ps1")
 
+$script:TransactionTestRealUserSelectorBefore = [System.Environment]::GetEnvironmentVariable(
+    "CODEX_CLI_PATH",
+    [System.EnvironmentVariableTarget]::User
+)
+$script:TransactionTestPersistentSelector = $null
+$script:TransactionTestPersistentWrites = 0
+Set-CodexDevPersistentSelectorTestAdapter `
+    -Reader {
+        param($Name)
+        return $script:TransactionTestPersistentSelector
+    } `
+    -Writer {
+        param($Name, $Value)
+        $script:TransactionTestPersistentSelector = $Value
+        $script:TransactionTestPersistentWrites++
+    }
+
 $script:TransactionTestReceiptDetails = @()
 $script:TransactionTestReceiptFailure = $null
 $script:TransactionTestPackageInfoCalls = @()
+$script:TransactionTestPackageInfoHook = $null
 $script:TransactionTestRealPackageInfo = (Get-Command Get-CodexDevPackageInfo).ScriptBlock
 
 function Get-CodexDevPackageInfo {
@@ -24,9 +43,15 @@ function Get-CodexDevPackageInfo {
         PackageDirectory = $PackageDirectory
         SkipSmokeRequested = [bool]$SkipSmoke
     })
-    return & $script:TransactionTestRealPackageInfo `
+    $result = & $script:TransactionTestRealPackageInfo `
         -PackageDirectory $PackageDirectory `
         -SkipSmoke
+    if ($null -ne $script:TransactionTestPackageInfoHook) {
+        $null = & $script:TransactionTestPackageInfoHook `
+            -PackageDirectory $PackageDirectory `
+            -Package $result
+    }
+    return $result
 }
 
 function Write-CodexDevReceipt {
@@ -165,6 +190,7 @@ function New-TransactionTestFixture {
         "installed",
         [System.Text.UTF8Encoding]::new($false)
     )
+    $script:TransactionTestPersistentSelector = $oldEntrypoint
     [System.IO.File]::WriteAllText(
         $config,
         "KEEP_ME = 'yes'`r`nCODEX_CLI_PATH = '$oldEntrypoint'`r`n",
@@ -295,10 +321,11 @@ try {
     $caught = New-TransactionTestFixture -Root (Join-Path $testRoot "caught-failure")
     $caughtPaths = Get-CodexDevDeploymentPaths $caught.DeploymentRoot
     $caughtConfigBefore = Get-Content -LiteralPath $caught.Config -Raw
+    $caughtPersistentBefore = Get-CodexDevPersistentSelector
     $script:TransactionTestObservedDeployLock = $false
     $script:CodexDevDeploymentFaultInjector = {
         param($Stage, $Transaction)
-        if ($Stage -eq "AfterConfig") {
+        if ($Stage -eq "AfterPersistentSelector") {
             $script:TransactionTestObservedDeployLock = Test-TransactionExclusiveLockHeld `
                 (Get-CodexDevDeploymentPaths $caught.DeploymentRoot).Lock
             throw "injected caught deploy failure"
@@ -322,6 +349,10 @@ try {
         $caughtConfigBefore `
         (Get-Content -LiteralPath $caught.Config -Raw) `
         "Caught deployment failure did not restore config exactly."
+    Assert-TransactionTestEqual `
+        $caughtPersistentBefore `
+        (Get-CodexDevPersistentSelector) `
+        "Caught deployment failure did not restore the persistent selector exactly."
     Assert-TransactionTestTrue `
         (-not (Test-Path -LiteralPath $caughtPaths.State)) `
         "Caught deployment failure left new state behind."
@@ -331,7 +362,12 @@ try {
 
     $interruptionCases = @(
         foreach ($action in @("Deploy", "Rollback")) {
-            foreach ($stage in @("AfterPending", "AfterConfig", "AfterState")) {
+            foreach ($stage in @(
+                "AfterPending",
+                "AfterConfig",
+                "AfterPersistentSelector",
+                "AfterState"
+            )) {
                 [pscustomobject]@{ Action = $action; Stage = $stage }
             }
         }
@@ -399,7 +435,7 @@ try {
                 -ErrorAction SilentlyContinue
         }
 
-        $expectedPendingStatus = if ($case.Stage -eq "AfterPending") {
+        $expectedPendingStatus = if ($case.Stage -in @("AfterPending", "AfterConfig")) {
             "pending_recoverable_before"
         } else {
             "pending_recoverable_after"
@@ -445,7 +481,7 @@ try {
                 $whatIfRollback.Status `
                 "$caseName WhatIf did not expose its recovery step."
             Assert-TransactionTestEqual `
-                ($case.Stage -ne "AfterPending") `
+                ($case.Stage -in @("AfterPersistentSelector", "AfterState")) `
                 ([bool]$whatIfRollback.RecoveryCompletesRequest) `
                 "$caseName WhatIf misreported whether recovery completes Rollback."
             Assert-TransactionTestEqual `
@@ -473,7 +509,7 @@ try {
                 -ConfigPath $fixture.Config `
                 -DeploymentRoot $fixture.DeploymentRoot
         }
-        $expectedRecoveryStatus = if ($case.Stage -eq "AfterPending") {
+        $expectedRecoveryStatus = if ($case.Stage -in @("AfterPending", "AfterConfig")) {
             "recovered_before"
         } else {
             "recovered_after"
@@ -510,6 +546,48 @@ try {
             ((Get-Content -LiteralPath $fixture.Config -Raw) -match "KEEP_ME = 'yes'") `
             "$caseName recovery did not preserve unrelated config content."
     }
+
+    $compensation = New-TransactionTestFixture `
+        -Root (Join-Path $testRoot "interrupted-compensation")
+    $script:CodexDevDeploymentFaultInjector = {
+        param($Stage, $Transaction)
+        if ($Stage -eq "AfterPersistentSelector") { return "Interrupt" }
+    }
+    $null = Assert-TransactionTestThrows `
+        -Pattern "Simulated interruption" `
+        -Message "Compensation recovery fixture did not retain a transaction." `
+        -Body {
+            Install-CodexDevPackage `
+                -PackageDirectory $compensation.Package `
+                -ConfigPath $compensation.Config `
+                -DeploymentRoot $compensation.DeploymentRoot `
+                -SkipSmoke
+        }
+    $script:CodexDevDeploymentFaultInjector = $null
+    $compensationPending = (Read-CodexDevJsonFile (
+        Get-CodexDevDeploymentPaths $compensation.DeploymentRoot
+    ).Pending).Value
+    Restore-CodexDevConfigBackup `
+        -ConfigPath $compensation.Config `
+        -BackupPath $compensationPending.ConfigBackup `
+        -ExpectedCurrentSha256 $compensationPending.ConfigAfterSha256 `
+        -ExpectedBackupSha256 $compensationPending.ConfigBeforeSha256
+    $compensationStatus = Get-CodexDevDeploymentStatus `
+        -ConfigPath $compensation.Config `
+        -DeploymentRoot $compensation.DeploymentRoot
+    Assert-TransactionTestEqual `
+        "pending_recoverable_before" `
+        $compensationStatus.Status `
+        "Interrupted failure compensation was not recoverable to Before."
+    $compensationRecovered = Install-CodexDevPackage `
+        -PackageDirectory $compensation.Package `
+        -ConfigPath $compensation.Config `
+        -DeploymentRoot $compensation.DeploymentRoot `
+        -SkipSmoke
+    Assert-TransactionTestEqual `
+        "recovered_before" `
+        $compensationRecovered.Recovery.Status `
+        "Interrupted failure compensation did not finish restoring Before."
 
     $ambiguous = New-TransactionTestFixture -Root (Join-Path $testRoot "ambiguous")
     $ambiguousPaths = Get-CodexDevDeploymentPaths $ambiguous.DeploymentRoot
@@ -765,8 +843,15 @@ try {
         -WhatIf
     $driftCandidate = Join-Path $driftPlan.ReleasePath "bin\codex.exe"
     Set-CodexCliPathInConfig -ConfigPath $drift.Config -Entrypoint $driftCandidate
+    $oneSidedStatus = Get-CodexDevDeploymentStatus `
+        -ConfigPath $drift.Config `
+        -DeploymentRoot $drift.DeploymentRoot
+    Assert-TransactionTestEqual `
+        "config_mirror_mismatch" `
+        $oneSidedStatus.Status `
+        "One-sided config drift was not exposed separately."
     $null = Assert-TransactionTestThrows `
-        -Pattern "not settled: drift" `
+        -Pattern "not settled: config_mirror_mismatch" `
         -Message "Deploy journaled ConfiguredBefore equal to candidate while state drifted." `
         -Body {
             Install-CodexDevPackage `
@@ -781,6 +866,36 @@ try {
         ).Pending)) `
         "Ordinary drift created an unrecoverable pending transaction."
 
+    $configOnlyMirror = New-TransactionTestFixture `
+        -Root (Join-Path $testRoot "config-only-mirror")
+    $null = Set-CodexDevPersistentSelector -Entrypoint $null
+    $configOnlyMirrorDeploy = Install-CodexDevPackage `
+        -PackageDirectory $configOnlyMirror.Package `
+        -ConfigPath $configOnlyMirror.Config `
+        -DeploymentRoot $configOnlyMirror.DeploymentRoot `
+        -SkipSmoke
+    Assert-TransactionTestTrue `
+        ($null -eq $configOnlyMirrorDeploy.Previous) `
+        "Deploy promoted a config-only mirror into the authoritative rollback candidate."
+    $configOnlyMirrorState = Read-CodexDevJsonFile (
+        Get-CodexDevDeploymentPaths $configOnlyMirror.DeploymentRoot
+    ).State
+    Assert-TransactionTestTrue `
+        ($null -eq $configOnlyMirrorState.Value.Previous) `
+        "Deployment state retained a config-only mirror as Previous."
+    Assert-TransactionTestEqual `
+        $configOnlyMirrorDeploy.Release.Entrypoint `
+        (Get-CodexDevPersistentSelector) `
+        "Deploy did not establish the requested release as the persistent selector."
+    $configOnlyMirrorRollback = Invoke-CodexDevRollback `
+        -ConfigPath $configOnlyMirror.Config `
+        -DeploymentRoot $configOnlyMirror.DeploymentRoot `
+        -WhatIf
+    Assert-TransactionTestEqual `
+        "blocked" `
+        $configOnlyMirrorRollback.Status `
+        "Rollback treated a stale config-only mirror as an authoritative previous selection."
+
     $externalRollback = New-TransactionTestFixture `
         -Root (Join-Path $testRoot "external-rollback-adoption")
     $externalRollbackDeploy = Install-CodexDevPackage `
@@ -790,6 +905,8 @@ try {
         -SkipSmoke
     Set-CodexCliPathInConfig `
         -ConfigPath $externalRollback.Config `
+        -Entrypoint $externalRollback.OldEntrypoint
+    $null = Set-CodexDevPersistentSelector `
         -Entrypoint $externalRollback.OldEntrypoint
     $externalRollbackPaths = Get-CodexDevDeploymentPaths $externalRollback.DeploymentRoot
     $externalRollbackConfigBefore = Get-Content -LiteralPath $externalRollback.Config -Raw
@@ -851,6 +968,161 @@ try {
         (-not (Test-Path -LiteralPath $externalRollbackPaths.Pending)) `
         "External rollback adoption created a pending config transaction."
 
+    $interruptedSettlement = New-TransactionTestFixture `
+        -Root (Join-Path $testRoot "interrupted-previous-settlement")
+    $interruptedSettlementDeploy = Install-CodexDevPackage `
+        -PackageDirectory $interruptedSettlement.Package `
+        -ConfigPath $interruptedSettlement.Config `
+        -DeploymentRoot $interruptedSettlement.DeploymentRoot `
+        -SkipSmoke
+    Set-CodexCliPathInConfig `
+        -ConfigPath $interruptedSettlement.Config `
+        -Entrypoint $interruptedSettlement.OldEntrypoint
+    $null = Set-CodexDevPersistentSelector `
+        -Entrypoint $interruptedSettlement.OldEntrypoint
+    $interruptedSettlementPaths = Get-CodexDevDeploymentPaths `
+        $interruptedSettlement.DeploymentRoot
+    $script:CodexDevDeploymentFaultInjector = {
+        param($Stage, $Transaction)
+        if ($Stage -eq "AfterState") { return "Interrupt" }
+    }
+    $null = Assert-TransactionTestThrows `
+        -Pattern "Simulated interruption" `
+        -Message "Configured-Previous settlement did not retain its AfterState journal." `
+        -Body {
+            Invoke-CodexDevRollback `
+                -ConfigPath $interruptedSettlement.Config `
+                -DeploymentRoot $interruptedSettlement.DeploymentRoot
+        }
+    $script:CodexDevDeploymentFaultInjector = $null
+    $interruptedSettlementStatus = Get-CodexDevDeploymentStatus `
+        -ConfigPath $interruptedSettlement.Config `
+        -DeploymentRoot $interruptedSettlement.DeploymentRoot
+    Assert-TransactionTestEqual `
+        "pending_recoverable_after" `
+        $interruptedSettlementStatus.Status `
+        "AfterState settlement interruption was not recoverable to its completed Rollback."
+    Assert-TransactionTestEqual `
+        "Rollback" `
+        ([string]$interruptedSettlementStatus.PendingTransaction.Action) `
+        "State-only settlement journal lost the owning Rollback action."
+    $interruptedSettlementRetry = Invoke-CodexDevRollback `
+        -ConfigPath $interruptedSettlement.Config `
+        -DeploymentRoot $interruptedSettlement.DeploymentRoot
+    Assert-TransactionTestEqual `
+        "recovered_after" `
+        $interruptedSettlementRetry.Recovery.Status `
+        "Retry did not complete the interrupted state-only Rollback settlement."
+    $interruptedSettlementFinal = Read-CodexDevJsonFile $interruptedSettlementPaths.State
+    Assert-TransactionTestEqual `
+        $interruptedSettlement.OldEntrypoint `
+        $interruptedSettlementFinal.Value.Current.Entrypoint `
+        "Retry toggled the settled Previous entrypoint back out of Current."
+    Assert-TransactionTestEqual `
+        $interruptedSettlementDeploy.Release.Entrypoint `
+        $interruptedSettlementFinal.Value.Previous.Entrypoint `
+        "Retry did not retain the displaced managed release as Previous."
+    Assert-TransactionTestTrue `
+        (-not (Test-Path -LiteralPath $interruptedSettlementPaths.Pending)) `
+        "Retry left the completed settlement transaction pending."
+
+    $stalePlanRace = New-TransactionTestFixture `
+        -Root (Join-Path $testRoot "stale-plan-settlement-race")
+    $stalePlanRaceDeploy = Install-CodexDevPackage `
+        -PackageDirectory $stalePlanRace.Package `
+        -ConfigPath $stalePlanRace.Config `
+        -DeploymentRoot $stalePlanRace.DeploymentRoot `
+        -SkipSmoke
+    Set-CodexCliPathInConfig `
+        -ConfigPath $stalePlanRace.Config `
+        -Entrypoint $stalePlanRace.OldEntrypoint
+    $null = Set-CodexDevPersistentSelector `
+        -Entrypoint $stalePlanRace.OldEntrypoint
+    $stalePlanRacePaths = Get-CodexDevDeploymentPaths $stalePlanRace.DeploymentRoot
+    $stalePlanRaceStatus = Get-CodexDevDeploymentStatus `
+        -ConfigPath $stalePlanRace.Config `
+        -DeploymentRoot $stalePlanRace.DeploymentRoot
+    $script:TransactionTestStaleSettlementPlan = Get-CodexDevRollbackPlan `
+        -DeploymentStatus $stalePlanRaceStatus `
+        -ConfigPath $stalePlanRace.Config
+    $script:TransactionTestOriginalDeploymentLock = (
+        Get-Command Invoke-WithCodexDevDeploymentLock
+    ).ScriptBlock
+    $script:TransactionTestDeploymentLockCalls = 0
+    $script:TransactionTestRaceConfig = $stalePlanRace.Config
+    $script:TransactionTestRaceRoot = $stalePlanRace.DeploymentRoot
+    Set-Item -LiteralPath Function:\Invoke-WithCodexDevDeploymentLock -Value {
+        param(
+            [string]$DeploymentRoot,
+            [scriptblock]$Body,
+            [int]$LockTimeoutMilliseconds = 15000
+        )
+
+        $script:TransactionTestDeploymentLockCalls++
+        if ($script:TransactionTestDeploymentLockCalls -eq 2) {
+            $script:CodexDevDeploymentFaultInjector = {
+                param($Stage, $Transaction)
+                if ($Stage -eq "AfterState") { return "Interrupt" }
+            }
+            try {
+                & $script:TransactionTestOriginalDeploymentLock `
+                    -DeploymentRoot $script:TransactionTestRaceRoot `
+                    -LockTimeoutMilliseconds $LockTimeoutMilliseconds `
+                    -Body {
+                        Invoke-WithCodexDevConfigLock `
+                            -ConfigPath $script:TransactionTestRaceConfig `
+                            -Body {
+                                Complete-CodexDevConfiguredPreviousSettlement `
+                                    -Action "Rollback" `
+                                    -SettlementPlan $script:TransactionTestStaleSettlementPlan.ConfiguredPreviousSettlement `
+                                    -ConfigPath $script:TransactionTestRaceConfig `
+                                    -DeploymentRoot $script:TransactionTestRaceRoot
+                            }
+                    }
+            } catch {
+                if ($_.Exception.Message -notmatch "Simulated interruption") {
+                    throw
+                }
+            } finally {
+                $script:CodexDevDeploymentFaultInjector = $null
+            }
+        }
+        return & $script:TransactionTestOriginalDeploymentLock `
+            -DeploymentRoot $DeploymentRoot `
+            -Body $Body `
+            -LockTimeoutMilliseconds $LockTimeoutMilliseconds
+    }
+    try {
+        $stalePlanRaceResult = Invoke-CodexDevRollback `
+            -ConfigPath $stalePlanRace.Config `
+            -DeploymentRoot $stalePlanRace.DeploymentRoot
+    } finally {
+        Set-Item `
+            -LiteralPath Function:\Invoke-WithCodexDevDeploymentLock `
+            -Value $script:TransactionTestOriginalDeploymentLock
+        $script:CodexDevDeploymentFaultInjector = $null
+    }
+    Assert-TransactionTestEqual `
+        "previous_selected_for_restart" `
+        $stalePlanRaceResult.Status `
+        "Stale rollback plan did not complete the winner's journaled settlement."
+    Assert-TransactionTestEqual `
+        "recovered_after" `
+        $stalePlanRaceResult.Recovery.Status `
+        "Stale rollback plan bypassed the winner's recoverable-after journal."
+    Assert-TransactionTestTrue `
+        (-not (Test-Path -LiteralPath $stalePlanRacePaths.Pending)) `
+        "Stale rollback plan claimed success while the winner's journal remained pending."
+    $stalePlanRaceFinal = Read-CodexDevJsonFile $stalePlanRacePaths.State
+    Assert-TransactionTestEqual `
+        $stalePlanRace.OldEntrypoint `
+        $stalePlanRaceFinal.Value.Current.Entrypoint `
+        "Stale rollback plan toggled the winner's settled Previous back out of Current."
+    Assert-TransactionTestEqual `
+        $stalePlanRaceDeploy.Release.Entrypoint `
+        $stalePlanRaceFinal.Value.Previous.Entrypoint `
+        "Stale rollback plan lost the displaced managed release."
+
     $managedSettlement = New-TransactionTestFixture `
         -Root (Join-Path $testRoot "managed-previous-settlement")
     $managedSettlementPackageTwo = New-TransactionTestPackage `
@@ -887,6 +1159,8 @@ try {
     ).Count
     Set-CodexCliPathInConfig `
         -ConfigPath $managedSettlement.Config `
+        -Entrypoint $managedSettlementPreviousBefore.Entrypoint
+    $null = Set-CodexDevPersistentSelector `
         -Entrypoint $managedSettlementPreviousBefore.Entrypoint
     $managedSettlementConfigBefore = Get-Content -LiteralPath $managedSettlement.Config -Raw
     $managedSettlementResult = Invoke-CodexDevRollback `
@@ -948,6 +1222,8 @@ try {
     Set-CodexCliPathInConfig `
         -ConfigPath $deploySettlement.Config `
         -Entrypoint $deploySettlement.OldEntrypoint
+    $null = Set-CodexDevPersistentSelector `
+        -Entrypoint $deploySettlement.OldEntrypoint
     $deploySettlementPlan = Install-CodexDevPackage `
         -PackageDirectory $deploySettlement.Package `
         -ConfigPath $deploySettlement.Config `
@@ -980,11 +1256,79 @@ try {
         (Get-CodexCliPathFromConfig $deploySettlement.Config) `
         "Deploy did not select the requested release after settlement."
     Assert-TransactionTestEqual `
+        $deploySettlementFirst.Release.Entrypoint `
+        (Get-CodexDevPersistentSelector) `
+        "Deploy did not reselect the requested release in the persistent selector."
+    Assert-TransactionTestEqual `
         "consistent" `
         (Get-CodexDevDeploymentStatus `
             -ConfigPath $deploySettlement.Config `
             -DeploymentRoot $deploySettlement.DeploymentRoot).Status `
         "Deploy did not leave state consistent after settlement."
+    $processSelectorBeforeRegression = $env:CODEX_CLI_PATH
+    try {
+        $env:CODEX_CLI_PATH = $deploySettlementFirst.Release.Entrypoint
+        $deploySettlementVerify = Invoke-TransactionVerifySkippingSmoke `
+            -ConfigPath $deploySettlement.Config `
+            -DeploymentRoot $deploySettlement.DeploymentRoot
+        Assert-TransactionTestEqual `
+            "live" `
+            $deploySettlementVerify.Status `
+            "Verify did not become live after simulating the next process startup snapshot."
+        Assert-TransactionTestEqual `
+            $deploySettlementFirst.Release.Entrypoint `
+            $deploySettlementVerify.PersistentEntrypoint `
+            "Verify did not expose the persistent next-launch selector."
+        Assert-TransactionTestEqual `
+            $deploySettlementFirst.Release.Entrypoint `
+            $deploySettlementVerify.ConfiguredEntrypoint `
+            "Verify did not expose the config mirror separately."
+        Assert-TransactionTestEqual `
+            $deploySettlementFirst.Release.Entrypoint `
+            $deploySettlementVerify.ProcessLiveEntrypoint `
+            "Verify did not expose the process-live startup snapshot separately."
+        $verifyStateDriftPaths = Get-CodexDevDeploymentPaths `
+            $deploySettlement.DeploymentRoot
+        $script:TransactionTestPackageInfoHook = {
+            param($PackageDirectory, $Package)
+            if (Test-CodexDevPathEqual `
+                -Left $PackageDirectory `
+                -Right $deploySettlementFirst.Release.ReleasePath) {
+                $script:TransactionTestPackageInfoHook = $null
+                $stateDuringVerify = Read-CodexDevJsonFile $verifyStateDriftPaths.State
+                $stateDuringVerify.Value | Add-Member `
+                    -MemberType NoteProperty `
+                    -Name "VerificationRaceSentinel" `
+                    -Value "changed-after-package-read" `
+                    -Force
+                Write-CodexDevJson `
+                    -Path $verifyStateDriftPaths.State `
+                    -Value $stateDuringVerify.Value
+            }
+        }
+        try {
+            $verifyStateDrift = Invoke-TransactionVerifySkippingSmoke `
+                -ConfigPath $deploySettlement.Config `
+                -DeploymentRoot $deploySettlement.DeploymentRoot
+        } finally {
+            $script:TransactionTestPackageInfoHook = $null
+        }
+        Assert-TransactionTestEqual `
+            "drift" `
+            $verifyStateDrift.Status `
+            "Verify ignored deployment-state drift after package verification began."
+        Assert-TransactionTestTrue `
+            ($verifyStateDrift.DriftReasons -contains (
+                "Deployment state changed during deployment verification."
+            )) `
+            "Verify did not report its failed closing deployment-state attestation."
+    } finally {
+        if ($null -eq $processSelectorBeforeRegression) {
+            Remove-Item Env:CODEX_CLI_PATH -ErrorAction SilentlyContinue
+        } else {
+            $env:CODEX_CLI_PATH = $processSelectorBeforeRegression
+        }
+    }
 
     $deploySettledCandidate = New-TransactionTestFixture `
         -Root (Join-Path $testRoot "deploy-settled-candidate")
@@ -1004,6 +1348,8 @@ try {
         -SkipSmoke
     Set-CodexCliPathInConfig `
         -ConfigPath $deploySettledCandidate.Config `
+        -Entrypoint $deploySettledCandidateFirst.Release.Entrypoint
+    $null = Set-CodexDevPersistentSelector `
         -Entrypoint $deploySettledCandidateFirst.Release.Entrypoint
     $deploySettledCandidateResult = Install-CodexDevPackage `
         -PackageDirectory $deploySettledCandidate.Package `
@@ -1034,6 +1380,7 @@ try {
     Set-CodexCliPathInConfig `
         -ConfigPath $adoption.Config `
         -Entrypoint $adoptionCandidate
+    $null = Set-CodexDevPersistentSelector -Entrypoint $adoptionCandidate
     $adopted = Install-CodexDevPackage `
         -PackageDirectory $adoption.Package `
         -ConfigPath $adoption.Config `
@@ -1355,11 +1702,23 @@ try {
         ([string]$occurrenceVerify.StagedReleaseProvenance.Provenance.BuildId) `
         "Verify did not report staged first-writer provenance separately."
 
+    Assert-TransactionTestEqual `
+        $script:TransactionTestRealUserSelectorBefore `
+        ([System.Environment]::GetEnvironmentVariable(
+            "CODEX_CLI_PATH",
+            [System.EnvironmentVariableTarget]::User
+        )) `
+        "Transaction tests mutated the real User-scope CODEX_CLI_PATH."
+    Assert-TransactionTestTrue `
+        ($script:TransactionTestPersistentWrites -gt 0) `
+        "Transaction tests did not exercise the persistent-selector write seam."
     Write-Host "windows_desktop_dev deployment transaction tests: PASS"
     exit 0
 } finally {
     $script:CodexDevDeploymentFaultInjector = $null
     $script:TransactionTestReceiptFailure = $null
+    $script:TransactionTestPackageInfoHook = $null
+    Clear-CodexDevPersistentSelectorTestAdapter
     $resolvedTestRoot = [System.IO.Path]::GetFullPath($testRoot)
     if ($resolvedTestRoot.StartsWith($tempBase, [System.StringComparison]::OrdinalIgnoreCase)) {
         Remove-Item `

@@ -3,6 +3,21 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "workflow.ps1")
 
+$script:SelfTestRealUserSelectorBefore = [System.Environment]::GetEnvironmentVariable(
+    "CODEX_CLI_PATH",
+    [System.EnvironmentVariableTarget]::User
+)
+$script:SelfTestPersistentSelector = $null
+Set-CodexDevPersistentSelectorTestAdapter `
+    -Reader {
+        param($Name)
+        return $script:SelfTestPersistentSelector
+    } `
+    -Writer {
+        param($Name, $Value)
+        $script:SelfTestPersistentSelector = $Value
+    }
+
 function Assert-CodexDevEqual {
     param(
         [object]$Expected,
@@ -188,6 +203,7 @@ try {
         "[mcp_servers.node_repl.env]`r`nKEEP_ME = 'yes'`r`nCODEX_CLI_PATH = '$oldEntrypoint'`r`n",
         [System.Text.UTF8Encoding]::new($false)
     )
+    $script:SelfTestPersistentSelector = $oldEntrypoint
 
     $rewriteTarget = Join-Path $testRoot "rewrite\bin\codex.exe"
     Set-CodexCliPathInConfig -ConfigPath $config -Entrypoint $rewriteTarget
@@ -311,20 +327,87 @@ try {
     $first = Install-CodexDevPackage -PackageDirectory $packageOne -ConfigPath $config -DeploymentRoot $deployRoot -SkipSmoke
     Assert-CodexDevEqual "selected_for_restart" $first.Status "First deploy did not settle."
     Assert-CodexDevEqual $first.Release.Entrypoint (Get-CodexCliPathFromConfig $config) "First deploy did not update config."
+    Assert-CodexDevEqual $first.Release.Entrypoint (Get-CodexDevPersistentSelector) "First deploy did not update the persistent selector."
     $firstAgain = Install-CodexDevPackage -PackageDirectory $packageOne -ConfigPath $config -DeploymentRoot $deployRoot -SkipSmoke
     Assert-CodexDevEqual "already_selected" $firstAgain.Status "Repeated deploy was not idempotent."
     Assert-CodexDevEqual $oldEntrypoint $firstAgain.Previous.Entrypoint "Repeated deploy discarded the rollback entrypoint."
 
     $second = Install-CodexDevPackage -PackageDirectory $packageTwo -ConfigPath $config -DeploymentRoot $deployRoot -SkipSmoke
     Assert-CodexDevEqual $second.Release.Entrypoint (Get-CodexCliPathFromConfig $config) "Second deploy did not update config."
+    Assert-CodexDevEqual $second.Release.Entrypoint (Get-CodexDevPersistentSelector) "Second deploy did not update the persistent selector."
 
     $rolledBack = Invoke-CodexDevRollback -ConfigPath $config -DeploymentRoot $deployRoot
     Assert-CodexDevEqual "previous_selected_for_restart" $rolledBack.Status "Rollback did not settle."
     Assert-CodexDevEqual $first.Release.Entrypoint (Get-CodexCliPathFromConfig $config) "Rollback did not restore the first release."
+    Assert-CodexDevEqual $first.Release.Entrypoint (Get-CodexDevPersistentSelector) "Rollback did not restore the persistent selector."
+
+    $script:SelfTestIndependentDoctorConfigReads = 0
+    function Get-CodexCliPathFromConfig {
+        param([string]$ConfigPath)
+
+        $script:SelfTestIndependentDoctorConfigReads++
+        throw "Doctor must use the deployment snapshot instead of rereading config."
+    }
+    function Initialize-CodexDevEnvironment {
+        param(
+            [string]$CargoPath,
+            [string]$CargoHome,
+            [string]$RustupHome,
+            [string]$PythonPath
+        )
+
+        return [pscustomobject]@{}
+    }
+    function Resolve-CodexDevRipgrep {
+        param([string]$ExplicitPath)
+
+        return "test-rg.exe"
+    }
+    function Get-CodexDevToolStatus {
+        return [pscustomobject]@{
+            FormatReady = $true
+            Just = "test-just.exe"
+            JustError = $null
+            BazelReady = $true
+        }
+    }
+    function Get-CodexDevGitState {
+        return [pscustomobject]@{ Status = "test" }
+    }
+    function Get-CodexDevStorageInventory {
+        param([string]$DeploymentRoot)
+
+        return [pscustomobject]@{ Root = $DeploymentRoot }
+    }
+    $doctor = Get-CodexDevDoctorReport `
+        -CargoPath "test-cargo.exe" `
+        -CargoHome (Join-Path $testRoot "cargo-home") `
+        -RustupHome (Join-Path $testRoot "rustup-home") `
+        -PythonPath "test-python.exe" `
+        -RipgrepPath "test-rg.exe" `
+        -ConfigPath $config `
+        -DeploymentRoot $deployRoot
+    Assert-CodexDevEqual `
+        0 `
+        $script:SelfTestIndependentDoctorConfigReads `
+        "Doctor mixed an independent config read into its deployment snapshot."
+    Assert-CodexDevEqual `
+        $doctor.Deployment.ConfiguredEntrypoint `
+        $doctor.ConfiguredEntrypoint `
+        "Doctor did not report the configured selector from its locked deployment snapshot."
+
+    Assert-CodexDevEqual `
+        $script:SelfTestRealUserSelectorBefore `
+        ([System.Environment]::GetEnvironmentVariable(
+            "CODEX_CLI_PATH",
+            [System.EnvironmentVariableTarget]::User
+        )) `
+        "SelfTest mutated the real User-scope CODEX_CLI_PATH."
 
     Write-Host "windows_desktop_dev tests: PASS"
     exit 0
 } finally {
+    Clear-CodexDevPersistentSelectorTestAdapter
     $resolvedTestRoot = [System.IO.Path]::GetFullPath($testRoot)
     if ($resolvedTestRoot.StartsWith($tempBase, [System.StringComparison]::OrdinalIgnoreCase)) {
         Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force -ErrorAction SilentlyContinue

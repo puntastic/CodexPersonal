@@ -5,6 +5,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "tooling.ps1")
 . (Join-Path $PSScriptRoot "package.ps1")
 . (Join-Path $PSScriptRoot "deployment_config.ps1")
+. (Join-Path $PSScriptRoot "deployment_selector.ps1")
 . (Join-Path $PSScriptRoot "deployment_state.ps1")
 . (Join-Path $PSScriptRoot "deployment_transaction.ps1")
 . (Join-Path $PSScriptRoot "deployment.ps1")
@@ -71,12 +72,11 @@ function Get-CodexDevDoctorReport {
         $null
     }
     $tooling = Get-CodexDevToolStatus
-    $configured = try { Get-CodexCliPathFromConfig $ConfigPath } catch { "ERROR: $($_.Exception.Message)" }
     $deployment = Get-CodexDevDeploymentStatus `
         -ConfigPath $ConfigPath `
         -DeploymentRoot $DeploymentRoot
+    $configured = $deployment.ConfiguredEntrypoint
     $configuredExists = -not [string]::IsNullOrWhiteSpace($configured) -and
-        -not $configured.StartsWith("ERROR:") -and
         (Test-Path -LiteralPath $configured -PathType Leaf)
     $environmentReady = $null -eq $environment.PSObject.Properties["Error"]
     $capabilities = [pscustomobject]@{
@@ -114,10 +114,19 @@ function Get-CodexDevDoctorReport {
         Ripgrep = $rg
         RipgrepError = $rgError
         ConfigPath = $ConfigPath
+        PersistentEntrypoint = $deployment.PersistentEntrypoint
         ConfiguredEntrypoint = $configured
         ConfiguredEntrypointExists = $configuredExists
+        ProcessLiveEntrypoint = $env:CODEX_CLI_PATH
         LiveEntrypoint = $env:CODEX_CLI_PATH
-        RestartRequired = $configuredExists -and $env:CODEX_CLI_PATH -ne $configured
+        RestartRequired = Test-CodexDevRestartRequired `
+            -ProcessLiveEntrypoint $env:CODEX_CLI_PATH `
+            -PersistentEntrypoint $deployment.PersistentEntrypoint
+        ProofBoundary = (
+            "PersistentEntrypoint is the User-scope next-launch selector; ConfiguredEntrypoint is " +
+            "the plugin-managed config mirror; ProcessLiveEntrypoint is only this process's " +
+            "inherited startup snapshot."
+        )
         DeploymentRoot = $DeploymentRoot
         Deployment = $deployment
         Storage = Get-CodexDevStorageInventory -DeploymentRoot $DeploymentRoot
@@ -164,9 +173,9 @@ CodexPersonal Windows Desktop lane
 Setup installs missing formatter and Bazel helpers into the ignored local tool cache.
 Build defaults to a fresh, ignored package directory, records its hashes and
 source provenance, and advances only this task's last-stable package pointer.
-Deploy stages an immutable copy, serializes config/state changes through a
-recoverable transaction, changes only the existing CODEX_CLI_PATH setting for
-the next restart, and records the prior entrypoint and selected build.
+Deploy stages an immutable copy and transactionally aligns the User-scope
+CODEX_CLI_PATH next-launch selector, its existing config mirror, and deployment
+state while recording the prior entrypoint and selected build.
 Rollback selects that prior entrypoint; it does not delete packages or data.
 "@
         }

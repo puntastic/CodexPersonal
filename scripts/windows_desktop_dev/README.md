@@ -21,9 +21,10 @@ The lane deliberately reuses repository owners:
 
 Doctor reports the bounded Git-visible source state, discovered
 Cargo/Rustup/Python/MSVC/Just/Bazel environment, separate build/format/deploy
-capabilities, deployment-state consistency, configured override, live process
-override, restart requirement, and free space. It does not install or change
-anything. If it reports `needs_tooling`, provision the repository-owned local
+capabilities, deployment-state consistency, persistent User-scope selector,
+config mirror, inherited process-live startup snapshot, restart requirement,
+and free space. It does not install or change anything. If it reports
+`needs_tooling`, provision the repository-owned local
 helpers into the ignored tool cache:
 
 ```powershell
@@ -107,27 +108,34 @@ supplied. It:
    `CODEX_SQLITE_HOME` directories;
 2. copies it into an immutable release under
    `%LOCALAPPDATA%\OpenAI\Codex\dev-overrides`;
-3. backs up `~/.codex/config.toml`;
-4. replaces the one existing `CODEX_CLI_PATH` line for the *next* app start;
+3. backs up `~/.codex/config.toml` when its mirror must change;
+4. aligns the existing config-mirror line and the User-scope environment
+   `CODEX_CLI_PATH`; the User-scope value is the authoritative selector hydrated
+   into the next Desktop process, whose startup reconciliation mirrors it back
+   into config;
 5. records the selected build occurrence, previous entrypoint, and a receipt.
 
 Deployment and rollback share an exclusive deployment-root lock. Before the
-config/state seam, the lane writes a recoverable transaction record containing
-both state snapshots and the config backup. A later Deploy or Rollback can
-finish an unambiguous interrupted transaction; ambiguous pending state or
-config/state drift fails closed and is reported by Doctor and Verify.
+selector/config/state seam, the lane writes a recoverable transaction record
+containing persistent-selector Before/After values, both state snapshots, exact
+config images, and the config backup when needed. A later Deploy or Rollback can
+finish an unambiguous interrupted transaction; ambiguous pending state or plane
+drift fails closed and is reported by Doctor and Verify. Pending is removed only
+after exact final readback of all three durable planes.
 This is a process/interpreter interruption guarantee, not a claim of durable
 write ordering across sudden machine power loss.
 
-One drift-shaped state is recoverable without guessing: config names the exact
-recorded `Previous` entrypoint while state still names a different `Current`.
-Deploy can settle that observed selector before continuing, and Rollback can
-settle it as the completed rollback after validating the candidate. Settlement
-atomically swaps `Current` and `Previous` in state without rewriting config or
-claiming a new config backup. Before the state move the condition remains
-recognizably recoverable; after it, config and `Current` agree, and the displaced
-release remains available as `Previous`. All other ordinary drift still fails
-closed.
+One drift-shaped state is recoverable without guessing: both the persistent
+selector and config mirror name the exact recorded `Previous` entrypoint while
+state still names a different `Current`. Deploy can settle that observed
+selection before continuing, and Rollback can settle it as the completed
+rollback after validating the candidate. Settlement atomically swaps `Current`
+and `Previous` in state without rewriting either selector or claiming a new
+config backup. One-sided selector/mirror mismatch and all other ordinary drift
+fail closed. Before the lane has state, a config-only mirror does not establish
+launcher provenance and is never recorded as `Previous`; rollback becomes
+available only after an authoritative User-scope selector or a managed selection
+has been recorded.
 
 Receipts are evidence, not the transaction owner. A completed setup, build, or
 selection is not undone or reported as unperformed merely because its receipt
@@ -135,9 +143,10 @@ could not be written; the result carries `ReceiptError` so that evidence loss
 remains visible.
 
 It does not stop the app, mutate live SQLite state, delete a package, or claim
-that a restart occurred. Use `-WhatIf` to inspect the plan. Verify distinguishes
-the configured entrypoint from the process-scoped live entrypoint and reruns the
-isolated package smoke.
+that a restart occurred. Use `-WhatIf` to inspect the plan. Verify exposes the
+persistent next-launch selector, config mirror, and process-live startup snapshot
+separately and reruns the isolated package smoke. Equality of that inherited
+process snapshot is not attestation of which binary the GUI already loaded.
 
 ## Retention and disk use
 
@@ -155,7 +164,8 @@ previous release merely because it is old.
 # Restart Codex Desktop, then run Verify.
 ```
 
-Rollback selects the recorded previous entrypoint and backs up config again.
+Rollback transactionally selects the recorded previous entrypoint in both the
+User-scope selector and config mirror, and backs up config when its image changes.
 For a lane-managed previous release it revalidates the canonical package,
 fingerprint, executable targets, and isolated smoke before mutation. A
 pre-lane selector without a recorded fingerprint remains an existence-only
@@ -173,5 +183,6 @@ feature's tested migration/recovery path.
 The self-test uses disposable packages, config, and deployment state under the
 system temporary directory. It exercises tool resolution and MSVC host
 selection, config preservation, provenance, task-scoped pointers, all packaged
-executable targets, WhatIf, transaction fault/recovery, two deployments, and
-rollback without running or modifying the live Desktop installation.
+executable targets, WhatIf, selector/config/state transaction fault recovery,
+two deployments, and rollback. Its persistent-selector adapter is in-memory and
+the tests assert that the real User-scope `CODEX_CLI_PATH` is unchanged.

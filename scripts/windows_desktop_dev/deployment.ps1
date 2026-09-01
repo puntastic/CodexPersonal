@@ -19,6 +19,7 @@ function Install-CodexDevPackage {
         -ConfigPath $config `
         -DeploymentRoot $root
     $configuredForPlan = $planDeployment.ConfiguredEntrypoint
+    $persistentForPlan = $planDeployment.PersistentEntrypoint
     $configuredPreviousSettlement = if (
         $planDeployment.Status -eq "previous_configured_state_stale"
     ) {
@@ -71,6 +72,8 @@ function Install-CodexDevPackage {
             ConfigPath = $config
             ConfiguredBefore = $configuredForPlan
             ConfiguredAfter = $entrypoint
+            PersistentBefore = $persistentForPlan
+            PersistentAfter = $entrypoint
             DeploymentStatus = $planDeployment.Status
             RecoveryDisposition = if ($null -ne $configuredPreviousSettlement) {
                 "settle_configured_previous"
@@ -102,6 +105,7 @@ function Install-CodexDevPackage {
                 )
             }
             $recovery = Complete-CodexDevConfiguredPreviousSettlement `
+                -Action "Deploy" `
                 -SettlementPlan $freshSettlementPlan `
                 -ConfigPath $config `
                 -DeploymentRoot $root
@@ -155,6 +159,7 @@ function Install-CodexDevPackage {
             -ConfigPath $config `
             -Entrypoint $entrypoint
         $configuredBefore = $configTransition.ConfiguredBefore
+        $persistentBefore = Get-CodexDevPersistentSelector
         $paths = Get-CodexDevDeploymentPaths $root
         $stateRead = Read-CodexDevJsonFile $paths.State
         if ($null -ne $stateRead.Error) {
@@ -169,7 +174,8 @@ function Install-CodexDevPackage {
             -Value $currentBefore `
             -Name "Selection"
         if (-not $stateRead.Exists -and
-            (Test-CodexDevPathEqual -Left $configuredBefore -Right $entrypoint)) {
+            (Test-CodexDevPathEqual -Left $configuredBefore -Right $entrypoint) -and
+            (Test-CodexDevPathEqual -Left $persistentBefore -Right $entrypoint)) {
             $adoptedCurrent = [ordered]@{
                 ReleaseId = $releaseId
                 ReleasePath = $releasePath
@@ -191,20 +197,37 @@ function Install-CodexDevPackage {
             if ($configBeforeAdoption.Sha256 -ne $configTransition.BeforeSha256) {
                 throw "Config changed while state-only deployment adoption was being prepared."
             }
-            Write-CodexDevJson -Path $paths.State -Value $adoptedState
+            Invoke-CodexDevDeploymentTransaction `
+                -Action "Deploy" `
+                -ConfigPath $config `
+                -DeploymentRoot $root `
+                -ConfiguredBefore $configuredBefore `
+                -ConfiguredAfter $entrypoint `
+                -PersistentBefore $persistentBefore `
+                -PersistentAfter $entrypoint `
+                -ConfigTransition $configTransition `
+                -ConfigBackup $null `
+                -StateBeforeExists $false `
+                -StateBefore $null `
+                -StateAfter $adoptedState
             return [pscustomobject]@{
                 Status = "adopted_existing_selection"
                 Release = $adoptedCurrent
                 Previous = $null
                 ConfigPath = $config
                 ConfiguredBefore = $configuredBefore
+                PersistentBefore = $persistentBefore
+                PersistentEntrypoint = $entrypoint
                 ConfigBackup = $null
-                RestartRequired = $env:CODEX_CLI_PATH -ne $entrypoint
+                RestartRequired = Test-CodexDevRestartRequired `
+                    -ProcessLiveEntrypoint $env:CODEX_CLI_PATH `
+                    -PersistentEntrypoint $entrypoint
                 Recovery = $recovery
             }
         }
         if ((Test-CodexDevPathEqual -Left $currentBeforeEntrypoint -Right $entrypoint) -and
             (Test-CodexDevPathEqual -Left $configuredBefore -Right $entrypoint) -and
+            (Test-CodexDevPathEqual -Left $persistentBefore -Right $entrypoint) -and
             (Test-CodexDevPackageSelectionEqual -Left $currentSelection -Right $selection)) {
             return [pscustomobject]@{
                 Status = "already_selected"
@@ -216,6 +239,8 @@ function Install-CodexDevPackage {
                 } else {
                     $configuredBefore
                 }
+                PersistentBefore = $persistentBefore
+                PersistentEntrypoint = $entrypoint
                 ConfigBackup = if ($null -ne $recovery) {
                     $recovery.ConfigBackup
                 } else {
@@ -223,13 +248,16 @@ function Install-CodexDevPackage {
                         -Value $stateBefore `
                         -Name "LastConfigBackup")
                 }
-                RestartRequired = $env:CODEX_CLI_PATH -ne $entrypoint
+                RestartRequired = Test-CodexDevRestartRequired `
+                    -ProcessLiveEntrypoint $env:CODEX_CLI_PATH `
+                    -PersistentEntrypoint $entrypoint
                 Recovery = $recovery
             }
         }
 
         if ((Test-CodexDevPathEqual -Left $currentBeforeEntrypoint -Right $entrypoint) -and
-            (Test-CodexDevPathEqual -Left $configuredBefore -Right $entrypoint)) {
+            (Test-CodexDevPathEqual -Left $configuredBefore -Right $entrypoint) -and
+            (Test-CodexDevPathEqual -Left $persistentBefore -Right $entrypoint)) {
             $selectionOnlyCurrent = [ordered]@{
                 ReleaseId = [string](Get-CodexDevObjectProperty -Value $currentBefore -Name "ReleaseId")
                 ReleasePath = [string](Get-CodexDevObjectProperty -Value $currentBefore -Name "ReleasePath")
@@ -253,38 +281,59 @@ function Install-CodexDevPackage {
             if ($configBeforeSelection.Sha256 -ne $configTransition.BeforeSha256) {
                 throw "Config changed while the selected build occurrence was being recorded."
             }
-            Write-CodexDevJson -Path $paths.State -Value $selectionOnlyState
+            Invoke-CodexDevDeploymentTransaction `
+                -Action "Deploy" `
+                -ConfigPath $config `
+                -DeploymentRoot $root `
+                -ConfiguredBefore $configuredBefore `
+                -ConfiguredAfter $entrypoint `
+                -PersistentBefore $persistentBefore `
+                -PersistentAfter $entrypoint `
+                -ConfigTransition $configTransition `
+                -ConfigBackup $null `
+                -StateBeforeExists $true `
+                -StateBefore $stateBefore `
+                -StateAfter $selectionOnlyState
             return [pscustomobject]@{
                 Status = "selection_recorded"
                 Release = $selectionOnlyCurrent
                 Previous = $selectionOnlyState.Previous
                 ConfigPath = $config
                 ConfiguredBefore = $configuredBefore
+                PersistentBefore = $persistentBefore
+                PersistentEntrypoint = $entrypoint
                 ConfigBackup = $selectionOnlyState.LastConfigBackup
-                RestartRequired = $env:CODEX_CLI_PATH -ne $entrypoint
+                RestartRequired = Test-CodexDevRestartRequired `
+                    -ProcessLiveEntrypoint $env:CODEX_CLI_PATH `
+                    -PersistentEntrypoint $entrypoint
                 Recovery = $recovery
             }
         }
 
         $previous = if ((Test-CodexDevPathEqual `
             -Left $currentBeforeEntrypoint `
-            -Right $configuredBefore) -and $null -ne $currentBefore) {
+            -Right $configuredBefore) -and
+            (Test-CodexDevPathEqual -Left $currentBeforeEntrypoint -Right $persistentBefore) -and
+            $null -ne $currentBefore) {
             $currentBefore
-        } elseif (-not [string]::IsNullOrWhiteSpace($configuredBefore)) {
+        } elseif (-not [string]::IsNullOrWhiteSpace($persistentBefore)) {
             [pscustomobject]@{
                 ReleaseId = "pre-lane"
-                Entrypoint = $configuredBefore
+                Entrypoint = $persistentBefore
                 Fingerprint = $null
             }
         } else {
             $null
         }
-        $backupDirectory = Join-Path $root "config-backups"
-        New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
-        $backupPath = Join-Path $backupDirectory (
-            "$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmssfff'))-$([guid]::NewGuid().ToString('N'))-config.toml"
-        )
-        [System.IO.File]::WriteAllBytes($backupPath, [byte[]]$configTransition.BeforeBytes)
+        $backupPath = $null
+        if ($configTransition.BeforeSha256 -ne $configTransition.AfterSha256) {
+            $backupDirectory = Join-Path $root "config-backups"
+            New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+            $backupPath = Join-Path $backupDirectory (
+                "$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmssfff'))-$([guid]::NewGuid().ToString('N'))-config.toml"
+            )
+            [System.IO.File]::WriteAllBytes($backupPath, [byte[]]$configTransition.BeforeBytes)
+        }
 
         $current = [ordered]@{
             ReleaseId = $releaseId
@@ -309,6 +358,8 @@ function Install-CodexDevPackage {
             -DeploymentRoot $root `
             -ConfiguredBefore $configuredBefore `
             -ConfiguredAfter $entrypoint `
+            -PersistentBefore $persistentBefore `
+            -PersistentAfter $entrypoint `
             -ConfigTransition $configTransition `
             -ConfigBackup $backupPath `
             -StateBeforeExists ([bool]$stateRead.Exists) `
@@ -321,8 +372,12 @@ function Install-CodexDevPackage {
             Previous = $previous
             ConfigPath = $config
             ConfiguredBefore = $configuredBefore
+            PersistentBefore = $persistentBefore
+            PersistentEntrypoint = $entrypoint
             ConfigBackup = $backupPath
-            RestartRequired = $env:CODEX_CLI_PATH -ne $entrypoint
+            RestartRequired = Test-CodexDevRestartRequired `
+                -ProcessLiveEntrypoint $env:CODEX_CLI_PATH `
+                -PersistentEntrypoint $entrypoint
             Recovery = $recovery
         }
         }
@@ -334,6 +389,9 @@ function Install-CodexDevPackage {
             Release = $operation.Release
             Previous = $operation.Previous
             ConfigPath = $config
+            PersistentEntrypoint = $operation.PersistentEntrypoint
+            ConfiguredEntrypoint = $operation.Release.Entrypoint
+            ProcessLiveEntrypoint = $env:CODEX_CLI_PATH
             Receipt = $null
             ReceiptStatus = "not_written_already_selected"
             ReceiptError = $null
@@ -351,8 +409,14 @@ function Install-CodexDevPackage {
             Release = $operation.Release
             ConfigPath = $config
             ConfiguredBefore = $operation.ConfiguredBefore
+            ConfiguredAfter = $operation.Release.Entrypoint
+            PersistentBefore = $operation.PersistentBefore
+            PersistentAfter = $operation.PersistentEntrypoint
             ConfigBackup = $operation.ConfigBackup
-            LiveBefore = $env:CODEX_CLI_PATH
+            ProcessLiveAtOperation = $env:CODEX_CLI_PATH
+            ProcessLiveProofBoundary = (
+                "Inherited process selector snapshot; it does not attest the loaded Desktop binary."
+            )
             Recovery = $operation.Recovery
             Selection = $selection
         })
@@ -364,6 +428,9 @@ function Install-CodexDevPackage {
         Release = $operation.Release
         Previous = $operation.Previous
         ConfigPath = $config
+        PersistentEntrypoint = $operation.PersistentEntrypoint
+        ConfiguredEntrypoint = $operation.Release.Entrypoint
+        ProcessLiveEntrypoint = $env:CODEX_CLI_PATH
         Receipt = $receipt
         ReceiptStatus = if ($null -eq $receiptError) { "written" } else { "failed_after_success" }
         ReceiptError = $receiptError
@@ -378,6 +445,50 @@ function Install-CodexDevPackage {
     }
 }
 
+function Get-CodexDevClosingVerificationSnapshot {
+    param(
+        [string]$ConfigPath,
+        [string]$DeploymentRoot,
+        [object]$InitialDeployment,
+        [System.Collections.Generic.List[string]]$VerificationDrift
+    )
+
+    $verifiedDeployment = Get-CodexDevDeploymentStatus `
+        -ConfigPath $ConfigPath `
+        -DeploymentRoot $DeploymentRoot
+    if ($verifiedDeployment.Status -ne "consistent") {
+        $VerificationDrift.Add(
+            "Deployment planes were not settled at the closing verification read: " +
+            "$($verifiedDeployment.Status)."
+        )
+    }
+    if ($verifiedDeployment.ConfigSha256 -ne $InitialDeployment.ConfigSha256) {
+        $VerificationDrift.Add("Config changed during deployment verification.")
+    }
+    if (-not (Test-CodexDevSelectorExact `
+            -Left $verifiedDeployment.PersistentEntrypoint `
+            -Right $InitialDeployment.PersistentEntrypoint)) {
+        $VerificationDrift.Add("Persistent selector changed during deployment verification.")
+    }
+    if (-not (Test-CodexDevSelectorExact `
+            -Left $verifiedDeployment.ConfiguredEntrypoint `
+            -Right $InitialDeployment.ConfiguredEntrypoint)) {
+        $VerificationDrift.Add("Configured selector changed during deployment verification.")
+    }
+    $verifiedState = [pscustomobject]@{
+        Exists = [bool]$verifiedDeployment.StateExists
+        Value = Get-CodexDevObjectProperty -Value $verifiedDeployment -Name "State"
+        Error = $null
+    }
+    if (-not (Test-CodexDevStateSnapshot `
+            -StateRead $verifiedState `
+            -ExpectedExists ([bool]$InitialDeployment.StateExists) `
+            -ExpectedValue $InitialDeployment.State)) {
+        $VerificationDrift.Add("Deployment state changed during deployment verification.")
+    }
+    return $verifiedDeployment
+}
+
 function Invoke-CodexDevVerify {
     param(
         [string]$ConfigPath,
@@ -388,18 +499,27 @@ function Invoke-CodexDevVerify {
         -ConfigPath $ConfigPath `
         -DeploymentRoot $DeploymentRoot
     $configured = $deployment.ConfiguredEntrypoint
+    $persistent = $deployment.PersistentEntrypoint
+    $processLive = $env:CODEX_CLI_PATH
     if ($deployment.Status -ne "consistent") {
         return [pscustomobject]@{
             Status = $deployment.Status
             ConfigPath = $ConfigPath
+            PersistentEntrypoint = $persistent
             ConfiguredEntrypoint = $configured
-            LiveEntrypoint = $env:CODEX_CLI_PATH
+            ProcessLiveEntrypoint = $processLive
+            LiveEntrypoint = $processLive
             Package = $null
             SelectedOccurrence = $null
             StagedReleaseProvenance = $null
             VerificationMode = "unsettled"
-            ProofBoundary = "Deployment settlement is required before package verification."
-            RestartRequired = $env:CODEX_CLI_PATH -ne $configured
+            ProofBoundary = (
+                "Deployment settlement is required before package verification. ProcessLiveEntrypoint " +
+                "is only this process's inherited selector snapshot."
+            )
+            RestartRequired = Test-CodexDevRestartRequired `
+                -ProcessLiveEntrypoint $processLive `
+                -PersistentEntrypoint $persistent
             DeploymentStatus = $deployment.Status
             PendingDisposition = $deployment.PendingDisposition
             DriftReasons = @($deployment.DriftReasons)
@@ -411,22 +531,33 @@ function Invoke-CodexDevVerify {
         throw "CODEX_CLI_PATH is not configured in $ConfigPath"
     }
     $configSnapshot = Read-CodexCliConfigSnapshot $ConfigPath
+    $persistentSnapshot = Read-CodexDevPersistentSelector
     if ($null -ne $configSnapshot.Error -or
-        $configSnapshot.Sha256 -ne $deployment.ConfigSha256) {
+        $configSnapshot.Sha256 -ne $deployment.ConfigSha256 -or
+        $null -ne $persistentSnapshot.Error -or
+        -not (Test-CodexDevSelectorExact `
+            -Left $persistentSnapshot.Value `
+            -Right $persistent)) {
         return [pscustomobject]@{
             Status = "drift"
             ConfigPath = $ConfigPath
+            PersistentEntrypoint = $persistent
             ConfiguredEntrypoint = $configured
-            LiveEntrypoint = $env:CODEX_CLI_PATH
+            ProcessLiveEntrypoint = $processLive
+            LiveEntrypoint = $processLive
             Package = $null
             SelectedOccurrence = $null
             StagedReleaseProvenance = $null
-            VerificationMode = "config_snapshot"
-            ProofBoundary = "Config changed before package verification could begin."
-            RestartRequired = $env:CODEX_CLI_PATH -ne $configured
+            VerificationMode = "durable_selector_snapshot"
+            ProofBoundary = (
+                "Persistent selector or config mirror changed before package verification could begin."
+            )
+            RestartRequired = Test-CodexDevRestartRequired `
+                -ProcessLiveEntrypoint $processLive `
+                -PersistentEntrypoint $persistent
             DeploymentStatus = "drift"
             PendingDisposition = $deployment.PendingDisposition
-            DriftReasons = @("Config changed during deployment verification.")
+            DriftReasons = @("Persistent selector or config mirror changed during verification.")
             Deployment = $deployment
             DeploymentSettled = $false
         }
@@ -449,11 +580,11 @@ function Invoke-CodexDevVerify {
     $hasFingerprint = -not [string]::IsNullOrWhiteSpace($currentFingerprint)
     $hasReleasePath = -not [string]::IsNullOrWhiteSpace($currentReleasePath)
     if (-not $hasFingerprint -and -not $hasReleasePath) {
-        $verifiedConfig = Read-CodexCliConfigSnapshot $ConfigPath
-        if ($null -ne $verifiedConfig.Error -or
-            $verifiedConfig.Sha256 -ne $deployment.ConfigSha256) {
-            $verificationDrift.Add("Config changed during deployment verification.")
-        }
+        $verifiedDeployment = Get-CodexDevClosingVerificationSnapshot `
+            -ConfigPath $ConfigPath `
+            -DeploymentRoot $DeploymentRoot `
+            -InitialDeployment $deployment `
+            -VerificationDrift $verificationDrift
         $effectiveDeploymentStatus = if ($verificationDrift.Count -gt 0) {
             "drift"
         } else {
@@ -461,26 +592,33 @@ function Invoke-CodexDevVerify {
         }
         return [pscustomobject]@{
             Status = if ($effectiveDeploymentStatus -eq "consistent") {
-                if ($env:CODEX_CLI_PATH -eq $configured) { "live" } else { "restart_required" }
+                if (-not (Test-CodexDevRestartRequired `
+                    -ProcessLiveEntrypoint $processLive `
+                    -PersistentEntrypoint $persistent)) { "live" } else { "restart_required" }
             } else {
                 $effectiveDeploymentStatus
             }
             ConfigPath = $ConfigPath
+            PersistentEntrypoint = $persistent
             ConfiguredEntrypoint = $configured
-            LiveEntrypoint = $env:CODEX_CLI_PATH
+            ProcessLiveEntrypoint = $processLive
+            LiveEntrypoint = $processLive
             Package = $null
             SelectedOccurrence = $null
             StagedReleaseProvenance = $null
             VerificationMode = "pre_lane_selector_only"
             ProofBoundary = (
                 "Selector existence only; pre-lane package integrity, PE targets, and provenance " +
-                "are not attested."
+                "are not attested. ProcessLiveEntrypoint is an inherited selector snapshot, not " +
+                "attestation of the loaded Desktop binary."
             )
-            RestartRequired = $env:CODEX_CLI_PATH -ne $configured
+            RestartRequired = Test-CodexDevRestartRequired `
+                -ProcessLiveEntrypoint $processLive `
+                -PersistentEntrypoint $persistent
             DeploymentStatus = $effectiveDeploymentStatus
-            PendingDisposition = $deployment.PendingDisposition
+            PendingDisposition = $verifiedDeployment.PendingDisposition
             DriftReasons = @($verificationDrift.ToArray())
-            Deployment = $deployment
+            Deployment = $verifiedDeployment
             DeploymentSettled = $effectiveDeploymentStatus -eq "consistent"
         }
     }
@@ -488,14 +626,21 @@ function Invoke-CodexDevVerify {
         return [pscustomobject]@{
             Status = "drift"
             ConfigPath = $ConfigPath
+            PersistentEntrypoint = $persistent
             ConfiguredEntrypoint = $configured
-            LiveEntrypoint = $env:CODEX_CLI_PATH
+            ProcessLiveEntrypoint = $processLive
+            LiveEntrypoint = $processLive
             Package = $null
             SelectedOccurrence = $selection
             StagedReleaseProvenance = $null
             VerificationMode = "managed_package"
-            ProofBoundary = "Managed deployment state must record both ReleasePath and Fingerprint."
-            RestartRequired = $env:CODEX_CLI_PATH -ne $configured
+            ProofBoundary = (
+                "Managed deployment state must record both ReleasePath and Fingerprint. " +
+                "ProcessLiveEntrypoint remains only an inherited selector snapshot."
+            )
+            RestartRequired = Test-CodexDevRestartRequired `
+                -ProcessLiveEntrypoint $processLive `
+                -PersistentEntrypoint $persistent
             DeploymentStatus = "drift"
             PendingDisposition = $deployment.PendingDisposition
             DriftReasons = @("Managed deployment state has incomplete package identity.")
@@ -545,26 +690,30 @@ function Invoke-CodexDevVerify {
     if ($currentProvenanceStatus -cne $selectionProvenanceStatus) {
         $verificationDrift.Add("Selected provenance status does not match state.Current.")
     }
-    $verifiedConfig = Read-CodexCliConfigSnapshot $ConfigPath
-    if ($null -ne $verifiedConfig.Error -or
-        $verifiedConfig.Sha256 -ne $deployment.ConfigSha256) {
-        $verificationDrift.Add("Config changed during deployment verification.")
-    }
+    $verifiedDeployment = Get-CodexDevClosingVerificationSnapshot `
+        -ConfigPath $ConfigPath `
+        -DeploymentRoot $DeploymentRoot `
+        -InitialDeployment $deployment `
+        -VerificationDrift $verificationDrift
     $effectiveDeploymentStatus = if ($verificationDrift.Count -gt 0) {
         "drift"
     } else {
         "consistent"
     }
     $status = if ($effectiveDeploymentStatus -eq "consistent") {
-        if ($env:CODEX_CLI_PATH -eq $configured) { "live" } else { "restart_required" }
+        if (-not (Test-CodexDevRestartRequired `
+            -ProcessLiveEntrypoint $processLive `
+            -PersistentEntrypoint $persistent)) { "live" } else { "restart_required" }
     } else {
         $effectiveDeploymentStatus
     }
     return [pscustomobject]@{
         Status = $status
         ConfigPath = $ConfigPath
+        PersistentEntrypoint = $persistent
         ConfiguredEntrypoint = $configured
-        LiveEntrypoint = $env:CODEX_CLI_PATH
+        ProcessLiveEntrypoint = $processLive
+        LiveEntrypoint = $processLive
         Package = $package
         SelectedOccurrence = $selection
         StagedReleaseProvenance = [pscustomobject]@{
@@ -575,13 +724,16 @@ function Invoke-CodexDevVerify {
         VerificationMode = "managed_package"
         ProofBoundary = (
             "Configured package layout, host PE targets, artifact fingerprint, selected occurrence, " +
-            "and executable smoke are verified."
+            "and executable smoke are verified. ProcessLiveEntrypoint equality proves only that " +
+            "this process inherited the selected path; it does not attest the loaded Desktop binary."
         )
-        RestartRequired = $env:CODEX_CLI_PATH -ne $configured
+        RestartRequired = Test-CodexDevRestartRequired `
+            -ProcessLiveEntrypoint $processLive `
+            -PersistentEntrypoint $persistent
         DeploymentStatus = $effectiveDeploymentStatus
-        PendingDisposition = $deployment.PendingDisposition
+        PendingDisposition = $verifiedDeployment.PendingDisposition
         DriftReasons = @($verificationDrift.ToArray())
-        Deployment = $deployment
+        Deployment = $verifiedDeployment
         DeploymentSettled = $effectiveDeploymentStatus -eq "consistent"
     }
 }
@@ -704,6 +856,7 @@ function Get-CodexDevConfiguredPreviousSettlementPlan {
         $blockers.Add("Projected deployment state is invalid.")
     }
     $configured = $DeploymentStatus.ConfiguredEntrypoint
+    $persistent = $DeploymentStatus.PersistentEntrypoint
     $projectedCurrent = Get-CodexDevObjectProperty -Value $stateAfter -Name "Current"
     $projectedEntrypoint = [string](
         Get-CodexDevObjectProperty -Value $projectedCurrent -Name "Entrypoint"
@@ -712,10 +865,15 @@ function Get-CodexDevConfiguredPreviousSettlementPlan {
         -not (Test-CodexDevPathEqual -Left $configured -Right $projectedEntrypoint)) {
         $blockers.Add("Projected deployment state does not match the configured entrypoint.")
     }
+    if ($blockers.Count -eq 0 -and
+        -not (Test-CodexDevPathEqual -Left $persistent -Right $projectedEntrypoint)) {
+        $blockers.Add("Projected deployment state does not match the persistent selector.")
+    }
     return [pscustomobject]@{
         Status = if ($blockers.Count -eq 0) { "ready" } else { "blocked" }
         ConfigPath = $ConfigPath
         ConfiguredEntrypoint = $configured
+        PersistentEntrypoint = $persistent
         ConfigSha256 = $DeploymentStatus.ConfigSha256
         StateBefore = $stateBefore
         StateAfter = $stateAfter
@@ -725,6 +883,8 @@ function Get-CodexDevConfiguredPreviousSettlementPlan {
 
 function Complete-CodexDevConfiguredPreviousSettlement {
     param(
+        [ValidateSet("Deploy", "Rollback")]
+        [string]$Action,
         [object]$SettlementPlan,
         [string]$ConfigPath,
         [string]$DeploymentRoot
@@ -735,8 +895,12 @@ function Complete-CodexDevConfiguredPreviousSettlement {
     }
     $paths = Get-CodexDevDeploymentPaths $DeploymentRoot
     $configBeforeSettlement = Read-CodexCliConfigSnapshot $ConfigPath
+    $persistentBeforeSettlement = Get-CodexDevPersistentSelector
     $stateBeforeSettlement = Read-CodexDevJsonFile $paths.State
     $alreadySettled = $configBeforeSettlement.Sha256 -eq $SettlementPlan.ConfigSha256 -and
+        (Test-CodexDevSelectorExact `
+            -Left $persistentBeforeSettlement `
+            -Right $SettlementPlan.PersistentEntrypoint) -and
         (Test-CodexDevStateSnapshot `
             -StateRead $stateBeforeSettlement `
             -ExpectedExists $true `
@@ -748,6 +912,9 @@ function Complete-CodexDevConfiguredPreviousSettlement {
             ConfiguredBefore = $SettlementPlan.ConfiguredEntrypoint
             ConfiguredAfter = $SettlementPlan.ConfiguredEntrypoint
             ConfiguredEntrypoint = $SettlementPlan.ConfiguredEntrypoint
+            PersistentBefore = $SettlementPlan.PersistentEntrypoint
+            PersistentAfter = $SettlementPlan.PersistentEntrypoint
+            PersistentEntrypoint = $SettlementPlan.PersistentEntrypoint
             ConfigBackup = $null
             RetainedLastConfigBackup = Get-CodexDevObjectProperty `
                 -Value $SettlementPlan.StateAfter `
@@ -764,32 +931,35 @@ function Complete-CodexDevConfiguredPreviousSettlement {
         )
     }
     if ($configBeforeSettlement.Sha256 -ne $SettlementPlan.ConfigSha256 -or
+        -not (Test-CodexDevSelectorExact `
+            -Left $persistentBeforeSettlement `
+            -Right $SettlementPlan.PersistentEntrypoint) -or
         -not (Test-CodexDevStateSnapshot `
             -StateRead $stateBeforeSettlement `
             -ExpectedExists $true `
             -ExpectedValue $SettlementPlan.StateBefore)) {
         throw "Config or deployment state changed while previous-state settlement was prepared."
     }
-    $configAtSettlementCommit = Read-CodexCliConfigSnapshot $ConfigPath
-    $stateAtSettlementCommit = Read-CodexDevJsonFile $paths.State
-    if ($configAtSettlementCommit.Sha256 -ne $SettlementPlan.ConfigSha256 -or
-        -not (Test-CodexDevStateSnapshot `
-            -StateRead $stateAtSettlementCommit `
-            -ExpectedExists $true `
-            -ExpectedValue $SettlementPlan.StateBefore)) {
-        throw "Config or deployment state changed before previous-state settlement could commit."
+    $configTransition = Get-CodexCliConfigTransition `
+        -ConfigPath $ConfigPath `
+        -Entrypoint $SettlementPlan.ConfiguredEntrypoint
+    if ($configTransition.BeforeSha256 -ne $SettlementPlan.ConfigSha256 -or
+        $configTransition.AfterSha256 -ne $SettlementPlan.ConfigSha256) {
+        throw "Config changed before previous-state settlement could be journaled."
     }
-    Write-CodexDevJson -Path $paths.State -Value $SettlementPlan.StateAfter
-
-    $configAfterSettlement = Read-CodexCliConfigSnapshot $ConfigPath
-    $stateAfterSettlement = Read-CodexDevJsonFile $paths.State
-    if ($configAfterSettlement.Sha256 -ne $SettlementPlan.ConfigSha256 -or
-        -not (Test-CodexDevStateSnapshot `
-            -StateRead $stateAfterSettlement `
-            -ExpectedExists $true `
-            -ExpectedValue $SettlementPlan.StateAfter)) {
-        throw "Previous-state settlement could not be verified after writing deployment state."
-    }
+    Invoke-CodexDevDeploymentTransaction `
+        -Action $Action `
+        -ConfigPath $ConfigPath `
+        -DeploymentRoot $DeploymentRoot `
+        -ConfiguredBefore $SettlementPlan.ConfiguredEntrypoint `
+        -ConfiguredAfter $SettlementPlan.ConfiguredEntrypoint `
+        -PersistentBefore $SettlementPlan.PersistentEntrypoint `
+        -PersistentAfter $SettlementPlan.PersistentEntrypoint `
+        -ConfigTransition $configTransition `
+        -ConfigBackup $null `
+        -StateBeforeExists $true `
+        -StateBefore $SettlementPlan.StateBefore `
+        -StateAfter $SettlementPlan.StateAfter
 
     return [pscustomobject]@{
         Status = "configured_previous_settled"
@@ -797,6 +967,9 @@ function Complete-CodexDevConfiguredPreviousSettlement {
         ConfiguredBefore = $SettlementPlan.ConfiguredEntrypoint
         ConfiguredAfter = $SettlementPlan.ConfiguredEntrypoint
         ConfiguredEntrypoint = $SettlementPlan.ConfiguredEntrypoint
+        PersistentBefore = $SettlementPlan.PersistentEntrypoint
+        PersistentAfter = $SettlementPlan.PersistentEntrypoint
+        PersistentEntrypoint = $SettlementPlan.PersistentEntrypoint
         ConfigBackup = $null
         RetainedLastConfigBackup = Get-CodexDevObjectProperty `
             -Value $SettlementPlan.StateAfter `
@@ -813,12 +986,14 @@ function Get-CodexDevRollbackPlan {
     $blockers = [System.Collections.Generic.List[string]]::new()
     $state = $null
     $configured = $null
+    $persistent = $null
     $recoveryDisposition = "none"
     $recoveryCompletesRequest = $false
     $pendingTransactionId = $null
     $pendingStateAfter = $null
     $pendingConfigAfterSha256 = $null
     $pendingConfiguredBefore = $null
+    $pendingPersistentBefore = $null
     $pendingConfigBackup = $null
     $configuredPreviousSettlement = $null
 
@@ -826,6 +1001,7 @@ function Get-CodexDevRollbackPlan {
         "consistent" {
             $state = $DeploymentStatus.State
             $configured = $DeploymentStatus.ConfiguredEntrypoint
+            $persistent = $DeploymentStatus.PersistentEntrypoint
         }
         "pending_recoverable_before" {
             $pending = $DeploymentStatus.PendingTransaction
@@ -834,8 +1010,10 @@ function Get-CodexDevRollbackPlan {
             $pendingStateAfter = $pending.StateAfter
             $pendingConfigAfterSha256 = [string]$pending.ConfigAfterSha256
             $pendingConfiguredBefore = [string]$pending.ConfiguredBefore
+            $pendingPersistentBefore = $pending.PersistentBefore
             $pendingConfigBackup = [string]$pending.ConfigBackup
             $configured = [string]$pending.ConfiguredBefore
+            $persistent = $pending.PersistentBefore
             if ([bool]$pending.StateBeforeExists) {
                 $state = $pending.StateBefore
             }
@@ -847,8 +1025,10 @@ function Get-CodexDevRollbackPlan {
             $pendingStateAfter = $pending.StateAfter
             $pendingConfigAfterSha256 = [string]$pending.ConfigAfterSha256
             $pendingConfiguredBefore = [string]$pending.ConfiguredBefore
+            $pendingPersistentBefore = $pending.PersistentBefore
             $pendingConfigBackup = [string]$pending.ConfigBackup
             $configured = [string]$pending.ConfiguredAfter
+            $persistent = [string]$pending.PersistentAfter
             $state = $pending.StateAfter
             $recoveryCompletesRequest = [string]$pending.Action -eq "Rollback"
         }
@@ -863,6 +1043,7 @@ function Get-CodexDevRollbackPlan {
             } else {
                 $state = $configuredPreviousSettlement.StateAfter
                 $configured = $DeploymentStatus.ConfiguredEntrypoint
+                $persistent = $DeploymentStatus.PersistentEntrypoint
                 $recoveryDisposition = "settle_configured_previous"
                 $recoveryCompletesRequest = $true
             }
@@ -894,6 +1075,10 @@ function Get-CodexDevRollbackPlan {
     if ($blockers.Count -eq 0 -and
         -not (Test-CodexDevPathEqual -Left $configured -Right $currentEntrypoint)) {
         $blockers.Add("Config and deployment state will not agree after pending recovery.")
+    }
+    if ($blockers.Count -eq 0 -and
+        -not (Test-CodexDevPathEqual -Left $persistent -Right $currentEntrypoint)) {
+        $blockers.Add("Persistent selector and deployment state will not agree after recovery.")
     }
     if ($blockers.Count -eq 0 -and -not $recoveryCompletesRequest) {
         if ([string]::IsNullOrWhiteSpace($previousEntrypoint)) {
@@ -928,6 +1113,12 @@ function Get-CodexDevRollbackPlan {
         } else {
             $previousEntrypoint
         }
+        PersistentBefore = $persistent
+        PersistentAfter = if ($recoveryCompletesRequest) {
+            $persistent
+        } else {
+            $previousEntrypoint
+        }
         Current = $current
         Previous = $previous
         CandidateValidation = $candidateValidation
@@ -938,6 +1129,7 @@ function Get-CodexDevRollbackPlan {
         PendingStateAfter = $pendingStateAfter
         PendingConfigAfterSha256 = $pendingConfigAfterSha256
         PendingConfiguredBefore = $pendingConfiguredBefore
+        PendingPersistentBefore = $pendingPersistentBefore
         PendingConfigBackup = $pendingConfigBackup
         ConfiguredPreviousSettlement = $configuredPreviousSettlement
         Blockers = @($blockers.ToArray())
@@ -972,25 +1164,6 @@ function Invoke-CodexDevRollback {
 
     $operation = Invoke-WithCodexDevDeploymentLock -DeploymentRoot $root -Body {
         Invoke-WithCodexDevConfigLock -ConfigPath $config -Body {
-        if ($rollbackPlan.RecoveryDisposition -eq "settle_configured_previous") {
-            $settlementCandidate = Get-CodexDevRollbackCandidateValidation `
-                -Candidate $rollbackPlan.Current
-            if (-not $settlementCandidate.Valid) {
-                throw "Cannot settle Rollback to configured Previous: $($settlementCandidate.Error)"
-            }
-            $recovery = Complete-CodexDevConfiguredPreviousSettlement `
-                -SettlementPlan $rollbackPlan.ConfiguredPreviousSettlement `
-                -ConfigPath $config `
-                -DeploymentRoot $root
-            return [pscustomobject]@{
-                Status = "configured_previous_settled"
-                ConfiguredBefore = $rollbackPlan.ConfiguredBefore
-                ConfiguredEntrypoint = $rollbackPlan.ConfiguredAfter
-                ConfigBackup = $null
-                Recovery = $recovery
-                RestartRequired = $env:CODEX_CLI_PATH -ne $rollbackPlan.ConfiguredAfter
-            }
-        }
         if ($rollbackPlan.RecoveryCompletesRequest) {
             $recoveryCandidate = Get-CodexDevRollbackCandidateValidation `
                 -Candidate $rollbackPlan.Current
@@ -1008,17 +1181,49 @@ function Invoke-CodexDevRollback {
                 Status = "previous_selected_for_restart"
                 ConfiguredBefore = $recovery.ConfiguredBefore
                 ConfiguredEntrypoint = $recovery.ConfiguredAfter
+                PersistentBefore = $recovery.PersistentBefore
+                PersistentEntrypoint = $recovery.PersistentAfter
                 ConfigBackup = $recovery.ConfigBackup
                 Recovery = $recovery
-                RestartRequired = $env:CODEX_CLI_PATH -ne $recovery.ConfiguredAfter
+                RestartRequired = Test-CodexDevRestartRequired `
+                    -ProcessLiveEntrypoint $env:CODEX_CLI_PATH `
+                    -PersistentEntrypoint $recovery.PersistentAfter
+            }
+        }
+        if ($rollbackPlan.RecoveryDisposition -eq "settle_configured_previous") {
+            $settlementCandidate = Get-CodexDevRollbackCandidateValidation `
+                -Candidate $rollbackPlan.Current
+            if (-not $settlementCandidate.Valid) {
+                throw "Cannot settle Rollback to configured Previous: $($settlementCandidate.Error)"
+            }
+            $recovery = Complete-CodexDevConfiguredPreviousSettlement `
+                -Action "Rollback" `
+                -SettlementPlan $rollbackPlan.ConfiguredPreviousSettlement `
+                -ConfigPath $config `
+                -DeploymentRoot $root
+            return [pscustomobject]@{
+                Status = "configured_previous_settled"
+                ConfiguredBefore = $rollbackPlan.ConfiguredBefore
+                ConfiguredEntrypoint = $rollbackPlan.ConfiguredAfter
+                PersistentBefore = $rollbackPlan.PersistentBefore
+                PersistentEntrypoint = $rollbackPlan.PersistentAfter
+                ConfigBackup = $null
+                Recovery = $recovery
+                RestartRequired = Test-CodexDevRestartRequired `
+                    -ProcessLiveEntrypoint $env:CODEX_CLI_PATH `
+                    -PersistentEntrypoint $rollbackPlan.PersistentAfter
             }
         }
         if ($null -eq $recovery -and
             $rollbackPlan.RecoveryCompletesRequest -and
             -not [string]::IsNullOrWhiteSpace($rollbackPlan.PendingTransactionId)) {
             $configAfterConcurrentRecovery = Read-CodexCliConfigSnapshot $config
+            $persistentAfterConcurrentRecovery = Get-CodexDevPersistentSelector
             $stateAfterConcurrentRecovery = Read-CodexDevJsonFile $paths.State
             if ($configAfterConcurrentRecovery.Sha256 -eq $rollbackPlan.PendingConfigAfterSha256 -and
+                (Test-CodexDevSelectorExact `
+                    -Left $persistentAfterConcurrentRecovery `
+                    -Right $rollbackPlan.PersistentAfter) -and
                 (Test-CodexDevStateSnapshot `
                     -StateRead $stateAfterConcurrentRecovery `
                     -ExpectedExists $true `
@@ -1029,15 +1234,21 @@ function Invoke-CodexDevRollback {
                     Action = "Rollback"
                     ConfiguredBefore = $rollbackPlan.PendingConfiguredBefore
                     ConfiguredAfter = $rollbackPlan.ConfiguredAfter
+                    PersistentBefore = $rollbackPlan.PendingPersistentBefore
+                    PersistentAfter = $rollbackPlan.PersistentAfter
                     ConfigBackup = $rollbackPlan.PendingConfigBackup
                 }
                 return [pscustomobject]@{
                     Status = "previous_selected_for_restart"
                     ConfiguredBefore = $recovery.ConfiguredBefore
                     ConfiguredEntrypoint = $recovery.ConfiguredAfter
+                    PersistentBefore = $recovery.PersistentBefore
+                    PersistentEntrypoint = $recovery.PersistentAfter
                     ConfigBackup = $recovery.ConfigBackup
                     Recovery = $recovery
-                    RestartRequired = $env:CODEX_CLI_PATH -ne $recovery.ConfiguredAfter
+                    RestartRequired = Test-CodexDevRestartRequired `
+                        -ProcessLiveEntrypoint $env:CODEX_CLI_PATH `
+                        -PersistentEntrypoint $recovery.PersistentAfter
                 }
             }
         }
@@ -1082,10 +1293,13 @@ function Invoke-CodexDevRollback {
             -ConfigPath $config `
             -Entrypoint $previousEntrypoint
         $configuredBefore = $configTransition.ConfiguredBefore
-        if (-not (Test-CodexDevPathEqual -Left $configuredBefore -Right $currentEntrypoint)) {
+        $persistentBefore = Get-CodexDevPersistentSelector
+        if (-not (Test-CodexDevPathEqual -Left $configuredBefore -Right $currentEntrypoint) -or
+            -not (Test-CodexDevPathEqual -Left $persistentBefore -Right $currentEntrypoint)) {
             throw (
-                "Cannot roll back while config and deployment state have drifted. " +
-                "Configured: '$configuredBefore'; state current: '$currentEntrypoint'."
+                "Cannot roll back while persistent selector, config mirror, and state have drifted. " +
+                "Persistent: '$persistentBefore'; configured: '$configuredBefore'; " +
+                "state current: '$currentEntrypoint'."
             )
         }
         $backupDirectory = Join-Path $root "config-backups"
@@ -1106,6 +1320,8 @@ function Invoke-CodexDevRollback {
             -DeploymentRoot $root `
             -ConfiguredBefore $configuredBefore `
             -ConfiguredAfter $previousEntrypoint `
+            -PersistentBefore $persistentBefore `
+            -PersistentAfter $previousEntrypoint `
             -ConfigTransition $configTransition `
             -ConfigBackup $backupPath `
             -StateBeforeExists $true `
@@ -1116,9 +1332,13 @@ function Invoke-CodexDevRollback {
             Status = "previous_selected_for_restart"
             ConfiguredBefore = $configuredBefore
             ConfiguredEntrypoint = $previousEntrypoint
+            PersistentBefore = $persistentBefore
+            PersistentEntrypoint = $previousEntrypoint
             ConfigBackup = $backupPath
             Recovery = $recovery
-            RestartRequired = $env:CODEX_CLI_PATH -ne $previousEntrypoint
+            RestartRequired = Test-CodexDevRestartRequired `
+                -ProcessLiveEntrypoint $env:CODEX_CLI_PATH `
+                -PersistentEntrypoint $previousEntrypoint
         }
         }
     }
@@ -1130,8 +1350,13 @@ function Invoke-CodexDevRollback {
             ConfigPath = $config
             ConfiguredBefore = $operation.ConfiguredBefore
             ConfiguredAfter = $operation.ConfiguredEntrypoint
+            PersistentBefore = $operation.PersistentBefore
+            PersistentAfter = $operation.PersistentEntrypoint
             ConfigBackup = $operation.ConfigBackup
-            LiveBefore = $env:CODEX_CLI_PATH
+            ProcessLiveAtOperation = $env:CODEX_CLI_PATH
+            ProcessLiveProofBoundary = (
+                "Inherited process selector snapshot; it does not attest the loaded Desktop binary."
+            )
             Recovery = $operation.Recovery
         })
     } catch {
@@ -1139,7 +1364,9 @@ function Invoke-CodexDevRollback {
     }
     return [pscustomobject]@{
         Status = $operation.Status
+        PersistentEntrypoint = $operation.PersistentEntrypoint
         ConfiguredEntrypoint = $operation.ConfiguredEntrypoint
+        ProcessLiveEntrypoint = $env:CODEX_CLI_PATH
         Receipt = $receipt
         ReceiptStatus = if ($null -eq $receiptError) { "written" } else { "failed_after_success" }
         ReceiptError = $receiptError
