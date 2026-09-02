@@ -7,8 +7,9 @@ use codex_analytics::GuardianReviewTrackContext;
 use codex_analytics::GuardianReviewedAction;
 use codex_async_utils::THREAD_STACK_SIZE_BYTES;
 use codex_core_plugins::PluginCommandAttribution;
-use codex_extension_api::ThreadIdleCause;
 use codex_features::Feature;
+use codex_protocol::approvals::GuardianAssessmentAction;
+use codex_protocol::approvals::GuardianCommandSource;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
@@ -24,7 +25,6 @@ use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::WarningEvent;
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -75,6 +75,13 @@ const GUARDIAN_TIMEOUT_INSTRUCTIONS: &str = concat!(
     "The automatic permission approval review did not finish before its deadline. ",
     "Do not assume the action is unsafe based on the timeout alone. ",
     "You may retry once, or ask the user for guidance or explicit approval.",
+);
+
+const GUARDIAN_APPROVAL_LANE_CLOSED_INSTRUCTIONS: &str = concat!(
+    "Automatic approval review is closed for the remainder of this turn after repeated denials. ",
+    "This request was rejected without another review and nothing was executed. ",
+    "Do not retry it or request another automatic approval in this turn. ",
+    "Continue with work that needs no approval or provide a final response; a new turn resets the lane.",
 );
 
 const GUARDIAN_REVIEW_MAX_ATTEMPTS: i64 = 3;
@@ -187,6 +194,15 @@ fn guardian_risk_level_str(level: GuardianRiskLevel) -> &'static str {
     }
 }
 
+fn guardian_user_authorization_str(level: GuardianUserAuthorization) -> &'static str {
+    match level {
+        GuardianUserAuthorization::Unknown => "unknown",
+        GuardianUserAuthorization::Low => "low",
+        GuardianUserAuthorization::Medium => "medium",
+        GuardianUserAuthorization::High => "high",
+    }
+}
+
 /// Whether this turn should route allowed approval prompts through the guardian
 /// reviewer instead of surfacing them to the user. ARC may still block actions
 /// earlier in the flow.
@@ -251,56 +267,93 @@ async fn record_guardian_non_denial(session: &Arc<Session>, turn_id: &str) {
         .record_non_denial(turn_id);
 }
 
-async fn record_guardian_denial(session: &Arc<Session>, turn: &Arc<TurnContext>, turn_id: &str) {
-    let policy = if turn.model_info().model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER) {
-        GuardianRejectionCircuitBreakerPolicy::CyberModel
-    } else {
-        GuardianRejectionCircuitBreakerPolicy::Standard
-    };
-    let action = session
+fn guardian_action_class(action: &GuardianAssessmentAction) -> &'static str {
+    match action {
+        GuardianAssessmentAction::Command { source, .. }
+        | GuardianAssessmentAction::Execve { source, .. } => match source {
+            GuardianCommandSource::Shell => "shell command",
+            GuardianCommandSource::UnifiedExec => "exec_command request",
+        },
+        GuardianAssessmentAction::WriteStdin { .. } => "write_stdin request",
+        GuardianAssessmentAction::ApplyPatch { .. } => "apply_patch request",
+        GuardianAssessmentAction::NetworkAccess { .. } => "network access request",
+        GuardianAssessmentAction::McpToolCall { .. } => "MCP tool call",
+        GuardianAssessmentAction::RequestPermissions { .. } => "permission request",
+    }
+}
+
+async fn reject_if_guardian_approval_lane_closed(
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
+    turn_id: &str,
+    action: &GuardianAssessmentAction,
+) -> Option<ReviewDecision> {
+    let closed = session
         .services
         .guardian_rejection_circuit_breaker
         .lock()
         .await
-        .record_denial(turn_id, policy);
-    let GuardianRejectionCircuitBreakerAction::InterruptTurn {
-        consecutive_denials,
-        recent_denials,
-    } = action
-    else {
-        return;
-    };
-
-    if session.turn_context_for_sub_id(turn_id).await.is_none() {
-        return;
+        .should_reject_without_review(turn_id);
+    if !closed {
+        return None;
     }
 
     session
         .send_event(
             turn.as_ref(),
-            EventMsg::GuardianWarning(WarningEvent {
+            EventMsg::Warning(WarningEvent {
                 message: format!(
-                    "Automatic approval review rejected too many approval requests for this turn ({consecutive_denials} consecutive, {recent_denials} in the last {AUTO_REVIEW_DENIAL_WINDOW_SIZE} reviews); interrupting the turn."
+                    "Automatic approval lane is closed for this turn; rejected {} without review. Nothing was executed and the turn remains active.",
+                    guardian_action_class(action)
                 ),
             }),
         )
         .await;
+    Some(ReviewDecision::denied(
+        GUARDIAN_APPROVAL_LANE_CLOSED_INSTRUCTIONS,
+    ))
+}
 
-    let runtime_handle = session.services.runtime_handle.clone();
-    let session = Arc::clone(session);
-    let turn_id = turn_id.to_string();
-    let _abort_task = runtime_handle.spawn(async move {
-        let aborted = session
-            .abort_turn_if_active(&turn_id, TurnAbortReason::Interrupted)
-            .await;
-        if aborted {
-            // Guardian aborts bypass normal task completion, so emit its idle lifecycle here.
-            // User interrupts deliberately do not take this path.
-            session
-                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Interrupted)
-                .await;
-        }
-    });
+async fn record_guardian_denial(
+    session: &Arc<Session>,
+    turn: &Arc<TurnContext>,
+    turn_id: &str,
+    action: &GuardianAssessmentAction,
+    risk_level: GuardianRiskLevel,
+    user_authorization: GuardianUserAuthorization,
+) {
+    let policy = if turn.model_info().model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER) {
+        GuardianRejectionCircuitBreakerPolicy::CyberModel
+    } else {
+        GuardianRejectionCircuitBreakerPolicy::Standard
+    };
+    let circuit_action = session
+        .services
+        .guardian_rejection_circuit_breaker
+        .lock()
+        .await
+        .record_denial(turn_id, policy);
+    let GuardianRejectionCircuitBreakerAction::CloseApprovalLane {
+        consecutive_denials,
+        recent_denials,
+    } = circuit_action
+    else {
+        return;
+    };
+
+    session
+        .send_event(
+            turn.as_ref(),
+            EventMsg::Warning(WarningEvent {
+                message: format!(
+                    "Automatic approval lane closed for this turn after repeated denials ({consecutive_denials} consecutive, {recent_denials} in the last {AUTO_REVIEW_DENIAL_WINDOW_SIZE} reviews). Latest denied action: {}. Review category: {} risk, {} authorization; detailed rationale is available in the preceding automatic-review result. Nothing from this request was executed; the turn remains active. Further automatic approval requests in this turn will be rejected without review.",
+                    guardian_action_class(action),
+                    guardian_risk_level_str(risk_level),
+                    guardian_user_authorization_str(user_authorization),
+                ),
+            }),
+        )
+        .await;
 }
 
 #[cfg(test)]
@@ -308,8 +361,19 @@ pub(crate) async fn record_guardian_denial_for_test(
     session: &Arc<Session>,
     turn: &Arc<TurnContext>,
     turn_id: &str,
+    action: &GuardianAssessmentAction,
+    risk_level: GuardianRiskLevel,
+    user_authorization: GuardianUserAuthorization,
 ) {
-    record_guardian_denial(session, turn, turn_id).await;
+    record_guardian_denial(
+        session,
+        turn,
+        turn_id,
+        action,
+        risk_level,
+        user_authorization,
+    )
+    .await;
 }
 
 /// Runs Guardian unless an installed extension explicitly claims the review.
@@ -324,6 +388,18 @@ async fn run_guardian_review(
     options: GuardianReviewOptions,
 ) -> ReviewDecision {
     let turn = Arc::clone(context.turn());
+    let assessment_turn_id = guardian_request_turn_id(&request, &turn.sub_id).to_string();
+    let action_summary = guardian_assessment_action(&request);
+    if let Some(decision) = reject_if_guardian_approval_lane_closed(
+        &session,
+        &turn,
+        &assessment_turn_id,
+        &action_summary,
+    )
+    .await
+    {
+        return decision;
+    }
     let requires_synchronous_review = options.require_synchronous_review
         || reasons.retry.is_some()
         || matches!(
@@ -375,14 +451,12 @@ async fn run_guardian_review(
         require_synchronous_review: _,
     } = options;
     let target_item_id = guardian_request_target_item_id(&request).map(str::to_string);
-    let assessment_turn_id = guardian_request_turn_id(&request, &turn.sub_id).to_string();
     let plugin_attribution = plugin_attribution_override
         .or_else(|| plugin_attribution_for_guardian_request(turn.as_ref(), &request));
     let (plugin_id, script_path) = plugin_attribution
         .as_ref()
         .map(PluginCommandAttribution::serialized_fields)
         .unzip();
-    let action_summary = guardian_assessment_action(&request);
     let reviewed_action = guardian_reviewed_action(&request);
     let review_tracking = GuardianReviewTrackContext::new(
         session.thread_id.to_string(),
@@ -658,12 +732,7 @@ async fn run_guardian_review(
         GuardianAssessmentOutcome::Deny => false,
     };
     let verdict = if approved { "approved" } else { "denied" };
-    let user_authorization = match assessment.user_authorization {
-        GuardianUserAuthorization::Unknown => "unknown",
-        GuardianUserAuthorization::Low => "low",
-        GuardianUserAuthorization::Medium => "medium",
-        GuardianUserAuthorization::High => "high",
-    };
+    let user_authorization = guardian_user_authorization_str(assessment.user_authorization);
     let warning = format!(
         "Automatic approval review {verdict} (risk: {}, authorization: {user_authorization}): {}",
         guardian_risk_level_str(assessment.risk_level),
@@ -714,7 +783,15 @@ async fn run_guardian_review(
         .await;
 
     if count_denial_for_circuit_breaker {
-        record_guardian_denial(&session, &turn, &assessment_turn_id).await;
+        record_guardian_denial(
+            &session,
+            &turn,
+            &assessment_turn_id,
+            &action_summary,
+            assessment.risk_level,
+            assessment.user_authorization,
+        )
+        .await;
     } else {
         record_guardian_non_denial(&session, &assessment_turn_id).await;
     }

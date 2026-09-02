@@ -47,7 +47,6 @@ use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::ThreadSource;
-use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::user_input::UserInput;
 use core_test_support::fs_wait;
 use core_test_support::responses::assert_parent_turn;
@@ -1583,7 +1582,8 @@ async fn guardian_timeout_rejects_tool_call_with_acting_model_instructions(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cyber_model_guardian_denial_interrupts_turn_immediately() -> Result<()> {
+async fn cyber_model_guardian_denial_closes_lane_but_preserves_turn_and_resets_next_turn()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     skip_if_wine_exec!(
@@ -1613,39 +1613,86 @@ async fn cyber_model_guardian_denial_interrupts_turn_immediately() -> Result<()>
         });
     let test = builder.build_with_auto_env(&server).await?;
 
-    let output_file = test.cwd.path().join("cyber-guardian-denied.txt");
-    let command = format!("printf should-not-run > {}", output_file.display());
-    let tool_args = json!({
-        "cmd": command,
+    let first_output_file = test.cwd.path().join("cyber-guardian-denied-first.txt");
+    let second_output_file = test.cwd.path().join("cyber-guardian-denied-second.txt");
+    let next_turn_output_file = test.cwd.path().join("cyber-guardian-denied-next-turn.txt");
+    let first_tool_args = json!({
+        "cmd": format!("printf should-not-run > {}", first_output_file.display()),
         "yield_time_ms": 1_000_u64,
         "sandbox_permissions": SandboxPermissions::RequireEscalated,
-        "justification": "Exercise immediate Guardian interruption for cyber models.",
+        "justification": "Exercise immediate Guardian lane closure for cyber models.",
     });
+    let second_tool_args = json!({
+        "cmd": format!("printf should-not-run > {}", second_output_file.display()),
+        "yield_time_ms": 1_000_u64,
+        "sandbox_permissions": SandboxPermissions::RequireEscalated,
+        "justification": "Verify the closed approval lane rejects without review.",
+    });
+    let next_turn_tool_args = json!({
+        "cmd": format!("printf should-not-run > {}", next_turn_output_file.display()),
+        "yield_time_ms": 1_000_u64,
+        "sandbox_permissions": SandboxPermissions::RequireEscalated,
+        "justification": "Verify a new turn receives a fresh Guardian review lane.",
+    });
+    let denial = json!({
+        "risk_level": "high",
+        "user_authorization": "low",
+        "outcome": "deny",
+        "rationale": "The requested command has unacceptable test risk.",
+    })
+    .to_string();
     let responses = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
                 ev_response_created("resp-cyber-parent-tool-denied"),
                 ev_function_call(
-                    "exec-cyber-call-denied",
+                    "exec-cyber-call-denied-first",
                     "exec_command",
-                    &serde_json::to_string(&tool_args)?,
+                    &serde_json::to_string(&first_tool_args)?,
                 ),
                 ev_completed("resp-cyber-parent-tool-denied"),
             ]),
             sse(vec![
                 ev_response_created("resp-cyber-guardian-denied"),
-                ev_assistant_message(
-                    "msg-cyber-guardian-denied",
-                    &json!({
-                        "risk_level": "high",
-                        "user_authorization": "low",
-                        "outcome": "deny",
-                        "rationale": "The requested command has unacceptable test risk.",
-                    })
-                    .to_string(),
-                ),
+                ev_assistant_message("msg-cyber-guardian-denied", &denial),
                 ev_completed("resp-cyber-guardian-denied"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-cyber-parent-tool-denied-again"),
+                ev_function_call(
+                    "exec-cyber-call-denied-second",
+                    "exec_command",
+                    &serde_json::to_string(&second_tool_args)?,
+                ),
+                ev_completed("resp-cyber-parent-tool-denied-again"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-cyber-parent-continued"),
+                ev_assistant_message(
+                    "msg-cyber-parent-continued",
+                    "continued after the approval lane closed",
+                ),
+                ev_completed("resp-cyber-parent-continued"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-cyber-next-turn-tool"),
+                ev_function_call(
+                    "exec-cyber-call-next-turn",
+                    "exec_command",
+                    &serde_json::to_string(&next_turn_tool_args)?,
+                ),
+                ev_completed("resp-cyber-next-turn-tool"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-cyber-next-turn-guardian"),
+                ev_assistant_message("msg-cyber-next-turn-guardian", &denial),
+                ev_completed("resp-cyber-next-turn-guardian"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-cyber-next-turn-done"),
+                ev_assistant_message("msg-cyber-next-turn-done", "next turn completed"),
+                ev_completed("resp-cyber-next-turn-done"),
             ]),
         ],
     )
@@ -1654,7 +1701,7 @@ async fn cyber_model_guardian_denial_interrupts_turn_immediately() -> Result<()>
     test.codex
         .start_or_steer_turn(
             TurnInputRequest::user_input(vec![UserInput::Text {
-                text: "run a command that Guardian should deny for a cyber model".into(),
+                text: "deny one cyber-model command, then continue the turn".into(),
                 text_elements: Vec::new(),
             }])
             .with_thread_settings(ThreadSettingsOverrides {
@@ -1666,36 +1713,80 @@ async fn cyber_model_guardian_denial_interrupts_turn_immediately() -> Result<()>
         )
         .await?;
 
-    let warning = wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            EventMsg::GuardianWarning(warning)
-                if warning.message.contains("too many approval requests")
-        )
-    })
-    .await;
-    let EventMsg::GuardianWarning(warning) = warning else {
-        unreachable!("wait_for_event returned a non-warning event")
-    };
-    assert!(
-        warning
-            .message
-            .contains("1 consecutive, 1 in the last 50 reviews")
-    );
+    let mut first_turn_receipts = Vec::new();
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::Warning(warning) => first_turn_receipts.push(warning.message),
+            EventMsg::TurnAborted(event) => {
+                panic!("approval lane closure unexpectedly aborted the turn: {event:?}")
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
 
-    let aborted = wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnAborted(_))
-    })
-    .await;
-    let EventMsg::TurnAborted(aborted) = aborted else {
-        unreachable!("wait_for_event returned a non-abort event")
-    };
-    assert_eq!(aborted.reason, TurnAbortReason::Interrupted);
-    assert_eq!(responses.requests().len(), 2);
-    assert!(
-        !output_file.exists(),
-        "Guardian-denied cyber-model command unexpectedly executed"
+    assert!(first_turn_receipts.iter().any(|warning| {
+        warning.contains("Automatic approval lane closed for this turn")
+            && warning.contains("1 consecutive, 1 in the last 50 reviews")
+            && warning.contains("Latest denied action: exec_command request")
+            && warning.contains("Review category: high risk, low authorization")
+            && warning.contains(
+                "detailed rationale is available in the preceding automatic-review result",
+            )
+            && warning.contains("Nothing from this request was executed")
+            && warning.contains("the turn remains active")
+    }));
+    assert!(first_turn_receipts.iter().any(|warning| {
+        warning.contains("Automatic approval lane is closed for this turn")
+            && warning.contains("rejected exec_command request without review")
+    }));
+    assert_eq!(responses.requests().len(), 4);
+    let second_rejection = responses
+        .function_call_output_text("exec-cyber-call-denied-second")
+        .expect("closed-lane rejection should be returned to the parent model");
+    assert!(second_rejection.contains("closed for the remainder of this turn"));
+    assert!(second_rejection.contains("nothing was executed"));
+
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "verify the next turn gets a fresh Guardian review".into(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                approval_policy: Some(approval_policy),
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                sandbox_policy: Some(sandbox_policy),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    loop {
+        match wait_for_event(&test.codex, |_| true).await {
+            EventMsg::TurnAborted(event) => {
+                panic!("fresh Guardian lane unexpectedly aborted the next turn: {event:?}")
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 7);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request.body_json()["client_metadata"]["x-openai-subagent"].as_str()
+                    == Some("guardian")
+            })
+            .count(),
+        2,
+        "the closed same-turn request must skip Guardian while the next turn runs it again"
     );
+    assert!(!first_output_file.exists());
+    assert!(!second_output_file.exists());
+    assert!(!next_turn_output_file.exists());
 
     Ok(())
 }

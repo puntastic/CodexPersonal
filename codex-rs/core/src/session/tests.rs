@@ -62,6 +62,8 @@ use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::approvals::GuardianAssessmentAction;
+use codex_protocol::approvals::GuardianCommandSource;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::TrustLevel;
@@ -83,6 +85,8 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::ErrorEvent;
+use codex_protocol::protocol::GuardianRiskLevel;
+use codex_protocol::protocol::GuardianUserAuthorization;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::request_permissions::PermissionGrantScope;
@@ -11789,8 +11793,10 @@ impl SessionTask for NeverEndingTask {
     }
 }
 
-#[derive(Clone, Copy)]
-struct GuardianDeniedApprovalTask;
+#[derive(Clone)]
+struct GuardianDeniedApprovalTask {
+    lane_closed: Arc<Notify>,
+}
 
 impl SessionTask for GuardianDeniedApprovalTask {
     fn kind(&self) -> TaskKind {
@@ -11808,9 +11814,23 @@ impl SessionTask for GuardianDeniedApprovalTask {
         _input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
+        let action = GuardianAssessmentAction::Command {
+            source: GuardianCommandSource::UnifiedExec,
+            command: "git push".to_string(),
+            cwd: test_path_buf("/repo").abs(),
+        };
         for _ in 0..3 {
-            crate::guardian::record_guardian_denial_for_test(&session, &ctx, &ctx.sub_id).await;
+            crate::guardian::record_guardian_denial_for_test(
+                &session,
+                &ctx,
+                &ctx.sub_id,
+                &action,
+                GuardianRiskLevel::High,
+                GuardianUserAuthorization::Low,
+            )
+            .await;
         }
+        self.lane_closed.notify_one();
 
         cancellation_token.cancelled().await;
         Ok(None)
@@ -12104,7 +12124,7 @@ async fn interrupting_compaction_fallback_retains_last_known_step_context() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardian_auto_review_emits_thread_idle_after_interrupt() {
+async fn guardian_auto_review_lane_closure_does_not_emit_thread_idle() {
     struct ThreadIdleRecorder(async_channel::Sender<()>);
 
     impl codex_extension_api::ThreadLifecycleContributor<crate::config::Config> for ThreadIdleRecorder {
@@ -12124,22 +12144,33 @@ async fn guardian_auto_review_emits_thread_idle_after_interrupt() {
     builder.thread_lifecycle_contributor(Arc::new(ThreadIdleRecorder(idle_tx)));
     session.services.extensions = Arc::new(builder.build());
 
-    Arc::new(session)
+    let session = Arc::new(session);
+    let lane_closed = Arc::new(Notify::new());
+    session
         .spawn_task(
             Arc::new(turn_context),
             Vec::new(),
-            GuardianDeniedApprovalTask,
+            GuardianDeniedApprovalTask {
+                lane_closed: Arc::clone(&lane_closed),
+            },
         )
         .await;
 
-    timeout(StdDuration::from_secs(5), idle_rx.recv())
+    timeout(StdDuration::from_secs(5), lane_closed.notified())
         .await
-        .expect("guardian interrupt should emit thread idle lifecycle")
-        .expect("idle receiver open");
+        .expect("Guardian approval lane should close");
+    assert!(
+        timeout(StdDuration::from_millis(100), idle_rx.recv())
+            .await
+            .is_err(),
+        "closing only the approval lane must not emit thread idle"
+    );
+
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardian_helper_review_interrupts_after_three_consecutive_denials() {
+async fn guardian_helper_review_closes_lane_without_aborting_active_turn() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
         content: vec![UserInput::Text {
@@ -12161,6 +12192,11 @@ async fn guardian_helper_review_interrupts_after_three_consecutive_denials() {
     let session_for_review = Arc::clone(&sess);
     let turn_for_review = Arc::clone(&tc);
     let turn_id = tc.sub_id.clone();
+    let action = GuardianAssessmentAction::Command {
+        source: GuardianCommandSource::UnifiedExec,
+        command: "git push".to_string(),
+        cwd: test_path_buf("/repo").abs(),
+    };
     let review_thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -12172,6 +12208,9 @@ async fn guardian_helper_review_interrupts_after_three_consecutive_denials() {
                     &session_for_review,
                     &turn_for_review,
                     &turn_id,
+                    &action,
+                    GuardianRiskLevel::High,
+                    GuardianUserAuthorization::Low,
                 )
                 .await;
             }
@@ -12180,13 +12219,17 @@ async fn guardian_helper_review_interrupts_after_three_consecutive_denials() {
     review_thread.join().expect("helper review thread");
 
     let mut observed = Vec::new();
-    let aborted = timeout(StdDuration::from_secs(5), async {
+    let warning = timeout(StdDuration::from_secs(5), async {
         loop {
             let event = rx.recv().await.expect("event");
-            if let EventMsg::TurnAborted(event) = &event.msg {
-                let event = event.clone();
-                observed.push(EventMsg::TurnAborted(event.clone()));
-                break event;
+            if let EventMsg::Warning(warning) = &event.msg
+                && warning
+                    .message
+                    .contains("Automatic approval lane closed for this turn")
+            {
+                let warning = warning.clone();
+                observed.push(EventMsg::Warning(warning.clone()));
+                break warning;
             }
             observed.push(event.msg);
         }
@@ -12194,10 +12237,38 @@ async fn guardian_helper_review_interrupts_after_three_consecutive_denials() {
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "helper review circuit breaker should interrupt the turn; observed events: {observed:?}"
+            "helper review circuit breaker should emit a lane-closure receipt; observed events: {observed:?}"
         )
     });
-    assert_eq!(aborted.reason, TurnAbortReason::Interrupted);
+    assert!(
+        warning
+            .message
+            .contains("Latest denied action: exec_command request")
+    );
+    assert!(
+        warning
+            .message
+            .contains("Review category: high risk, low authorization")
+    );
+    assert!(!warning.message.contains("git push"));
+    assert!(
+        warning
+            .message
+            .contains("Nothing from this request was executed")
+    );
+    assert!(warning.message.contains("the turn remains active"));
+
+    tokio::time::sleep(StdDuration::from_millis(100)).await;
+    let remaining_events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        remaining_events
+            .iter()
+            .all(|event| !matches!(&event.msg, EventMsg::TurnAborted(_))),
+        "lane closure unexpectedly aborted the active turn: {remaining_events:?}"
+    );
+    assert!(sess.turn_context_for_sub_id(&tc.sub_id).await.is_some());
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

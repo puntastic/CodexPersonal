@@ -147,7 +147,7 @@ impl codex_extension_api::ContextContributor for GuardianMemoryContextProbe {
 }
 
 #[test]
-fn guardian_rejection_circuit_breaker_interrupts_after_three_consecutive_denials() {
+fn guardian_rejection_circuit_breaker_closes_lane_after_three_consecutive_denials() {
     let mut circuit_breaker = GuardianRejectionCircuitBreaker::default();
     assert_eq!(
         circuit_breaker.record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::Standard),
@@ -159,30 +159,31 @@ fn guardian_rejection_circuit_breaker_interrupts_after_three_consecutive_denials
     );
     assert_eq!(
         circuit_breaker.record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::Standard),
-        GuardianRejectionCircuitBreakerAction::InterruptTurn {
+        GuardianRejectionCircuitBreakerAction::CloseApprovalLane {
             consecutive_denials: 3,
             recent_denials: 3,
         }
     );
+    assert!(circuit_breaker.should_reject_without_review("turn-1"));
     assert_eq!(
         circuit_breaker.record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::Standard),
-        GuardianRejectionCircuitBreakerAction::Continue
+        GuardianRejectionCircuitBreakerAction::RejectWithoutReview
     );
 }
 
 #[test]
-fn guardian_rejection_circuit_breaker_interrupts_cyber_models_after_one_denial() {
+fn guardian_rejection_circuit_breaker_closes_cyber_lane_after_one_denial() {
     let mut circuit_breaker = GuardianRejectionCircuitBreaker::default();
     assert_eq!(
         circuit_breaker.record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::CyberModel),
-        GuardianRejectionCircuitBreakerAction::InterruptTurn {
+        GuardianRejectionCircuitBreakerAction::CloseApprovalLane {
             consecutive_denials: 1,
             recent_denials: 1,
         }
     );
     assert_eq!(
         circuit_breaker.record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::CyberModel),
-        GuardianRejectionCircuitBreakerAction::Continue
+        GuardianRejectionCircuitBreakerAction::RejectWithoutReview
     );
 }
 
@@ -204,7 +205,7 @@ fn guardian_rejection_circuit_breaker_resets_consecutive_denials_on_non_denial()
     );
     assert_eq!(
         circuit_breaker.record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::Standard),
-        GuardianRejectionCircuitBreakerAction::InterruptTurn {
+        GuardianRejectionCircuitBreakerAction::CloseApprovalLane {
             consecutive_denials: 3,
             recent_denials: 4,
         }
@@ -212,7 +213,7 @@ fn guardian_rejection_circuit_breaker_resets_consecutive_denials_on_non_denial()
 }
 
 #[test]
-fn auto_review_rejection_circuit_breaker_interrupts_after_ten_recent_denials() {
+fn auto_review_rejection_circuit_breaker_closes_lane_after_ten_recent_denials() {
     let mut circuit_breaker = GuardianRejectionCircuitBreaker::default();
     for _ in 0..9 {
         assert_eq!(
@@ -224,7 +225,7 @@ fn auto_review_rejection_circuit_breaker_interrupts_after_ten_recent_denials() {
     }
     assert_eq!(
         circuit_breaker.record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::Standard),
-        GuardianRejectionCircuitBreakerAction::InterruptTurn {
+        GuardianRejectionCircuitBreakerAction::CloseApprovalLane {
             consecutive_denials: 1,
             recent_denials: 10,
         }
@@ -245,6 +246,41 @@ fn auto_review_rejection_circuit_breaker_forgets_denials_outside_recent_review_w
     for _ in 0..(AUTO_REVIEW_DENIAL_WINDOW_SIZE - 18) {
         circuit_breaker.record_non_denial("turn-1");
     }
+    assert_eq!(
+        circuit_breaker.record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::Standard),
+        GuardianRejectionCircuitBreakerAction::Continue
+    );
+}
+
+#[test]
+fn guardian_rejection_circuit_breaker_lane_closure_is_scoped_to_one_turn() {
+    let mut circuit_breaker = GuardianRejectionCircuitBreaker::default();
+    for expected in [
+        GuardianRejectionCircuitBreakerAction::Continue,
+        GuardianRejectionCircuitBreakerAction::Continue,
+        GuardianRejectionCircuitBreakerAction::CloseApprovalLane {
+            consecutive_denials: 3,
+            recent_denials: 3,
+        },
+    ] {
+        assert_eq!(
+            circuit_breaker
+                .record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::Standard),
+            expected
+        );
+    }
+
+    assert!(circuit_breaker.should_reject_without_review("turn-1"));
+    circuit_breaker.record_non_denial("turn-1");
+    assert!(circuit_breaker.should_reject_without_review("turn-1"));
+    assert!(!circuit_breaker.should_reject_without_review("turn-2"));
+    assert_eq!(
+        circuit_breaker.record_denial("turn-2", GuardianRejectionCircuitBreakerPolicy::Standard),
+        GuardianRejectionCircuitBreakerAction::Continue
+    );
+
+    circuit_breaker.clear_turn("turn-1");
+    assert!(!circuit_breaker.should_reject_without_review("turn-1"));
     assert_eq!(
         circuit_breaker.record_denial("turn-1", GuardianRejectionCircuitBreakerPolicy::Standard),
         GuardianRejectionCircuitBreakerAction::Continue
@@ -3274,6 +3310,107 @@ async fn guardian_review_does_not_retry_valid_denial() -> anyhow::Result<()> {
 
     assert!(matches!(decision, ReviewDecision::Denied { .. }));
     assert_eq!(request_log.requests().len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_review_closes_lane_and_rejects_next_request_without_review() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let denial = serde_json::json!({
+        "risk_level": "high",
+        "user_authorization": "unknown",
+        "outcome": "deny",
+        "rationale": "The command shell-denied-3 --token sk-test-secret would publish unverified changes.",
+    })
+    .to_string();
+    let request_log = mount_sse_sequence(
+        &server,
+        (1..=3)
+            .map(|id| {
+                sse(vec![
+                    ev_response_created(&format!("resp-denied-{id}")),
+                    ev_assistant_message(&format!("msg-denied-{id}"), &denial),
+                    ev_completed(&format!("resp-denied-{id}")),
+                ])
+            })
+            .collect(),
+    )
+    .await;
+    let (session, turn, rx) = guardian_test_session_turn_and_rx(&server).await;
+    seed_guardian_parent_history(&session, &turn).await;
+
+    for id in 1..=3 {
+        let decision = review_approval_request(
+            &session,
+            &turn,
+            format!("review-denied-{id}"),
+            guardian_exec_command_request(&format!("shell-denied-{id}")),
+            ApprovalRequestReasons::default(),
+        )
+        .await;
+        assert!(matches!(decision, ReviewDecision::Denied { .. }));
+    }
+
+    let fourth = review_approval_request(
+        &session,
+        &turn,
+        "review-denied-4".to_string(),
+        guardian_exec_command_request("shell-denied-4"),
+        ApprovalRequestReasons::default(),
+    )
+    .await;
+    let ReviewDecision::Denied { rejection } = fourth else {
+        panic!("closed approval lane should deny without review: {fourth:?}");
+    };
+    assert!(rejection.contains("closed for the remainder of this turn"));
+    assert!(rejection.contains("nothing was executed"));
+    assert_eq!(request_log.requests().len(), 3);
+
+    let mut lane_receipts = Vec::new();
+    let mut terminal_statuses = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        match event.msg {
+            EventMsg::Warning(warning) => lane_receipts.push(warning.message),
+            EventMsg::GuardianAssessment(assessment) => {
+                terminal_statuses.push(assessment.status);
+            }
+            _ => {}
+        }
+    }
+    assert!(lane_receipts.iter().any(|warning| {
+        warning.contains("Automatic approval lane closed for this turn")
+            && warning.contains("Latest denied action: exec_command request")
+            && warning.contains("Review category: high risk, unknown authorization")
+            && warning.contains(
+                "detailed rationale is available in the preceding automatic-review result",
+            )
+            && warning.contains("Nothing from this request was executed")
+            && warning.contains("the turn remains active")
+    }));
+    let closure_warning = lane_receipts
+        .iter()
+        .find(|warning| warning.contains("Automatic approval lane closed for this turn"))
+        .expect("lane closure should emit a user-visible receipt");
+    assert!(!closure_warning.contains("shell-denied-3"));
+    assert!(!closure_warning.contains("sk-test-secret"));
+    assert!(lane_receipts.iter().any(|warning| {
+        warning.contains("Automatic approval lane is closed for this turn")
+            && warning.contains("rejected exec_command request without review")
+    }));
+    assert_eq!(
+        terminal_statuses,
+        vec![
+            GuardianAssessmentStatus::InProgress,
+            GuardianAssessmentStatus::Denied,
+            GuardianAssessmentStatus::InProgress,
+            GuardianAssessmentStatus::Denied,
+            GuardianAssessmentStatus::InProgress,
+            GuardianAssessmentStatus::Denied,
+        ]
+    );
     Ok(())
 }
 

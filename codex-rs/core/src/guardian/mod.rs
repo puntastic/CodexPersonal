@@ -174,7 +174,7 @@ pub(crate) struct GuardianRejectionCircuitBreaker {
 struct GuardianRejectionCircuitBreakerTurn {
     consecutive_denials: u32,
     recent_denials: std::collections::VecDeque<bool>,
-    interrupt_triggered: bool,
+    approval_lane_closed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,15 +186,22 @@ pub(crate) enum GuardianRejectionCircuitBreakerPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GuardianRejectionCircuitBreakerAction {
     Continue,
-    InterruptTurn {
+    CloseApprovalLane {
         consecutive_denials: u32,
         recent_denials: u32,
     },
+    RejectWithoutReview,
 }
 
 impl GuardianRejectionCircuitBreaker {
     pub(crate) fn clear_turn(&mut self, turn_id: &str) {
         self.turns.remove(turn_id);
+    }
+
+    pub(crate) fn should_reject_without_review(&self, turn_id: &str) -> bool {
+        self.turns
+            .get(turn_id)
+            .is_some_and(|turn| turn.approval_lane_closed)
     }
 
     pub(crate) fn record_denial(
@@ -203,6 +210,9 @@ impl GuardianRejectionCircuitBreaker {
         policy: GuardianRejectionCircuitBreakerPolicy,
     ) -> GuardianRejectionCircuitBreakerAction {
         let turn = self.turns.entry(turn_id.to_string()).or_default();
+        if turn.approval_lane_closed {
+            return GuardianRejectionCircuitBreakerAction::RejectWithoutReview;
+        }
         turn.consecutive_denials = turn.consecutive_denials.saturating_add(1);
         Self::record_recent_review(turn, /*denied*/ true);
         let recent_denials = turn.recent_denials.iter().filter(|denied| **denied).count() as u32;
@@ -216,12 +226,11 @@ impl GuardianRejectionCircuitBreaker {
                 MAX_RECENT_CYBER_AUTO_REVIEW_DENIALS_PER_TURN,
             ),
         };
-        if !turn.interrupt_triggered
-            && (turn.consecutive_denials >= max_consecutive_denials
-                || recent_denials >= max_recent_denials)
+        if turn.consecutive_denials >= max_consecutive_denials
+            || recent_denials >= max_recent_denials
         {
-            turn.interrupt_triggered = true;
-            GuardianRejectionCircuitBreakerAction::InterruptTurn {
+            turn.approval_lane_closed = true;
+            GuardianRejectionCircuitBreakerAction::CloseApprovalLane {
                 consecutive_denials: turn.consecutive_denials,
                 recent_denials,
             }
@@ -232,6 +241,9 @@ impl GuardianRejectionCircuitBreaker {
 
     pub(crate) fn record_non_denial(&mut self, turn_id: &str) {
         let turn = self.turns.entry(turn_id.to_string()).or_default();
+        if turn.approval_lane_closed {
+            return;
+        }
         turn.consecutive_denials = 0;
         Self::record_recent_review(turn, /*denied*/ false);
     }
