@@ -635,6 +635,36 @@ multi_agent_v2 = true
 }
 
 #[test]
+fn cue_activation_feature_config_deserializes_table() {
+    assert_eq!(
+        crate::CueActivationMode::default(),
+        crate::CueActivationMode::Shadow
+    );
+    let features: FeaturesToml = toml::from_str(
+        r#"
+[cue_activation]
+enabled = true
+mode = "advisory"
+catalog_path = "cue-exports/headers.json"
+"#,
+    )
+    .expect("features table should deserialize");
+
+    assert_eq!(
+        features.entries(),
+        BTreeMap::from([("cue_activation".to_string(), true)])
+    );
+    assert_eq!(
+        features.cue_activation,
+        Some(FeatureToml::Config(crate::CueActivationConfigToml {
+            enabled: Some(true),
+            mode: Some(crate::CueActivationMode::Advisory),
+            catalog_path: Some("cue-exports/headers.json".into()),
+        }))
+    );
+}
+
+#[test]
 fn multi_agent_v2_feature_config_deserializes_table() {
     let features: FeaturesToml = toml::from_str(
         r#"

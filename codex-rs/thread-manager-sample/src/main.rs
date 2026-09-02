@@ -304,6 +304,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         token_budget: None,
         rollout_budget: None,
         current_time_reminder: None,
+        cue_activation: None,
         sleep_tool_mode: Default::default(),
         features: Default::default(),
         suppress_unstable_features_warning: false,

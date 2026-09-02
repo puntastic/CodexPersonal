@@ -41,6 +41,7 @@ codex-cloud-config = { workspace = true }
 codex-code-mode = { workspace = true }
 codex-config = { workspace = true }
 codex-connectors = { workspace = true }
+codex-cue-activation-extension = { workspace = true }
 codex-core = { workspace = true }
 codex-core-plugins = { workspace = true }
 codex-diagnostics = { workspace = true }

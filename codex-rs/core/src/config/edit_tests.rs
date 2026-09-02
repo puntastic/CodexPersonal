@@ -137,6 +137,29 @@ fn multi_agent_v2_feature_toggle_preserves_nested_configuration() {
 }
 
 #[test]
+fn cue_activation_feature_toggle_preserves_nested_configuration() {
+    let tmp = tempdir().expect("tmpdir");
+    let codex_home = tmp.path();
+    let config_path = codex_home.join(CONFIG_TOML_FILE);
+    const OPTIONS: &str = "mode = \"advisory\"\ncatalog_path = \"cue-exports/headers.json\"\n";
+    std::fs::write(
+        &config_path,
+        format!("[features.cue_activation]\nenabled = true\n{OPTIONS}"),
+    )
+    .expect("write config");
+
+    for enabled in [false, true] {
+        ConfigEditsBuilder::new(codex_home)
+            .set_feature_enabled("cue_activation", enabled)
+            .apply_blocking()
+            .expect("toggle feature");
+        let config = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(config.contains(&format!("enabled = {enabled}")));
+        assert!(config.contains(OPTIONS));
+    }
+}
+
+#[test]
 fn sleep_tool_feature_toggle_preserves_mode() {
     let tmp = tempdir().expect("tmpdir");
     let codex_home = tmp.path();

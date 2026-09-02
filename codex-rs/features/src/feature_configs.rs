@@ -5,6 +5,37 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+/// Model-visible behavior of the experimental cue activation receiver.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CueActivationMode {
+    /// Rank a candidate and record diagnostics without changing model context.
+    #[default]
+    Shadow,
+    /// Add at most one bounded advisory pointer to model context.
+    Advisory,
+}
+
+/// Receiver-side configuration for experimental cue activation.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CueActivationConfigToml {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<CueActivationMode>,
+    /// Read-only JSON export of bounded cue headers. Relative paths resolve under CODEX_HOME.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_path: Option<PathBuf>,
+}
+
+impl FeatureConfig for CueActivationConfigToml {
+    fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]

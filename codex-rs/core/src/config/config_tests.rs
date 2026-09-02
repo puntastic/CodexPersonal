@@ -932,6 +932,36 @@ async fn load_current_time_reminder_config(config_toml: &str) -> std::io::Result
     .await
 }
 
+#[tokio::test]
+async fn load_config_resolves_cue_activation() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml: ConfigToml = toml::from_str(
+        r#"
+[features.cue_activation]
+enabled = true
+mode = "advisory"
+catalog_path = "cue-exports/headers.json"
+"#,
+    )
+    .expect("TOML should deserialize");
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert!(config.features.enabled(Feature::CueActivation));
+    assert_eq!(
+        config.cue_activation,
+        Some(CueActivationConfig {
+            mode: CueActivationMode::Advisory,
+            catalog_path: Some(codex_home.path().join("cue-exports/headers.json")),
+        })
+    );
+    Ok(())
+}
+
 #[test]
 fn rejects_provider_auth_with_env_key() {
     let err = toml::from_str::<ConfigToml>(

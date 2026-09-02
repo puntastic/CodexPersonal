@@ -661,6 +661,9 @@
             "content_item_kinds": {
               "type": "boolean"
             },
+            "cue_activation": {
+              "$ref": "#/definitions/FeatureToml_for_CueActivationConfigToml"
+            },
             "current_time_reminder": {
               "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
             },
@@ -1098,6 +1101,42 @@
       },
       "type": "object"
     },
+    "CueActivationConfigToml": {
+      "additionalProperties": false,
+      "description": "Receiver-side configuration for experimental cue activation.",
+      "properties": {
+        "catalog_path": {
+          "description": "Read-only JSON export of bounded cue headers. Relative paths resolve under CODEX_HOME.",
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/definitions/CueActivationMode"
+        }
+      },
+      "type": "object"
+    },
+    "CueActivationMode": {
+      "description": "Model-visible behavior of the experimental cue activation receiver.",
+      "oneOf": [
+        {
+          "description": "Rank a candidate and record diagnostics without changing model context.",
+          "enum": [
+            "shadow"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Add at most one bounded advisory pointer to model context.",
+          "enum": [
+            "advisory"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "CurrentTimeReminderConfigToml": {
       "additionalProperties": false,
       "properties": {
@@ -1208,6 +1247,16 @@
         },
         {
           "$ref": "#/definitions/CodeModeHostConfigToml"
+        }
+      ]
+    },
+    "FeatureToml_for_CueActivationConfigToml": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/definitions/CueActivationConfigToml"
         }
       ]
     },
@@ -5944,6 +5993,9 @@
         },
         "content_item_kinds": {
           "type": "boolean"
+        },
+        "cue_activation": {
+          "$ref": "#/definitions/FeatureToml_for_CueActivationConfigToml"
         },
         "current_time_reminder": {
           "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"

@@ -111,6 +111,23 @@ where
     codex_image_generation_extension::install(&mut builder, auth_manager, |config: &Config| {
         Some(config.codex_home.clone())
     });
+    codex_cue_activation_extension::install(&mut builder, |config: &Config| {
+        let Some(config) = config.cue_activation.as_ref() else {
+            return codex_cue_activation_extension::CueActivationConfig::default();
+        };
+        let mode = match config.mode {
+            codex_features::CueActivationMode::Shadow => {
+                codex_cue_activation_extension::CueActivationMode::Shadow
+            }
+            codex_features::CueActivationMode::Advisory => {
+                codex_cue_activation_extension::CueActivationMode::Advisory
+            }
+        };
+        codex_cue_activation_extension::CueActivationConfig {
+            mode,
+            catalog_path: config.catalog_path.clone(),
+        }
+    });
     let skill_providers = codex_skills_extension::SkillProviders::new()
         .with_executor_provider(executor_skill_provider)
         .with_orchestrator_provider(Arc::new(

@@ -18,6 +18,8 @@ mod feature_configs;
 mod legacy;
 pub use feature_configs::CodeModeConfigToml;
 pub use feature_configs::CodeModeHostConfigToml;
+pub use feature_configs::CueActivationConfigToml;
+pub use feature_configs::CueActivationMode;
 pub use feature_configs::CurrentTimeReminderConfigToml;
 pub use feature_configs::CurrentTimeReminderDeliveryMode;
 pub use feature_configs::CurrentTimeSource;
@@ -285,6 +287,8 @@ pub enum Feature {
     SkillMcpDependencyInstall,
     /// Run cheap skill-search methods in shadow mode and emit experiment metrics.
     SkillSearch,
+    /// Nominate bounded cue pointers from a read-only receiver catalogue.
+    CueActivation,
     /// Removed compatibility flag for deleted skill env var dependency prompting.
     SkillEnvVarDependencyPrompt,
     /// Enable the unified mention popup used by default in the TUI.
@@ -746,6 +750,8 @@ pub struct FeaturesToml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_mode_host: Option<FeatureToml<CodeModeHostConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cue_activation: Option<FeatureToml<CueActivationConfigToml>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_prefixed_mcp_tool_names: Option<FeatureToml<NonPrefixedMcpToolNamesConfigToml>>,
     #[serde(
         default,
@@ -787,6 +793,9 @@ impl FeaturesToml {
         }
         if let Some(enabled) = self.code_mode_host.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::CodeModeHost.key().to_string(), enabled);
+        }
+        if let Some(enabled) = self.cue_activation.as_ref().and_then(FeatureToml::enabled) {
+            entries.insert(Feature::CueActivation.key().to_string(), enabled);
         }
         if let Some(enabled) = self
             .non_prefixed_mcp_tool_names
@@ -1447,6 +1456,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "skill_search",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::CueActivation,
+        key: "cue_activation",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::SkillEnvVarDependencyPrompt,

@@ -2017,6 +2017,7 @@ dependencies = [
  "codex-connectors",
  "codex-core",
  "codex-core-plugins",
+ "codex-cue-activation-extension",
  "codex-diagnostics",
  "codex-exec-server",
  "codex-extension-api",
@@ -2968,6 +2969,21 @@ dependencies = [
  "which 8.0.0",
  "wiremock",
  "zip",
+]
+
+[[package]]
+name = "codex-cue-activation-extension"
+version = "0.0.0"
+dependencies = [
+ "codex-core",
+ "codex-extension-api",
+ "codex-protocol",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

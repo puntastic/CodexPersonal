@@ -18,6 +18,7 @@ mod config_rpc;
 mod connection_handling_websocket;
 #[cfg(unix)]
 mod connection_handling_websocket_unix;
+mod cue_activation;
 #[cfg(unix)]
 mod curated_mcp_sync;
 mod current_time;

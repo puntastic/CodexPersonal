@@ -58,6 +58,7 @@ members = [
     "execpolicy",
     "ext/agent",
     "ext/connectors",
+    "ext/cue-activation",
     "ext/extension-api",
     "ext/goal",
     "ext/git-attribution",
@@ -191,6 +192,7 @@ codex-config = { path = "config" }
 codex-connectors = { path = "connectors" }
 codex-agent-extension = { path = "ext/agent" }
 codex-connectors-extension = { path = "ext/connectors" }
+codex-cue-activation-extension = { path = "ext/cue-activation" }
 codex-context-fragments = { path = "context-fragments" }
 codex-core = { path = "core" }
 codex-core-api = { path = "core-api" }

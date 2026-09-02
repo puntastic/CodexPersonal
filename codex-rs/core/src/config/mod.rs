@@ -62,6 +62,8 @@ use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::LOCAL_FS;
 use codex_exec_server::ReadFileOptions;
 use codex_features::CodeModeConfigToml;
+use codex_features::CueActivationConfigToml;
+use codex_features::CueActivationMode;
 use codex_features::CurrentTimeReminderConfigToml;
 use codex_features::CurrentTimeReminderDeliveryMode;
 use codex_features::CurrentTimeSource;
@@ -1046,6 +1048,8 @@ pub struct Config {
     pub rollout_budget: Option<RolloutBudgetConfig>,
     /// Current-time reminder and clock tool configuration, when enabled.
     pub current_time_reminder: Option<CurrentTimeReminderConfig>,
+    /// Receiver-side cue nomination configuration, when enabled.
+    pub cue_activation: Option<CueActivationConfig>,
     /// How the sleep tool is selected when its feature gate is enabled.
     pub sleep_tool_mode: SleepToolMode,
 
@@ -1245,6 +1249,13 @@ pub struct CurrentTimeReminderConfig {
     pub delivery_mode: CurrentTimeReminderDeliveryMode,
     /// Whether to expose the input-interruptible `clock.sleep` tool.
     pub sleep_tool: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CueActivationConfig {
+    pub mode: CueActivationMode,
+    /// Absolute path to a read-only cue-header export, when configured.
+    pub catalog_path: Option<PathBuf>,
 }
 
 impl Default for CurrentTimeReminderConfig {
@@ -2891,6 +2902,31 @@ fn resolve_current_time_reminder_config(
     }))
 }
 
+fn resolve_cue_activation_config(
+    config_toml: &ConfigToml,
+    features: &ManagedFeatures,
+    codex_home: &AbsolutePathBuf,
+) -> Option<CueActivationConfig> {
+    if !features.enabled(Feature::CueActivation) {
+        return None;
+    }
+
+    let base = cue_activation_toml_config(config_toml.features.as_ref());
+    let catalog_path = base
+        .and_then(|config| config.catalog_path.as_ref())
+        .map(|path| {
+            if path.is_absolute() {
+                path.clone()
+            } else {
+                codex_home.join(path).to_path_buf()
+            }
+        });
+    Some(CueActivationConfig {
+        mode: base.and_then(|config| config.mode).unwrap_or_default(),
+        catalog_path,
+    })
+}
+
 fn resolve_terminal_resize_reflow_config(config_toml: &ConfigToml) -> TerminalResizeReflowConfig {
     let Some(tui) = config_toml.tui.as_ref() else {
         return TerminalResizeReflowConfig::default();
@@ -2930,6 +2966,13 @@ fn current_time_reminder_toml_config(
     features: Option<&FeaturesToml>,
 ) -> Option<&CurrentTimeReminderConfigToml> {
     match features?.current_time_reminder.as_ref()? {
+        FeatureToml::Enabled(_) => None,
+        FeatureToml::Config(config) => Some(config),
+    }
+}
+
+fn cue_activation_toml_config(features: Option<&FeaturesToml>) -> Option<&CueActivationConfigToml> {
+    match features?.cue_activation.as_ref()? {
         FeatureToml::Enabled(_) => None,
         FeatureToml::Config(config) => Some(config),
     }
@@ -3687,6 +3730,7 @@ impl Config {
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
+        let cue_activation = resolve_cue_activation_config(&cfg, &features, &codex_home);
         let sleep_tool_mode = cfg
             .features
             .as_ref()
@@ -4294,6 +4338,7 @@ impl Config {
             token_budget,
             rollout_budget,
             current_time_reminder,
+            cue_activation,
             sleep_tool_mode,
             features,
             suppress_unstable_features_warning: cfg

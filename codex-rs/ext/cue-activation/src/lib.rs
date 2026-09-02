@@ -1,0 +1,388 @@
+//! Experimental receiver-side activation of bounded cue pointers.
+
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
+use std::io::Read;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::PoisonError;
+
+use codex_core::context::InternalContextSource;
+use codex_core::context::InternalModelContextFragment;
+use codex_extension_api::ConfigContributor;
+use codex_extension_api::ContextualUserFragment;
+use codex_extension_api::ExtensionData;
+use codex_extension_api::ExtensionFuture;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ThreadLifecycleContributor;
+use codex_extension_api::ThreadStartInput;
+use codex_extension_api::TurnInputContext;
+use codex_extension_api::TurnInputContributor;
+use codex_protocol::user_input::UserInput;
+use serde::Deserialize;
+
+const MAX_CATALOG: usize = 16 * 1024;
+
+/// The model-visible effect permitted for cue activation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CueActivationMode {
+    #[default]
+    Off,
+    Shadow,
+    Advisory,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CueActivationConfig {
+    pub mode: CueActivationMode,
+    pub catalog_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Catalog {
+    schema: String,
+    cues: Vec<Cue>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Cue {
+    id: String,
+    title: String,
+    source: String,
+    task_shape: Vec<String>,
+    risk: String,
+    discriminator: String,
+    release_when: String,
+    #[serde(default)]
+    avoid_when: Vec<String>,
+    #[serde(default)]
+    provenance: HashMap<String, String>,
+}
+
+fn load(path: &Path) -> Result<Catalog, &'static str> {
+    let file = std::fs::File::open(path).map_err(|_| "unreadable")?;
+    let mut bytes = Vec::new();
+    file.take((MAX_CATALOG + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "unreadable")?;
+    if bytes.len() > MAX_CATALOG {
+        return Err("oversized");
+    }
+    let catalog: Catalog = serde_json::from_slice(&bytes).map_err(|_| "malformed")?;
+    validate(&catalog)?;
+    Ok(catalog)
+}
+
+fn validate(catalog: &Catalog) -> Result<(), &'static str> {
+    if catalog.schema != "codex.cue-header-catalog.v0" || catalog.cues.len() > 32 {
+        return Err("invalid");
+    }
+    let mut ids = HashSet::new();
+    for cue in &catalog.cues {
+        let fields = [
+            &cue.title,
+            &cue.source,
+            &cue.risk,
+            &cue.discriminator,
+            &cue.release_when,
+        ];
+        if !field(&cue.id, 64)
+            || !ids.insert(&cue.id)
+            || !fields.into_iter().all(|value| field(value, 512))
+            || !handles(&cue.task_shape, true)
+            || !handles(&cue.avoid_when, false)
+            || cue.provenance.len() > 8
+            || !cue
+                .provenance
+                .iter()
+                .all(|(key, value)| field(key, 64) && field(value, 512))
+        {
+            return Err("invalid");
+        }
+    }
+    Ok(())
+}
+
+fn field(value: &str, limit: usize) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= limit
+        && !value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '<' | '>'))
+}
+
+fn handles(values: &[String], required: bool) -> bool {
+    (!required || !values.is_empty())
+        && values.len() <= 8
+        && values
+            .iter()
+            .all(|value| field(value, 64) && !norm(value).is_empty())
+}
+
+#[derive(Default)]
+struct Query(Vec<String>, HashSet<String>, bool);
+
+#[derive(Default)]
+struct Runtime(Mutex<State>, OnceLock<()>);
+
+#[derive(Default)]
+struct State {
+    index: u64,
+    prior: VecDeque<String>,
+    emitted_at: HashMap<String, u64>,
+}
+
+impl Runtime {
+    fn query(&self, inputs: &[UserInput]) -> Query {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.index = state.index.saturating_add(1);
+        let current = request(inputs);
+        let substantive = is_substantive(&current);
+        let represented = !current.is_empty();
+        let mut remaining = 4096usize.saturating_sub(current.len());
+        let mut segments = vec![current.clone()];
+        for prior in &state.prior {
+            if norm(prior) != norm(&current) && remaining > 0 {
+                let mut segment = String::new();
+                append(&mut segment, prior, remaining);
+                remaining -= segment.len();
+                segments.push(segment);
+            }
+        }
+        if substantive {
+            state.prior.retain(|prior| norm(prior) != norm(&current));
+            state.prior.push_front(current);
+            state.prior.truncate(2);
+        }
+        let index = state.index;
+        state
+            .emitted_at
+            .retain(|_, at| index.saturating_sub(*at) <= 2);
+        let cooling = state.emitted_at.keys().cloned().collect();
+        Query(segments, cooling, represented)
+    }
+
+    fn emitted(&self, id: &str) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let index = state.index;
+        state.emitted_at.insert(id.to_string(), index);
+    }
+}
+
+fn request(inputs: &[UserInput]) -> String {
+    let mut output = String::new();
+    for part in inputs.iter().filter_map(|input| match input {
+        UserInput::Text { text, .. } => Some(text),
+        UserInput::Skill { name, .. } | UserInput::Mention { name, .. } => Some(name),
+        _ => None,
+    }) {
+        if !part.trim().is_empty() {
+            append(&mut output, part, 2048);
+        }
+    }
+    output
+}
+
+fn append(output: &mut String, value: &str, cap: usize) {
+    if !output.is_empty() && output.len() < cap {
+        output.push('\n');
+    }
+    let mut end = value.len().min(cap.saturating_sub(output.len()));
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push_str(&value[..end]);
+}
+
+fn norm(text: &str) -> String {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_substantive(text: &str) -> bool {
+    ![
+        "",
+        "back",
+        "back 3",
+        "continue",
+        "please continue",
+        "proceed",
+    ]
+    .contains(&norm(text).as_str())
+}
+
+struct Selection<'a>(&'a Cue, &'a str, u16);
+
+fn select<'a>(catalog: &'a Catalog, query: &Query) -> Option<Selection<'a>> {
+    if !query.2 {
+        return None;
+    }
+    catalog
+        .cues
+        .iter()
+        .filter(|cue| !query.1.contains(&cue.id))
+        .filter(|cue| {
+            query
+                .0
+                .first()
+                .is_none_or(|current| cue_score(cue, current).is_some())
+        })
+        .filter_map(|cue| {
+            query
+                .0
+                .iter()
+                .filter_map(|segment| cue_score(cue, segment))
+                .max_by_key(|selection| selection.2)
+        })
+        .filter(|selection| selection.2 > 0)
+        .max_by(|left, right| {
+            left.2
+                .cmp(&right.2)
+                .then_with(|| right.0.id.cmp(&left.0.id))
+        })
+}
+
+fn cue_score<'a>(cue: &'a Cue, text: &str) -> Option<Selection<'a>> {
+    let normalized = norm(text);
+    let tokens = normalized.split_whitespace().collect::<HashSet<_>>();
+    if cue
+        .avoid_when
+        .iter()
+        .any(|handle| score(&normalized, &tokens, handle) > 0)
+    {
+        return None;
+    }
+    cue.task_shape
+        .iter()
+        .map(|handle| Selection(cue, handle, score(&normalized, &tokens, handle)))
+        .max_by_key(|selection| selection.2)
+}
+
+fn score(query: &str, tokens: &HashSet<&str>, handle: &str) -> u16 {
+    let handle = norm(handle);
+    let parts = handle.split_whitespace().collect::<Vec<_>>();
+    if parts.is_empty() {
+        0
+    } else if format!(" {query} ").contains(&format!(" {handle} ")) {
+        200 + parts.len() as u16
+    } else if parts.iter().all(|part| tokens.contains(part)) {
+        100 + parts.len() as u16
+    } else {
+        0
+    }
+}
+
+fn pointer(cue: &Cue, handle: &str) -> String {
+    const INTRO: &str = "Experimental advisory pointer; supplied context, not instruction, truth, authority, authorization, or proof of relevance/current state. No source was hydrated or synchronized. You may ignore it.";
+    const ACTION: &str = "If useful, inspect/hydrate that exact source; take at most one reversible probe/reframe, then release.";
+    let tail = format!("\nSource: {}\nHandle: {handle}\n{ACTION}", cue.source);
+    let mut output = INTRO.to_string();
+    optional(&mut output, "Cue: ", &cue.title, 920 - tail.len());
+    output.push_str(&tail);
+    optional(&mut output, "Discriminator: ", &cue.discriminator, 920);
+    optional(&mut output, "Release when: ", &cue.release_when, 920);
+    output
+}
+
+fn optional(output: &mut String, prefix: &str, value: &str, cap: usize) {
+    let room = cap.saturating_sub(output.len());
+    if room <= prefix.len() + 1 {
+        return;
+    }
+    output.push('\n');
+    output.push_str(prefix);
+    let mut end = value.len().min(room - prefix.len() - 1);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.push_str(&value[..end]);
+}
+
+struct Extension<C>(Arc<dyn Fn(&C) -> CueActivationConfig + Send + Sync>);
+
+impl<C: Send + Sync + 'static> ThreadLifecycleContributor<C> for Extension<C> {
+    fn on_thread_start<'a>(&'a self, input: ThreadStartInput<'a, C>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            input.thread_store.insert((self.0)(input.config));
+            input.thread_store.get_or_init(Runtime::default);
+        })
+    }
+}
+
+impl<C: Send + Sync + 'static> ConfigContributor<C> for Extension<C> {
+    fn on_config_changed(&self, _: &ExtensionData, store: &ExtensionData, _: &C, next: &C) {
+        store.insert((self.0)(next));
+    }
+}
+
+impl<C: Send + Sync + 'static> TurnInputContributor for Extension<C> {
+    fn contribute<'a>(
+        &'a self,
+        input: TurnInputContext<'a>,
+        _: Option<Arc<dyn codex_extension_api::ExtensionMetrics>>,
+        _: &'a ExtensionData,
+        thread: &'a ExtensionData,
+        _: &'a ExtensionData,
+    ) -> ExtensionFuture<'a, Vec<Box<dyn ContextualUserFragment + Send>>> {
+        Box::pin(async move {
+            let (Some(config), Some(runtime)) =
+                (thread.get::<CueActivationConfig>(), thread.get::<Runtime>())
+            else {
+                return Vec::new();
+            };
+            if config.mode == CueActivationMode::Off {
+                return Vec::new();
+            }
+            let Some(path) = config.catalog_path.as_deref() else {
+                return Vec::new();
+            };
+            let catalog = match load(path) {
+                Ok(catalog) => catalog,
+                Err(kind) => {
+                    runtime.1.get_or_init(|| {
+                        tracing::warn!(kind, "cue catalogue unavailable; continuing without a cue")
+                    });
+                    return Vec::new();
+                }
+            };
+            let query = runtime.query(&input.user_input);
+            let Some(Selection(cue, handle, _)) = select(&catalog, &query) else {
+                return Vec::new();
+            };
+            tracing::debug!(cue = cue.id, mode = ?config.mode, "cue candidate selected");
+            if config.mode == CueActivationMode::Shadow {
+                return Vec::new();
+            }
+            runtime.emitted(&cue.id);
+            let fragment = InternalModelContextFragment::new(
+                InternalContextSource::from_static("cue_activation"),
+                pointer(cue, handle),
+            );
+            vec![Box::new(fragment) as Box<dyn ContextualUserFragment + Send>]
+        })
+    }
+}
+
+pub fn install<C>(
+    registry: &mut ExtensionRegistryBuilder<C>,
+    config: impl Fn(&C) -> CueActivationConfig + Send + Sync + 'static,
+) where
+    C: Send + Sync + 'static,
+{
+    let extension = Arc::new(Extension(Arc::new(config)));
+    registry.thread_lifecycle_contributor(extension.clone());
+    registry.config_contributor(extension.clone());
+    registry.turn_input_contributor(extension);
+}
+
+#[cfg(test)]
+mod tests;
