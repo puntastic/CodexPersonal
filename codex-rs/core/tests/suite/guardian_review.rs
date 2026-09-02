@@ -1671,7 +1671,7 @@ async fn cyber_model_guardian_denial_closes_lane_but_preserves_turn_and_resets_n
                 ev_response_created("resp-cyber-parent-continued"),
                 ev_assistant_message(
                     "msg-cyber-parent-continued",
-                    "continued after the approval lane closed",
+                    "Automatic review is closed for this turn, and the denied action was not executed. I can continue with work that does not require approval.",
                 ),
                 ev_completed("resp-cyber-parent-continued"),
             ]),
@@ -1713,10 +1713,19 @@ async fn cyber_model_guardian_denial_closes_lane_but_preserves_turn_and_resets_n
         )
         .await?;
 
-    let mut first_turn_receipts = Vec::new();
+    let mut first_turn_warning_signals = Vec::new();
+    let mut closure_update_reached = false;
     loop {
         match wait_for_event(&test.codex, |_| true).await {
-            EventMsg::Warning(warning) => first_turn_receipts.push(warning.message),
+            EventMsg::Warning(warning) => first_turn_warning_signals.push(warning.message),
+            EventMsg::AgentMessage(message)
+                if message
+                    .message
+                    .contains("Automatic review is closed for this turn")
+                    && message.message.contains("denied action was not executed") =>
+            {
+                closure_update_reached = true;
+            }
             EventMsg::TurnAborted(event) => {
                 panic!("approval lane closure unexpectedly aborted the turn: {event:?}")
             }
@@ -1724,8 +1733,12 @@ async fn cyber_model_guardian_denial_closes_lane_but_preserves_turn_and_resets_n
             _ => {}
         }
     }
+    assert!(
+        closure_update_reached,
+        "the acting model did not reach its required closure update"
+    );
 
-    assert!(first_turn_receipts.iter().any(|warning| {
+    assert!(first_turn_warning_signals.iter().any(|warning| {
         warning.contains("Automatic approval lane closed for this turn")
             && warning.contains("1 consecutive, 1 in the last 50 reviews")
             && warning.contains("Latest denied action: exec_command request")
@@ -1736,11 +1749,17 @@ async fn cyber_model_guardian_denial_closes_lane_but_preserves_turn_and_resets_n
             && warning.contains("Nothing from this request was executed")
             && warning.contains("the turn remains active")
     }));
-    assert!(first_turn_receipts.iter().any(|warning| {
+    assert!(first_turn_warning_signals.iter().any(|warning| {
         warning.contains("Automatic approval lane is closed for this turn")
             && warning.contains("rejected exec_command request without review")
     }));
     assert_eq!(responses.requests().len(), 4);
+    let threshold_rejection = responses
+        .function_call_output_text("exec-cyber-call-denied-first")
+        .expect("threshold denial should be returned to the acting model");
+    assert!(threshold_rejection.contains("closed for the remainder of this turn"));
+    assert!(threshold_rejection.contains("In your next user-visible update"));
+    assert!(threshold_rejection.contains("denied action was not executed"));
     let second_rejection = responses
         .function_call_output_text("exec-cyber-call-denied-second")
         .expect("closed-lane rejection should be returned to the parent model");

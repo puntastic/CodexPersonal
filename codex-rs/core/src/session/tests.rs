@@ -11819,8 +11819,8 @@ impl SessionTask for GuardianDeniedApprovalTask {
             command: "git push".to_string(),
             cwd: test_path_buf("/repo").abs(),
         };
-        for _ in 0..3 {
-            crate::guardian::record_guardian_denial_for_test(
+        for denial_index in 0..3 {
+            let closed = crate::guardian::record_guardian_denial_for_test(
                 &session,
                 &ctx,
                 &ctx.sub_id,
@@ -11829,6 +11829,7 @@ impl SessionTask for GuardianDeniedApprovalTask {
                 GuardianUserAuthorization::Low,
             )
             .await;
+            assert_eq!(closed, denial_index == 2);
         }
         self.lane_closed.notify_one();
 
@@ -12203,8 +12204,8 @@ async fn guardian_helper_review_closes_lane_without_aborting_active_turn() {
             .build()
             .expect("helper review runtime");
         runtime.block_on(async move {
-            for _ in 0..3 {
-                crate::guardian::record_guardian_denial_for_test(
+            for denial_index in 0..3 {
+                let closed = crate::guardian::record_guardian_denial_for_test(
                     &session_for_review,
                     &turn_for_review,
                     &turn_id,
@@ -12213,6 +12214,7 @@ async fn guardian_helper_review_closes_lane_without_aborting_active_turn() {
                     GuardianUserAuthorization::Low,
                 )
                 .await;
+                assert_eq!(closed, denial_index == 2);
             }
         });
     });
@@ -12237,7 +12239,7 @@ async fn guardian_helper_review_closes_lane_without_aborting_active_turn() {
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "helper review circuit breaker should emit a lane-closure receipt; observed events: {observed:?}"
+            "helper review circuit breaker should emit a secondary lane-closure warning; observed events: {observed:?}"
         )
     });
     assert!(

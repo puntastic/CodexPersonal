@@ -3342,6 +3342,7 @@ async fn guardian_review_closes_lane_and_rejects_next_request_without_review() -
     let (session, turn, rx) = guardian_test_session_turn_and_rx(&server).await;
     seed_guardian_parent_history(&session, &turn).await;
 
+    let mut denial_rejections = Vec::new();
     for id in 1..=3 {
         let decision = review_approval_request(
             &session,
@@ -3351,8 +3352,17 @@ async fn guardian_review_closes_lane_and_rejects_next_request_without_review() -
             ApprovalRequestReasons::default(),
         )
         .await;
-        assert!(matches!(decision, ReviewDecision::Denied { .. }));
+        let ReviewDecision::Denied { rejection } = decision else {
+            panic!("Guardian should deny review {id}: {decision:?}");
+        };
+        denial_rejections.push(rejection);
     }
+    assert!(!denial_rejections[1].contains("closed for the remainder of this turn"));
+    let threshold_rejection = &denial_rejections[2];
+    assert!(threshold_rejection.contains("closed for the remainder of this turn"));
+    assert!(threshold_rejection.contains("denied action was not executed"));
+    assert!(threshold_rejection.contains("In your next user-visible update"));
+    assert!(threshold_rejection.contains("Do not repeat command arguments"));
 
     let fourth = review_approval_request(
         &session,
@@ -3369,18 +3379,18 @@ async fn guardian_review_closes_lane_and_rejects_next_request_without_review() -
     assert!(rejection.contains("nothing was executed"));
     assert_eq!(request_log.requests().len(), 3);
 
-    let mut lane_receipts = Vec::new();
+    let mut lane_warning_signals = Vec::new();
     let mut terminal_statuses = Vec::new();
     while let Ok(event) = rx.try_recv() {
         match event.msg {
-            EventMsg::Warning(warning) => lane_receipts.push(warning.message),
+            EventMsg::Warning(warning) => lane_warning_signals.push(warning.message),
             EventMsg::GuardianAssessment(assessment) => {
                 terminal_statuses.push(assessment.status);
             }
             _ => {}
         }
     }
-    assert!(lane_receipts.iter().any(|warning| {
+    assert!(lane_warning_signals.iter().any(|warning| {
         warning.contains("Automatic approval lane closed for this turn")
             && warning.contains("Latest denied action: exec_command request")
             && warning.contains("Review category: high risk, unknown authorization")
@@ -3390,13 +3400,13 @@ async fn guardian_review_closes_lane_and_rejects_next_request_without_review() -
             && warning.contains("Nothing from this request was executed")
             && warning.contains("the turn remains active")
     }));
-    let closure_warning = lane_receipts
+    let closure_warning = lane_warning_signals
         .iter()
         .find(|warning| warning.contains("Automatic approval lane closed for this turn"))
-        .expect("lane closure should emit a user-visible receipt");
+        .expect("lane closure should emit a secondary warning signal");
     assert!(!closure_warning.contains("shell-denied-3"));
     assert!(!closure_warning.contains("sk-test-secret"));
-    assert!(lane_receipts.iter().any(|warning| {
+    assert!(lane_warning_signals.iter().any(|warning| {
         warning.contains("Automatic approval lane is closed for this turn")
             && warning.contains("rejected exec_command request without review")
     }));

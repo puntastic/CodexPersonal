@@ -79,9 +79,12 @@ const GUARDIAN_TIMEOUT_INSTRUCTIONS: &str = concat!(
 
 const GUARDIAN_APPROVAL_LANE_CLOSED_INSTRUCTIONS: &str = concat!(
     "Automatic approval review is closed for the remainder of this turn after repeated denials. ",
-    "This request was rejected without another review and nothing was executed. ",
+    "The denied action was not executed. ",
     "Do not retry it or request another automatic approval in this turn. ",
-    "Continue with work that needs no approval or provide a final response; a new turn resets the lane.",
+    "Continue with work that needs no approval or provide a final response; a new turn resets the lane. ",
+    "In your next user-visible update, briefly state that automatic review is closed for this turn ",
+    "and that the denied action was not executed. Do not repeat command arguments, paths, URLs, ",
+    "credentials, or the detailed reviewer rationale in that update.",
 );
 
 const GUARDIAN_REVIEW_MAX_ATTEMPTS: i64 = 3;
@@ -309,9 +312,9 @@ async fn reject_if_guardian_approval_lane_closed(
             }),
         )
         .await;
-    Some(ReviewDecision::denied(
-        GUARDIAN_APPROVAL_LANE_CLOSED_INSTRUCTIONS,
-    ))
+    Some(ReviewDecision::denied(format!(
+        "This approval request was rejected without another review and nothing was executed.\n{GUARDIAN_APPROVAL_LANE_CLOSED_INSTRUCTIONS}"
+    )))
 }
 
 async fn record_guardian_denial(
@@ -321,7 +324,7 @@ async fn record_guardian_denial(
     action: &GuardianAssessmentAction,
     risk_level: GuardianRiskLevel,
     user_authorization: GuardianUserAuthorization,
-) {
+) -> bool {
     let policy = if turn.model_info().model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER) {
         GuardianRejectionCircuitBreakerPolicy::CyberModel
     } else {
@@ -333,12 +336,13 @@ async fn record_guardian_denial(
         .lock()
         .await
         .record_denial(turn_id, policy);
-    let GuardianRejectionCircuitBreakerAction::CloseApprovalLane {
-        consecutive_denials,
-        recent_denials,
-    } = circuit_action
-    else {
-        return;
+    let (consecutive_denials, recent_denials) = match circuit_action {
+        GuardianRejectionCircuitBreakerAction::CloseApprovalLane {
+            consecutive_denials,
+            recent_denials,
+        } => (consecutive_denials, recent_denials),
+        GuardianRejectionCircuitBreakerAction::RejectWithoutReview => return true,
+        GuardianRejectionCircuitBreakerAction::Continue => return false,
     };
 
     session
@@ -354,6 +358,7 @@ async fn record_guardian_denial(
             }),
         )
         .await;
+    true
 }
 
 #[cfg(test)]
@@ -364,7 +369,7 @@ pub(crate) async fn record_guardian_denial_for_test(
     action: &GuardianAssessmentAction,
     risk_level: GuardianRiskLevel,
     user_authorization: GuardianUserAuthorization,
-) {
+) -> bool {
     record_guardian_denial(
         session,
         turn,
@@ -373,7 +378,7 @@ pub(crate) async fn record_guardian_denial_for_test(
         risk_level,
         user_authorization,
     )
-    .await;
+    .await
 }
 
 /// Runs Guardian unless an installed extension explicitly claims the review.
@@ -782,7 +787,7 @@ async fn run_guardian_review(
         )
         .await;
 
-    if count_denial_for_circuit_breaker {
+    let approval_lane_closed = if count_denial_for_circuit_breaker {
         record_guardian_denial(
             &session,
             &turn,
@@ -791,10 +796,11 @@ async fn run_guardian_review(
             assessment.risk_level,
             assessment.user_authorization,
         )
-        .await;
+        .await
     } else {
         record_guardian_non_denial(&session, &assessment_turn_id).await;
-    }
+        false
+    };
 
     if approved {
         ReviewDecision::Approved
@@ -811,9 +817,14 @@ async fn run_guardian_review(
             .and_then(|messages| messages.auto_review.as_ref())
             .and_then(|messages| messages.rejection_instructions.as_deref())
             .unwrap_or(GUARDIAN_REJECTION_INSTRUCTIONS);
-        ReviewDecision::denied(format!(
+        let mut rejection = format!(
             "This action was rejected due to unacceptable risk.\nReason: {rationale}\n{rejection_instructions}"
-        ))
+        );
+        if approval_lane_closed {
+            rejection.push('\n');
+            rejection.push_str(GUARDIAN_APPROVAL_LANE_CLOSED_INSTRUCTIONS);
+        }
+        ReviewDecision::denied(rejection)
     }
 }
 
