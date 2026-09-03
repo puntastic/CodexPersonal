@@ -100,6 +100,10 @@ remote backend initializes. It leaves the CLI, package, local-client, and
 WebSocket protocol versions unchanged and records the selected value in
 `codex-dev-build.json`.
 
+This override is a validated stopgap, not the intended version-provenance
+design. See [remote-control version compatibility](remote-control-version-compatibility.md)
+for the evidence, design constraints, and deferred acceptance criteria.
+
 ## Deploy, restart, verify
 
 ```powershell
