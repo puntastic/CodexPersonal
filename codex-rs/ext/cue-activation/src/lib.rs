@@ -24,6 +24,8 @@ use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputContributor;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
+use sha2::Digest;
+use sha2::Sha256;
 
 const MAX_CATALOG: usize = 16 * 1024;
 
@@ -49,6 +51,11 @@ struct Catalog {
     cues: Vec<Cue>,
 }
 
+struct LoadedCatalog {
+    catalog: Catalog,
+    sha256: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Cue {
@@ -65,7 +72,7 @@ struct Cue {
     provenance: HashMap<String, String>,
 }
 
-fn load(path: &Path) -> Result<Catalog, &'static str> {
+fn load(path: &Path) -> Result<LoadedCatalog, &'static str> {
     let file = std::fs::File::open(path).map_err(|_| "unreadable")?;
     let mut bytes = Vec::new();
     file.take((MAX_CATALOG + 1) as u64)
@@ -76,7 +83,10 @@ fn load(path: &Path) -> Result<Catalog, &'static str> {
     }
     let catalog: Catalog = serde_json::from_slice(&bytes).map_err(|_| "malformed")?;
     validate(&catalog)?;
-    Ok(catalog)
+    Ok(LoadedCatalog {
+        catalog,
+        sha256: format!("{:x}", Sha256::digest(&bytes)),
+    })
 }
 
 fn validate(catalog: &Catalog) -> Result<(), &'static str> {
@@ -126,7 +136,12 @@ fn handles(values: &[String], required: bool) -> bool {
 }
 
 #[derive(Default)]
-struct Query(Vec<String>, HashSet<String>, bool);
+struct Query {
+    segments: Vec<String>,
+    cooling: HashSet<String>,
+    represented: bool,
+    use_prior: bool,
+}
 
 #[derive(Default)]
 struct Runtime(Mutex<State>, OnceLock<()>);
@@ -143,7 +158,8 @@ impl Runtime {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.index = state.index.saturating_add(1);
         let current = request(inputs);
-        let substantive = is_substantive(&current);
+        let continuation = is_continuation(&current);
+        let substantive = !continuation && !norm(&current).is_empty();
         let represented = !current.is_empty();
         let mut remaining = 4096usize.saturating_sub(current.len());
         let mut segments = vec![current.clone()];
@@ -165,7 +181,12 @@ impl Runtime {
             .emitted_at
             .retain(|_, at| index.saturating_sub(*at) <= 2);
         let cooling = state.emitted_at.keys().cloned().collect();
-        Query(segments, cooling, represented)
+        Query {
+            segments,
+            cooling,
+            represented,
+            use_prior: continuation,
+        }
     }
 
     fn emitted(&self, id: &str) {
@@ -208,39 +229,34 @@ fn norm(text: &str) -> String {
         .join(" ")
 }
 
-fn is_substantive(text: &str) -> bool {
-    ![
-        "",
-        "back",
-        "back 3",
-        "continue",
-        "please continue",
-        "proceed",
-    ]
-    .contains(&norm(text).as_str())
+fn is_continuation(text: &str) -> bool {
+    ["back", "back 3", "continue", "please continue", "proceed"].contains(&norm(text).as_str())
 }
 
-struct Selection<'a>(&'a Cue, &'a str, u16);
+struct Selection<'a>(&'a Cue, &'a str, u16, usize);
 
-fn select<'a>(catalog: &'a Catalog, query: &Query) -> Option<Selection<'a>> {
-    if !query.2 {
+fn select_candidate<'a>(
+    catalog: &'a Catalog,
+    query: &Query,
+    include_cooling: bool,
+) -> Option<Selection<'a>> {
+    if !query.represented {
         return None;
     }
+    let segments = if query.use_prior {
+        query.segments.as_slice()
+    } else {
+        query.segments.get(..1).unwrap_or_default()
+    };
     catalog
         .cues
         .iter()
-        .filter(|cue| !query.1.contains(&cue.id))
-        .filter(|cue| {
-            query
-                .0
-                .first()
-                .is_none_or(|current| cue_score(cue, current).is_some())
-        })
+        .filter(|cue| include_cooling || !query.cooling.contains(&cue.id))
         .filter_map(|cue| {
-            query
-                .0
+            segments
                 .iter()
-                .filter_map(|segment| cue_score(cue, segment))
+                .enumerate()
+                .filter_map(|(index, segment)| cue_score(cue, segment, index))
                 .max_by_key(|selection| selection.2)
         })
         .filter(|selection| selection.2 > 0)
@@ -251,7 +267,7 @@ fn select<'a>(catalog: &'a Catalog, query: &Query) -> Option<Selection<'a>> {
         })
 }
 
-fn cue_score<'a>(cue: &'a Cue, text: &str) -> Option<Selection<'a>> {
+fn cue_score<'a>(cue: &'a Cue, text: &str, segment_index: usize) -> Option<Selection<'a>> {
     let normalized = norm(text);
     let tokens = normalized.split_whitespace().collect::<HashSet<_>>();
     if cue
@@ -263,7 +279,14 @@ fn cue_score<'a>(cue: &'a Cue, text: &str) -> Option<Selection<'a>> {
     }
     cue.task_shape
         .iter()
-        .map(|handle| Selection(cue, handle, score(&normalized, &tokens, handle)))
+        .map(|handle| {
+            Selection(
+                cue,
+                handle,
+                score(&normalized, &tokens, handle),
+                segment_index,
+            )
+        })
         .max_by_key(|selection| selection.2)
 }
 
@@ -343,26 +366,95 @@ impl<C: Send + Sync + 'static> TurnInputContributor for Extension<C> {
                 return Vec::new();
             }
             let Some(path) = config.catalog_path.as_deref() else {
+                runtime.1.get_or_init(|| {
+                    tracing::warn!(
+                        event.name = "codex.cue_activation.decision",
+                        thread_id = thread.level_id(),
+                        turn_id = input.turn_id.as_str(),
+                        status = "catalog_error",
+                        reason = "unconfigured",
+                        "cue activation decision"
+                    )
+                });
                 return Vec::new();
             };
-            let catalog = match load(path) {
+            let loaded = match load(path) {
                 Ok(catalog) => catalog,
                 Err(kind) => {
                     runtime.1.get_or_init(|| {
-                        tracing::warn!(kind, "cue catalogue unavailable; continuing without a cue")
+                        tracing::warn!(
+                            event.name = "codex.cue_activation.decision",
+                            thread_id = thread.level_id(),
+                            turn_id = input.turn_id.as_str(),
+                            status = "catalog_error",
+                            reason = kind,
+                            "cue activation decision"
+                        )
                     });
                     return Vec::new();
                 }
             };
             let query = runtime.query(&input.user_input);
-            let Some(Selection(cue, handle, _)) = select(&catalog, &query) else {
+            let selection = select_candidate(&loaded.catalog, &query, false);
+            let Some(Selection(cue, handle, score, segment_index)) = selection else {
+                if let Some(Selection(cue, _, _, segment_index)) =
+                    select_candidate(&loaded.catalog, &query, true)
+                {
+                    let matched_scope = if segment_index == 0 {
+                        "current".to_string()
+                    } else {
+                        format!("prior_{segment_index}")
+                    };
+                    tracing::debug!(
+                        event.name = "codex.cue_activation.decision",
+                        thread_id = thread.level_id(),
+                        turn_id = input.turn_id.as_str(),
+                        status = "cooldown",
+                        mode = ?config.mode,
+                        catalog_sha256 = loaded.sha256.as_str(),
+                        cue_id = cue.id.as_str(),
+                        matched_scope = matched_scope.as_str(),
+                        "cue activation decision"
+                    );
+                    return Vec::new();
+                }
+                tracing::debug!(
+                    event.name = "codex.cue_activation.decision",
+                    thread_id = thread.level_id(),
+                    turn_id = input.turn_id.as_str(),
+                    status = if query.represented {
+                        "no_match"
+                    } else {
+                        "unrepresented"
+                    },
+                    mode = ?config.mode,
+                    catalog_sha256 = loaded.sha256.as_str(),
+                    "cue activation decision"
+                );
                 return Vec::new();
             };
-            tracing::debug!(cue = cue.id, mode = ?config.mode, "cue candidate selected");
+            let matched_scope = if segment_index == 0 {
+                "current".to_string()
+            } else {
+                format!("prior_{segment_index}")
+            };
+            tracing::debug!(
+                event.name = "codex.cue_activation.decision",
+                thread_id = thread.level_id(),
+                turn_id = input.turn_id.as_str(),
+                status = "selected",
+                mode = ?config.mode,
+                catalog_sha256 = loaded.sha256.as_str(),
+                cue_id = cue.id.as_str(),
+                matched_handle = handle,
+                matched_scope = matched_scope.as_str(),
+                score,
+                "cue activation decision"
+            );
+            runtime.emitted(&cue.id);
             if config.mode == CueActivationMode::Shadow {
                 return Vec::new();
             }
-            runtime.emitted(&cue.id);
             let fragment = InternalModelContextFragment::new(
                 InternalContextSource::from_static("cue_activation"),
                 pointer(cue, handle),

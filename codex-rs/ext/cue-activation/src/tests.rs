@@ -10,11 +10,12 @@ fn text(value: &str) -> Vec<UserInput> {
     }]
 }
 fn query(parts: &[&str]) -> Query {
-    Query(
-        parts.iter().map(|part| (*part).into()).collect(),
-        HashSet::new(),
-        true,
-    )
+    Query {
+        segments: parts.iter().map(|part| (*part).into()).collect(),
+        cooling: HashSet::new(),
+        represented: true,
+        use_prior: false,
+    }
 }
 fn fixture() -> Catalog {
     let catalog: Catalog = serde_json::from_str(FIXTURE).expect("synthetic fixture parses");
@@ -35,7 +36,7 @@ fn catalogue_is_bounded_and_rejects_markers_or_bodies() {
     assert!(serde_json::from_str::<Catalog>(&body).is_err());
     let file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(file.path(), vec![b'x'; MAX_CATALOG + 1]).unwrap();
-    assert_eq!(load(file.path()).unwrap_err(), "oversized");
+    assert_eq!(load(file.path()).err().unwrap(), "oversized");
     let mut cue = fixture().cues.remove(0);
     cue.source = "s".repeat(512);
     cue.title = "界".repeat(170);
@@ -53,21 +54,43 @@ fn catalogue_is_bounded_and_rejects_markers_or_bodies() {
     let mut catalog = fixture();
     let positive = query(&[POSITIVE]);
     assert_eq!(
-        select(&catalog, &positive).unwrap().0.id,
+        select_candidate(&catalog, &positive, true).unwrap().0.id,
         "synthetic-pr-review"
     );
     let invalid = query(&[INVALID]);
-    assert!(select(&catalog, &invalid).is_none());
+    assert!(select_candidate(&catalog, &invalid, true).is_none());
     let fused = query(&["please review this pull", "request details"]);
-    assert!(select(&catalog, &fused).is_none());
+    assert!(select_candidate(&catalog, &fused, true).is_none());
     let stale_avoid = query(&[POSITIVE, INVALID]);
-    assert!(select(&catalog, &stale_avoid).is_some());
+    assert!(select_candidate(&catalog, &stale_avoid, true).is_some());
+    let unrelated = query(&["Please compare two spreadsheets", POSITIVE]);
+    assert!(select_candidate(&catalog, &unrelated, true).is_none());
+    let continued = Query {
+        segments: vec!["continue".into(), POSITIVE.into()],
+        represented: true,
+        use_prior: true,
+        ..Query::default()
+    };
+    let selected = select_candidate(&catalog, &continued, true).unwrap();
+    assert_eq!(selected.3, 1);
     let mut tie = catalog.cues[0].clone();
     tie.id = "aaa-deterministic".into();
     catalog.cues.push(tie);
     assert_eq!(
-        select(&catalog, &positive).unwrap().0.id,
+        select_candidate(&catalog, &positive, true).unwrap().0.id,
         "aaa-deterministic"
+    );
+
+    let mut lower_score = catalog.cues[0].clone();
+    lower_score.id = "eligible-lower-score".into();
+    lower_score.task_shape = vec!["review inspect".into()];
+    catalog.cues.push(lower_score);
+    let mut cooling = query(&[POSITIVE]);
+    cooling.cooling.insert("synthetic-pr-review".into());
+    cooling.cooling.insert("aaa-deterministic".into());
+    assert_eq!(
+        select_candidate(&catalog, &cooling, false).unwrap().0.id,
+        "eligible-lower-score"
     );
 }
 
@@ -79,24 +102,46 @@ fn task_context_keeps_two_substantive_requests_and_two_turn_cooldown() {
     }
     for acknowledgement in ["continue", "Back :3"] {
         let continued = runtime.query(&text(acknowledgement));
-        let context = continued.0.join("\n");
+        let context = continued.segments.join("\n");
         assert!(!context.contains("old lighthouse"));
         assert!(context.contains("middle compass") && context.contains("recent sextant"));
         let retained = runtime.0.lock().unwrap();
         assert!(retained.prior.iter().all(|item| item != acknowledgement));
     }
+    let punctuation = runtime.query(&text("..."));
+    assert!(
+        punctuation.represented
+            && !punctuation.use_prior
+            && select_candidate(&fixture(), &punctuation, true).is_none()
+    );
     runtime.emitted("cue");
-    let cooling = ["one", "two", "three"].map(|item| runtime.query(&text(item)).1.contains("cue"));
+    let cooling =
+        ["one", "two", "three"].map(|item| runtime.query(&text(item)).cooling.contains("cue"));
     assert_eq!(cooling, [true, true, false]);
     let unicode = runtime.query(&text(&"界".repeat(2_000)));
-    let bytes = unicode.0.iter().map(String::len).sum::<usize>();
+    let bytes = unicode.segments.iter().map(String::len).sum::<usize>();
     let utf8 = unicode
-        .0
+        .segments
         .iter()
         .all(|part| part.is_char_boundary(part.len()));
     assert!(bytes <= 4_096 && utf8);
     let attachment = runtime.query(&[UserInput::Audio {
         audio_url: "x".into(),
     }]);
-    assert!(!attachment.2 && select(&fixture(), &attachment).is_none());
+    assert!(!attachment.represented && select_candidate(&fixture(), &attachment, true).is_none());
+    let image_only = runtime.query(&[UserInput::Image {
+        image_url: "data:image/png;base64,AA==".into(),
+        detail: None,
+    }]);
+    assert!(!image_only.represented && select_candidate(&fixture(), &image_only, true).is_none());
+    let text_and_image = runtime.query(&[
+        text(POSITIVE).remove(0),
+        UserInput::Image {
+            image_url: "data:image/png;base64,AA==".into(),
+            detail: None,
+        },
+    ]);
+    assert!(
+        text_and_image.represented && select_candidate(&fixture(), &text_and_image, true).is_some()
+    );
 }

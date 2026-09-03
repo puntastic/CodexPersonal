@@ -41,6 +41,68 @@ async fn cue_activation_public_modes_are_bounded_and_fail_open() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn cue_activation_shadow_receipts_simulate_advisory_cooldown() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let home = TempDir::new()?;
+    let path = home.path().join("cue-catalog.json");
+    fs::write(&path, CATALOG)?;
+    MockResponsesConfig::new(&server.uri())
+        .with_extra_config(
+            "[features.cue_activation]\nenabled = true\nmode = \"shadow\"\ncatalog_path = \"cue-catalog.json\"",
+        )
+        .write(home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .with_json_logging("warn,codex_cue_activation_extension=debug")
+        .build_initialized()
+        .await?;
+    let thread = app.start_thread(ThreadStartParams::default()).await?.thread;
+
+    let mut requests = Vec::new();
+    for request in [REQUEST, "continue", "Please compare two spreadsheets"] {
+        let mock = responses::mount_sse_once(
+            &server,
+            create_final_assistant_message_sse_response("done")?,
+        )
+        .await;
+        app.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: request.into(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+        requests.push(mock.single_request());
+    }
+
+    let events = app
+        .wait_for_json_log_events("codex.cue_activation.decision", 3)
+        .await?;
+    let statuses = events
+        .iter()
+        .map(|event| event["fields"]["status"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        [Some("selected"), Some("cooldown"), Some("no_match")]
+    );
+    assert_eq!(events[0]["fields"]["matched_scope"], "current");
+    assert_eq!(events[1]["fields"]["matched_scope"], "prior_1");
+    assert!(events.iter().all(|event| {
+        event["fields"]["thread_id"] == thread.id
+            && event["fields"]["catalog_sha256"].as_str().is_some()
+    }));
+    assert!(
+        requests
+            .iter()
+            .all(|request| cue_fragments(request).is_empty())
+    );
+    Ok(())
+}
+
 async fn capture(enabled: bool, mode: &str, catalog: Option<&str>) -> Result<ResponsesRequest> {
     let server = responses::start_mock_server().await;
     let mock = responses::mount_sse_once(

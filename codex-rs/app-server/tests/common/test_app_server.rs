@@ -228,6 +228,15 @@ impl TestAppServer {
         self.json_logs.wait_for_event(event_name).await
     }
 
+    /// Waits for at least `count` JSON stderr events with the structured name.
+    pub async fn wait_for_json_log_events(
+        &self,
+        event_name: &str,
+        count: usize,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.json_logs.wait_for_events(event_name, count).await
+    }
+
     async fn new_with_program_env_and_args(
         codex_home: &Path,
         program: &Path,
