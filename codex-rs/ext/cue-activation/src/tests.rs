@@ -48,8 +48,11 @@ fn catalogue_is_bounded_and_rejects_markers_or_bodies() {
     );
     assert_eq!(fragment.content_kind().0, "cue_activation.internal_context");
     let rendered = fragment.render();
-    assert!(rendered.len() <= 1_000 && rendered.contains(&cue.source));
+    assert!(rendered.len() <= 1_200 && rendered.contains(&cue.source));
     assert!(rendered.contains("not instruction") && rendered.contains("No source was hydrated"));
+    assert!(
+        rendered.contains("report_cue_outcome") && rendered.contains("not a correctness verdict")
+    );
     assert!(!rendered.contains("FULL_BODY_SENTINEL"));
     let mut catalog = fixture();
     let positive = query(&[POSITIVE]);

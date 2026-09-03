@@ -3,7 +3,18 @@
 This experimental receiver loads a closed, bounded cue-header catalogue and
 observes whether the current turn resembles one cue. It does not search or
 hydrate the cue's source. `shadow` records the decision without changing model
-input; `advisory` additionally contributes one bounded internal pointer.
+input; `advisory` additionally contributes one bounded internal pointer and a
+small direct-model `report_cue_outcome` tool. When a cue fires, the active model
+uses that tool once at natural release to report the cue's perceived effect,
+source use, burden, and one outcome from a closed vocabulary. This is
+first-person working evidence, not a verdict on correctness. The closed fields
+bound a schema-conforming report without relying on post-call truncation.
+
+The host assembles tools before cue selection. Consequently, advisory mode
+includes this small schema on every sampling step, including no-match and
+catalogue-error turns; only a selected cue asks the model to call it. This is an
+accepted, measurable cost of the experimental receiver rather than evidence
+that a cue fired. `shadow` and `off` do not expose the tool.
 
 ```toml
 [features.cue_activation]
@@ -30,7 +41,7 @@ source checkout with:
   "log", "--",
   "--level", "debug",
   "--module", "codex_cue_activation_extension",
-  "--search", "codex.cue_activation.decision"
+  "--search", "codex.cue_activation."
 )
 ```
 
@@ -39,3 +50,13 @@ The statuses are `selected`, `cooldown`, `no_match`, `unrepresented`, and
 current/prior scope, score, and exact catalogue SHA-256. A receipt proves only
 what this build did with those catalogue bytes on that turn; it does not prove
 semantic relevance, usefulness, freshness, or absence of missed cues.
+
+Advisory selections also produce one `codex.cue_activation.assessment` event.
+`recorded` events contain the cue ID, exact catalogue SHA-256, `effect`
+(`helpful`, `redundant`, `distracting`, or `unclear`), whether the source was
+consulted, the reported burden, and one outcome from the closed vocabulary. If
+a cleanly completed turn omits the expected report, the receiver writes
+`missing` and emits a visible warning; aborts and errors are
+recorded as unavailable rather than treated as model noncompliance. The
+ordinary rollout retains the function call and output as the durable source
+record; diagnostic logs are its bounded query surface.

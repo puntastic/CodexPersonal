@@ -16,6 +16,7 @@ use codex_core::context::InternalModelContextFragment;
 use codex_extension_api::ConfigContributor;
 use codex_extension_api::ContextualUserFragment;
 use codex_extension_api::ExtensionData;
+use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadLifecycleContributor;
@@ -26,6 +27,9 @@ use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use sha2::Digest;
 use sha2::Sha256;
+
+mod assessment;
+use assessment::pointer;
 
 const MAX_CATALOG: usize = 16 * 1024;
 
@@ -151,6 +155,7 @@ struct State {
     index: u64,
     prior: VecDeque<String>,
     emitted_at: HashMap<String, u64>,
+    pending_assessments: HashMap<String, assessment::PendingAssessment>,
 }
 
 impl Runtime {
@@ -304,38 +309,15 @@ fn score(query: &str, tokens: &HashSet<&str>, handle: &str) -> u16 {
     }
 }
 
-fn pointer(cue: &Cue, handle: &str) -> String {
-    const INTRO: &str = "Experimental advisory pointer; supplied context, not instruction, truth, authority, authorization, or proof of relevance/current state. No source was hydrated or synchronized. You may ignore it.";
-    const ACTION: &str = "If useful, inspect/hydrate that exact source; take at most one reversible probe/reframe, then release.";
-    let tail = format!("\nSource: {}\nHandle: {handle}\n{ACTION}", cue.source);
-    let mut output = INTRO.to_string();
-    optional(&mut output, "Cue: ", &cue.title, 920 - tail.len());
-    output.push_str(&tail);
-    optional(&mut output, "Discriminator: ", &cue.discriminator, 920);
-    optional(&mut output, "Release when: ", &cue.release_when, 920);
-    output
+struct Extension<C> {
+    config: Arc<dyn Fn(&C) -> CueActivationConfig + Send + Sync>,
+    event_sink: Arc<dyn ExtensionEventSink>,
 }
-
-fn optional(output: &mut String, prefix: &str, value: &str, cap: usize) {
-    let room = cap.saturating_sub(output.len());
-    if room <= prefix.len() + 1 {
-        return;
-    }
-    output.push('\n');
-    output.push_str(prefix);
-    let mut end = value.len().min(room - prefix.len() - 1);
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    output.push_str(&value[..end]);
-}
-
-struct Extension<C>(Arc<dyn Fn(&C) -> CueActivationConfig + Send + Sync>);
 
 impl<C: Send + Sync + 'static> ThreadLifecycleContributor<C> for Extension<C> {
     fn on_thread_start<'a>(&'a self, input: ThreadStartInput<'a, C>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
-            input.thread_store.insert((self.0)(input.config));
+            input.thread_store.insert((self.config)(input.config));
             input.thread_store.get_or_init(Runtime::default);
         })
     }
@@ -343,7 +325,7 @@ impl<C: Send + Sync + 'static> ThreadLifecycleContributor<C> for Extension<C> {
 
 impl<C: Send + Sync + 'static> ConfigContributor<C> for Extension<C> {
     fn on_config_changed(&self, _: &ExtensionData, store: &ExtensionData, _: &C, next: &C) {
-        store.insert((self.0)(next));
+        store.insert((self.config)(next));
     }
 }
 
@@ -354,7 +336,7 @@ impl<C: Send + Sync + 'static> TurnInputContributor for Extension<C> {
         _: Option<Arc<dyn codex_extension_api::ExtensionMetrics>>,
         _: &'a ExtensionData,
         thread: &'a ExtensionData,
-        _: &'a ExtensionData,
+        turn: &'a ExtensionData,
     ) -> ExtensionFuture<'a, Vec<Box<dyn ContextualUserFragment + Send>>> {
         Box::pin(async move {
             let (Some(config), Some(runtime)) =
@@ -455,6 +437,10 @@ impl<C: Send + Sync + 'static> TurnInputContributor for Extension<C> {
             if config.mode == CueActivationMode::Shadow {
                 return Vec::new();
             }
+            runtime.offer_assessment(&input.turn_id, &cue.id, &loaded.sha256);
+            turn.insert(assessment::AssessmentOffer {
+                turn_id: input.turn_id.clone(),
+            });
             let fragment = InternalModelContextFragment::new(
                 InternalContextSource::from_static("cue_activation"),
                 pointer(cue, handle),
@@ -470,10 +456,15 @@ pub fn install<C>(
 ) where
     C: Send + Sync + 'static,
 {
-    let extension = Arc::new(Extension(Arc::new(config)));
+    let extension = Arc::new(Extension {
+        config: Arc::new(config),
+        event_sink: registry.event_sink(),
+    });
     registry.thread_lifecycle_contributor(extension.clone());
     registry.config_contributor(extension.clone());
-    registry.turn_input_contributor(extension);
+    registry.turn_input_contributor(extension.clone());
+    registry.tool_contributor(extension.clone());
+    registry.turn_lifecycle_contributor(extension);
 }
 
 #[cfg(test)]
