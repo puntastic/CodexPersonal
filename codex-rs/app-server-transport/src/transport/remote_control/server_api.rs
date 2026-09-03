@@ -21,6 +21,12 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::warn;
 
+pub(super) const REMOTE_CONTROL_APP_SERVER_VERSION: &str =
+    match option_env!("CODEX_REMOTE_CONTROL_APP_SERVER_VERSION") {
+        Some(version) => version,
+        None => env!("CARGO_PKG_VERSION"),
+    };
+
 const REMOTE_CONTROL_ENROLL_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_CONTROL_SERVER_TOKEN_REFRESH_BACKOFF_MIN_SECS: u64 = 24;
 const REMOTE_CONTROL_SERVER_TOKEN_REFRESH_BACKOFF_MAX_SECS: u64 = 36;
@@ -86,7 +92,7 @@ pub(super) async fn enroll_remote_control_server(
         name: server_name.to_string(),
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
-        app_server_version: env!("CARGO_PKG_VERSION"),
+        app_server_version: REMOTE_CONTROL_APP_SERVER_VERSION,
         installation_id: installation_id.to_string(),
     };
     let enrollment_response = send_remote_control_server_request::<_, EnrollRemoteServerResponse>(

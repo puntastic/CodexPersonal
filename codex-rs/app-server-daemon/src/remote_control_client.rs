@@ -348,7 +348,7 @@ impl From<RemoteControlStatusChangedNotification> for RemoteControlReadyStatus {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use anyhow::Result;
     use codex_app_server_protocol::JSONRPCError;
@@ -364,7 +364,10 @@ mod tests {
     const INITIALIZE_REQUEST_ID: RequestId = RequestId::Integer(1);
     const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
     const TEST_SERVER_NAME: &str = "owen-mbp";
+    #[cfg(unix)]
     const TEST_CODEX_HOME: &str = "/tmp/codex-home";
+    #[cfg(windows)]
+    const TEST_CODEX_HOME: &str = r"C:\tmp\codex-home";
 
     #[tokio::test]
     async fn enable_remote_control_uses_connected_enable_response_without_later_notification()

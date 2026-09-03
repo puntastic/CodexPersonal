@@ -21,6 +21,9 @@ source, staged, configured, and live state separately.
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small
 
 .EXAMPLE
+.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.153.0
+
+.EXAMPLE
 .\codex-dev.ps1 -Action Deploy -PackageDirectory .\codex-rs\target\desktop-dev\packages\example
 
 .EXAMPLE
@@ -46,6 +49,7 @@ param(
     [string]$RustupHome,
     [string]$PythonPath,
     [string]$RipgrepPath,
+    [string]$RemoteControlAppServerVersion,
     [string]$ConfigPath,
     [string]$DeploymentRoot,
     [switch]$WhatIf,
@@ -76,6 +80,7 @@ foreach ($entry in @{
     RustupHome = $RustupHome
     PythonPath = $PythonPath
     RipgrepPath = $RipgrepPath
+    RemoteControlAppServerVersion = $RemoteControlAppServerVersion
     ConfigPath = $ConfigPath
     DeploymentRoot = $DeploymentRoot
 }.GetEnumerator()) {

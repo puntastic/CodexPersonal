@@ -195,7 +195,8 @@ function Invoke-CodexDevBuild {
         [string]$CargoHome,
         [string]$RustupHome,
         [string]$PythonPath,
-        [string]$RipgrepPath
+        [string]$RipgrepPath,
+        [string]$RemoteControlAppServerVersion
     )
 
     $environment = Initialize-CodexDevEnvironment -CargoPath $CargoPath -CargoHome $CargoHome -RustupHome $RustupHome -PythonPath $PythonPath
@@ -218,8 +219,16 @@ function Invoke-CodexDevBuild {
     $rg = Resolve-CodexDevRipgrep $RipgrepPath
     $builder = Join-Path $script:CodexDevRepositoryRoot "scripts\build_codex_package.py"
     $oldRepoRoot = $env:CODEX_REPO_ROOT
+    $oldRemoteControlAppServerVersion = $env:CODEX_REMOTE_CONTROL_APP_SERVER_VERSION
     try {
         $env:CODEX_REPO_ROOT = $script:CodexDevRepositoryRoot
+        if ([string]::IsNullOrWhiteSpace($RemoteControlAppServerVersion)) {
+            Remove-Item Env:CODEX_REMOTE_CONTROL_APP_SERVER_VERSION -ErrorAction SilentlyContinue
+        } elseif ($RemoteControlAppServerVersion -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+            throw "Remote control app-server version must be valid SemVer: $RemoteControlAppServerVersion"
+        } else {
+            $env:CODEX_REMOTE_CONTROL_APP_SERVER_VERSION = $RemoteControlAppServerVersion
+        }
         Invoke-CodexDevNative -FilePath $environment.Python -ArgumentList @(
             $builder,
             "--variant", "codex",
@@ -233,6 +242,11 @@ function Invoke-CodexDevBuild {
         )
     } finally {
         if ($null -eq $oldRepoRoot) { Remove-Item Env:CODEX_REPO_ROOT -ErrorAction SilentlyContinue } else { $env:CODEX_REPO_ROOT = $oldRepoRoot }
+        if ($null -eq $oldRemoteControlAppServerVersion) {
+            Remove-Item Env:CODEX_REMOTE_CONTROL_APP_SERVER_VERSION -ErrorAction SilentlyContinue
+        } else {
+            $env:CODEX_REMOTE_CONTROL_APP_SERVER_VERSION = $oldRemoteControlAppServerVersion
+        }
     }
     $package = Get-CodexDevPackageInfo $output
     $sourceAfter = Get-CodexDevGitState
@@ -248,6 +262,11 @@ function Invoke-CodexDevBuild {
         CompletedAtUtc = [DateTime]::UtcNow.ToString("o")
         CargoProfile = $CargoProfile
         CargoLocked = $true
+        RemoteControlAppServerVersion = if ([string]::IsNullOrWhiteSpace($RemoteControlAppServerVersion)) {
+            $null
+        } else {
+            $RemoteControlAppServerVersion
+        }
         ArtifactFingerprint = $package.Fingerprint
         SourceBefore = $sourceBefore
         SourceAfter = $sourceAfter

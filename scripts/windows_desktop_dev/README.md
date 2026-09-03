@@ -73,6 +73,7 @@ ordinary Rust recipes unsandboxed.
 ```powershell
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small
 .\codex-dev.ps1 -Action Build -CargoProfile release
+.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.153.0
 ```
 
 `dev-small` is the normal iteration profile. `release` is available when the
@@ -92,6 +93,11 @@ stable build for the current task, not necessarily the most recent attempt.
 If updating that convenience pointer fails, the completed package remains
 usable and the Build result returns `built_pointer_failed`, `PointerError`, and
 an explicit Deploy command.
+
+`-RemoteControlAppServerVersion` is a diagnostic compatibility override for
+the version sent in a fresh remote-control enrollment. It leaves the CLI,
+package, and WebSocket protocol versions unchanged and records the selected
+value in `codex-dev-build.json`.
 
 ## Deploy, restart, verify
 

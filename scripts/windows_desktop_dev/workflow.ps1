@@ -146,6 +146,7 @@ function Invoke-CodexDesktopDev {
         [string]$RustupHome,
         [string]$PythonPath,
         [string]$RipgrepPath,
+        [string]$RemoteControlAppServerVersion,
         [string]$ConfigPath = (Get-CodexDevDefaultConfigPath),
         [string]$DeploymentRoot = (Get-CodexDevDefaultDeploymentRoot),
         [switch]$WhatIf,
@@ -163,7 +164,7 @@ CodexPersonal Windows Desktop lane
   .\codex-dev.ps1 -Action Doctor
   .\codex-dev.ps1 -Action Setup
   .\codex-dev.ps1 -Action Just -JustArguments @('test','-p','codex-state')
-  .\codex-dev.ps1 -Action Build -CargoProfile dev-small
+  .\codex-dev.ps1 -Action Build -CargoProfile dev-small [-RemoteControlAppServerVersion <semver>]
   .\codex-dev.ps1 -Action Deploy [-PackageDirectory <package>]
   # Restart Codex Desktop, then:
   .\codex-dev.ps1 -Action Verify
@@ -223,6 +224,7 @@ Rollback selects that prior entrypoint; it does not delete packages or data.
                 RustupHome = $RustupHome
                 PythonPath = $PythonPath
                 RipgrepPath = $RipgrepPath
+                RemoteControlAppServerVersion = $RemoteControlAppServerVersion
             }
             Write-CodexDevResult -Json:$Json -Value (Invoke-CodexDevBuild @parameters)
         }

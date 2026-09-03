@@ -210,7 +210,6 @@ pub async fn enable_remote_control_on_socket(
     connect_timeout: Duration,
     connect_retry_delay: Duration,
 ) -> Result<RemoteControlReadyStatus> {
-    ensure_supported_platform()?;
     remote_control_client::enable_remote_control_with_connect_retry(
         socket_path,
         connect_timeout,
