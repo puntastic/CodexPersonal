@@ -21,7 +21,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::warn;
 
-pub(super) const REMOTE_CONTROL_APP_SERVER_VERSION: &str =
+/// Version reported to remote-control compatibility checks by this app-server build.
+pub const REMOTE_CONTROL_APP_SERVER_VERSION: &str =
     match option_env!("CODEX_REMOTE_CONTROL_APP_SERVER_VERSION") {
         Some(version) => version,
         None => env!("CARGO_PKG_VERSION"),

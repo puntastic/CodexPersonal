@@ -54,6 +54,7 @@ use crate::skills_watcher::SkillsWatcher;
 use crate::thread_state::ConnectionCapabilities;
 use crate::thread_state::ThreadStateManager;
 use crate::transport::AppServerTransport;
+use crate::transport::ConnectionOrigin;
 use crate::transport::RemoteControlHandle;
 use crate::turn_cost_worker::TurnCostWorker;
 use codex_analytics::AnalyticsEventsClient;
@@ -596,6 +597,7 @@ impl MessageProcessor {
     pub(crate) async fn process_request(
         self: &Arc<Self>,
         connection_id: ConnectionId,
+        connection_origin: ConnectionOrigin,
         request: JSONRPCRequest,
         transport: &AppServerTransport,
         session: Arc<ConnectionSessionState>,
@@ -630,6 +632,7 @@ impl MessageProcessor {
                         // ready too early from inside the shared request handler.
                         self.handle_client_request(
                             request_id.clone(),
+                            connection_origin,
                             codex_request,
                             Arc::clone(&session),
                             /*outbound_initialized*/ None,
@@ -681,6 +684,7 @@ impl MessageProcessor {
                 let result = self
                     .handle_client_request(
                         request_id.clone(),
+                        ConnectionOrigin::InProcess,
                         request,
                         Arc::clone(&session),
                         Some(outbound_initialized),
@@ -835,6 +839,7 @@ impl MessageProcessor {
     async fn handle_client_request(
         self: &Arc<Self>,
         connection_request_id: ConnectionRequestId,
+        connection_origin: ConnectionOrigin,
         codex_request: ClientRequest,
         session: Arc<ConnectionSessionState>,
         // `Some(...)` means the caller wants initialize to immediately mark the
@@ -850,6 +855,7 @@ impl MessageProcessor {
                 .initialize(
                     connection_id,
                     request_id,
+                    connection_origin,
                     params,
                     &session,
                     outbound_initialized,

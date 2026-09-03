@@ -31,6 +31,7 @@ mod unix_socket;
 mod unix_socket_tests;
 mod websocket;
 
+pub use remote_control::REMOTE_CONTROL_APP_SERVER_VERSION;
 pub use remote_control::REMOTE_CONTROL_DISABLED_ENV_VAR;
 pub use remote_control::RemoteControlDisabledByRequirements;
 pub use remote_control::RemoteControlEnableError;

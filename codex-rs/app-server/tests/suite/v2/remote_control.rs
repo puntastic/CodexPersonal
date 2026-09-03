@@ -37,6 +37,7 @@ use codex_app_server_protocol::RemoteControlPairingStatusResponse;
 use codex_app_server_protocol::RemoteControlStatusChangedNotification;
 use codex_app_server_protocol::RemoteControlStatusReadResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_transport::REMOTE_CONTROL_APP_SERVER_VERSION;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::LoaderOverrides;
 use codex_config::types::AuthCredentialsStoreMode;
@@ -482,7 +483,8 @@ async fn stdio_eof_exits_with_remote_control_connection() -> Result<()> {
     let request_id = app_server.send_remote_control_enable_request().await?;
     let _: RemoteControlEnableResponse =
         timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
-    timeout(DEFAULT_TIMEOUT, backend.wait_until_initialized()).await??;
+    let remote_user_agent = timeout(DEFAULT_TIMEOUT, backend.wait_until_initialized()).await??;
+    assert!(remote_user_agent.contains(&format!("/{REMOTE_CONTROL_APP_SERVER_VERSION} ")));
 
     let status = timeout(DEFAULT_TIMEOUT, app_server.shutdown_gracefully()).await??;
     assert!(status.success());
@@ -832,7 +834,7 @@ struct BlockingRemoteControlBackend {
 }
 
 struct ConnectedRemoteControlBackend {
-    initialized_rx: Option<oneshot::Receiver<std::result::Result<(), String>>>,
+    initialized_rx: Option<oneshot::Receiver<std::result::Result<String, String>>>,
     server_task: JoinHandle<Result<()>>,
 }
 
@@ -885,7 +887,7 @@ impl ConnectedRemoteControlBackend {
                     ))
                     .await?;
 
-                loop {
+                let user_agent = loop {
                     let message = websocket
                         .next()
                         .await
@@ -895,9 +897,12 @@ impl ConnectedRemoteControlBackend {
                     };
                     let message: serde_json::Value = serde_json::from_str(&message)?;
                     if message["type"] == "server_message" && message["message"]["id"] == 1 {
-                        break;
+                        break message["message"]["result"]["userAgent"]
+                            .as_str()
+                            .context("initialize response should include userAgent")?
+                            .to_string();
                     }
-                }
+                };
 
                 websocket
                     .send(Message::Text(
@@ -915,7 +920,7 @@ impl ConnectedRemoteControlBackend {
                     ))
                     .await?;
                 if let Some(initialized_tx) = initialized_tx.take() {
-                    let _ = initialized_tx.send(Ok(()));
+                    let _ = initialized_tx.send(Ok(user_agent));
                 }
 
                 while let Some(message) = websocket.next().await {
@@ -942,7 +947,7 @@ impl ConnectedRemoteControlBackend {
         })
     }
 
-    async fn wait_until_initialized(&mut self) -> Result<()> {
+    async fn wait_until_initialized(&mut self) -> Result<String> {
         self.initialized_rx
             .take()
             .context("remote control initialization should only be awaited once")?

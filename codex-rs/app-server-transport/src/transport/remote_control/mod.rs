@@ -27,6 +27,7 @@ use self::protocol::RemoteControlPairingStatusCode;
 use self::protocol::ServerEvent;
 use self::protocol::StreamId;
 use self::protocol::normalize_remote_control_url;
+pub use self::server_api::REMOTE_CONTROL_APP_SERVER_VERSION;
 use super::CHANNEL_CAPACITY;
 use super::TransportEvent;
 use super::next_connection_id;

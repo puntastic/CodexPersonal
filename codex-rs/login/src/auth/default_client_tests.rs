@@ -47,6 +47,14 @@ fn test_get_codex_user_agent() {
 }
 
 #[test]
+fn get_codex_user_agent_for_version_uses_supplied_version() {
+    let user_agent = get_codex_user_agent_for_version("1.2.3-test.4");
+    let originator = originator().value;
+    let prefix = format!("{originator}/1.2.3-test.4 ");
+    assert!(user_agent.starts_with(&prefix));
+}
+
+#[test]
 fn is_first_party_originator_matches_known_values() {
     assert_eq!(is_first_party_originator(DEFAULT_ORIGINATOR), true);
     assert_eq!(is_first_party_originator("codex-tui"), true);

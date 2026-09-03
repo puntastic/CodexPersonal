@@ -6,12 +6,15 @@ use codex_analytics::AppServerRpcTransport;
 use codex_login::default_client::SetOriginatorError;
 use codex_login::default_client::USER_AGENT_SUFFIX;
 use codex_login::default_client::get_codex_user_agent;
+use codex_login::default_client::get_codex_user_agent_for_version;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 
 use super::*;
 use crate::message_processor::ConnectionSessionState;
 use crate::message_processor::InitializedConnectionSessionState;
+use crate::transport::ConnectionOrigin;
+use crate::transport::REMOTE_CONTROL_APP_SERVER_VERSION;
 
 const NON_ORIGINATING_CLIENT_NAMES: &[&str] = &["codex_app_server_daemon", "codex-backend"];
 
@@ -45,6 +48,7 @@ impl InitializeRequestProcessor {
         &self,
         connection_id: ConnectionId,
         request_id: RequestId,
+        connection_origin: ConnectionOrigin,
         params: InitializeParams,
         session: &ConnectionSessionState,
         // `Some(...)` means the caller wants initialize to immediately mark the
@@ -138,7 +142,11 @@ impl InitializeRequestProcessor {
             *suffix = Some(user_agent_suffix);
         }
 
-        let user_agent = get_codex_user_agent();
+        let user_agent = if connection_origin == ConnectionOrigin::RemoteControl {
+            get_codex_user_agent_for_version(REMOTE_CONTROL_APP_SERVER_VERSION)
+        } else {
+            get_codex_user_agent()
+        };
         let response = InitializeResponse {
             user_agent,
             codex_home,
