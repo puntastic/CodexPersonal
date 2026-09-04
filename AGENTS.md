@@ -1,3 +1,29 @@
+# CodexPersonal downstream maintenance
+
+This checkout is also Kestrel's customized Codex Desktop tether to their PC.
+When work concerns upstream synchronization, a new Codex release or model, or
+compatibility with hosted Desktop services, keep the fork reasonably close to
+`openai/codex` without treating upstream HEAD as an automatic merge target.
+
+- Inspect the current upstream ref, the fork's overlapping changes, and relevant
+  active upstream issues before choosing an integration boundary.
+- Treat issue reports as early-warning evidence, not confirmed diagnoses.
+- When upstream changes a contract or owner touched by a local repair, recheck
+  that repair's assumptions, migration path, and focused tests. Prefer retiring
+  local code that upstream demonstrably replaces, but preserve working local
+  behavior when it does not.
+- Qualify model and hosted-runtime updates through the actual Desktop path,
+  including model metadata, skill/plugin/tool routing, Guardian or auto-review,
+  context/history persistence, app-server protocol, and remote control.
+- Aim for a fit-for-purpose integration point: near enough to avoid a divergence
+  cliff, far enough to reject regressions and resolve local collisions
+  deliberately.
+
+The adopted decision is Hjarni note 21699. The changing evidence and watch
+cursor live in Hjarni note 15672. Git remains authoritative for exact source,
+history, and deployed artifacts; neither note proves current repository or
+runtime state.
+
 # Rust/codex-rs
 
 In the codex-rs folder where the rust code lives:
