@@ -328,6 +328,7 @@ impl LegacyRolloutCanonicalizer {
             | RolloutItem::TurnContext(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::RealtimeItem(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::WorldState(_)) => {
                 self.write_item(writer, &timestamp, item).await?;
@@ -520,12 +521,17 @@ impl LegacyRolloutCanonicalizer {
         mut item: RolloutItem,
         compaction_resolution: CompactionResolution,
     ) -> ThreadStoreResult<()> {
-        let is_history_checkpoint = matches!(
-            &item,
-            RolloutItem::Compacted(compacted)
-                if compacted.replacement_history.is_some()
-                    || compacted.replacement_history_entries.is_some()
-        );
+        let (is_history_checkpoint, is_guardian_only_checkpoint) = match &item {
+            RolloutItem::Compacted(compacted) => {
+                let is_history_checkpoint = compacted.replacement_history.is_some()
+                    || compacted.replacement_history_entries.is_some();
+                (
+                    is_history_checkpoint,
+                    !is_history_checkpoint && compacted.guardian_history.is_some(),
+                )
+            }
+            _ => (false, false),
+        };
         let occurrence_preparation = self.occurrence_ids.prepare_item(
             &mut item,
             &self.compacted_history,
@@ -554,6 +560,17 @@ impl LegacyRolloutCanonicalizer {
                 // checkpoint arrives, finish fails closed before this staged file is published.
                 self.compacted_history.index_explicit_sources(&item);
                 self.unresolved_selected_compaction = Some(missing);
+            }
+            Err(_)
+                if is_guardian_only_checkpoint
+                    && matches!(compaction_resolution, CompactionResolution::InferSelected) =>
+            {
+                // Core selects Guardian evidence only from the selected complete model-history
+                // checkpoint. A Guardian-only legacy record is not an independent resume base and
+                // must neither fail migration nor clear the selected model checkpoint's status.
+                // Preserve it exactly while retaining any complete inline source values for a
+                // later selected checkpoint.
+                self.compacted_history.index_explicit_sources(&item);
             }
             Err(_)
                 if matches!(

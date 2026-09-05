@@ -62,6 +62,9 @@ The lane does not guess a crate or invent a validation matrix. Choose focused
 tests from the changed surface and the repository `AGENTS.md`; a full suite
 remains an explicit consequential choice.
 
+For upstream updates, use the project-specific merge seams and release gates in
+[the upstream integration contract](upstream-integration.md).
+
 On a Codex host with a managed filesystem boundary, Bazel-backed recipes may
 need an approved unsandboxed run: Bazel's embedded JDK resolves its generated
 install tree through a DOS 8.3 alias that the host may not equate with the
@@ -73,7 +76,7 @@ ordinary Rust recipes unsandboxed.
 ```powershell
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small
 .\codex-dev.ps1 -Action Build -CargoProfile release
-.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.153.0
+.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.153.0-alpha.5
 ```
 
 `dev-small` is the normal iteration profile. `release` is available when the

@@ -19,7 +19,9 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::McpResourceOrigin;
 use codex_protocol::mcp::McpResourceOriginCheckpoint;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AskForApproval;
@@ -42,6 +44,8 @@ use codex_protocol::protocol::UserMessageEvent;
 use codex_rollout::CompactedHistoryEntry;
 use codex_rollout::CompactedHistoryResolver;
 use codex_rollout::CompactedItem;
+use codex_rollout::GuardianHistoryCheckpoint;
+use codex_rollout::ResponseItemEnvelope;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
@@ -258,6 +262,7 @@ fn agent_message(text: &str) -> RolloutItem {
         phase: None,
         memory_citation: None,
         delivery: None,
+        questions: None,
     }))
 }
 
@@ -382,6 +387,37 @@ fn compacted(replacement_history: Vec<ResponseItem>) -> RolloutItem {
         message: "checkpoint".to_string(),
         replacement_history: Some(replacement_history.into_iter().map(Into::into).collect()),
         replacement_history_entries: None,
+        retained_context: None,
+        guardian_history: None,
+        mcp_resource_origins: None,
+        window_number: Some(1),
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
+    })
+}
+
+fn compacted_with_guardian(
+    replacement_history: Vec<ResponseItem>,
+    guardian_history: GuardianHistoryCheckpoint,
+) -> RolloutItem {
+    let mut item = compacted(replacement_history);
+    let RolloutItem::Compacted(compacted) = &mut item else {
+        unreachable!("compacted helper creates a checkpoint");
+    };
+    compacted.guardian_history = Some(guardian_history);
+    item
+}
+
+fn guardian_only_checkpoint(guardian_history: GuardianHistoryCheckpoint) -> RolloutItem {
+    RolloutItem::Compacted(CompactedItem {
+        message: "Guardian checkpoint".to_string(),
+        replacement_history: None,
+        replacement_history_entries: None,
+        retained_context: None,
+        guardian_history: Some(guardian_history),
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
@@ -408,7 +444,7 @@ fn read_rollout(path: &Path) -> Vec<RolloutLine> {
     fs::read_to_string(path)
         .expect("read migrated rollout")
         .lines()
-        .map(|line| serde_json::from_str(line).expect("parse migrated rollout"))
+        .map(|line| codex_rollout::parse_rollout_line(line).expect("parse migrated rollout"))
         .collect()
 }
 
@@ -749,6 +785,8 @@ async fn paginated_containment_does_not_resolve_or_rewrite_a_dangling_checkpoint
         replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
             item_id: "missing-response-item".to_string(),
         }]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
@@ -1257,6 +1295,8 @@ async fn migration_uses_only_older_sources_and_reuses_prior_checkpoint_inlines()
         message: message.to_string(),
         replacement_history: None,
         replacement_history_entries: None,
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
@@ -2039,6 +2079,8 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
                     .to_string(),
             },
         ]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
@@ -2060,6 +2102,23 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         turns: vec!["keep-before-compaction".to_string()],
         current_turn_id: Some("keep-before-compaction".to_string()),
     });
+    let answer_event = serde_json::from_value(serde_json::json!({
+        "type": "verified_answer", "turn_id": "keep-before-compaction", "call_id": "ask-1",
+        "questions": [{"question": "Publish?", "answer": "Only privately."}]
+    }))
+    .expect("verified answer fixture");
+    let wake_answer_event = serde_json::from_value(serde_json::json!({
+        "type": "verified_answer", "turn_id": "empty-answer-turn", "call_id": "ask-2",
+        "questions": [{"question": "Continue?", "answer": "Keep it private."}]
+    }))
+    .expect("empty-turn answer fixture");
+    checkpoint.retained_context = Some(Default::default());
+    let context = checkpoint
+        .retained_context
+        .as_mut()
+        .expect("retained context");
+    context.record(&answer_event);
+    context.record(&wake_answer_event);
     let path = write_rollout(
         home.path(),
         thread_id,
@@ -2068,7 +2127,11 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
             rollout_response_item(prior_assistant),
             started("keep-before-compaction"),
             user_message("old question"),
+            RolloutItem::RetainedContext(answer_event),
             completed("keep-before-compaction"),
+            started("empty-answer-turn"),
+            RolloutItem::RetainedContext(wake_answer_event),
+            completed("empty-answer-turn"),
             RolloutItem::Compacted(checkpoint),
             started("remove-after-compaction"),
             user_message("new question"),
@@ -2098,7 +2161,13 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         .await
         .expect("read rollback-through-compaction turns");
     assert_eq!(turns.turns.len(), 1);
-    let checkpoint = read_rollout(&path)
+    let migrated = read_rollout(&path);
+    assert!(
+        !migrated
+            .iter()
+            .any(|line| matches!(line.item, RolloutItem::RetainedContext(_)))
+    );
+    let checkpoint = migrated
         .into_iter()
         .find_map(|line| match line.item {
             RolloutItem::Compacted(item) => Some(item),
@@ -2108,6 +2177,92 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
     assert_eq!(checkpoint.replacement_history, Some(Vec::new()));
     assert_eq!(checkpoint.replacement_history_entries, None);
     assert_eq!(checkpoint.mcp_resource_origins, None);
+    assert_eq!(
+        checkpoint
+            .retained_context
+            .expect("retained context checkpoint")
+            .verified_answers()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn migration_preserves_answers_before_a_rolled_back_steer() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let mut items = vec![started("shared-turn")];
+    let mut answers = Vec::new();
+    let RolloutItem::Compacted(mut checkpoint) = compacted(vec![
+        input_response_message("user", "before-steer"),
+        input_response_message("user", "after-steer"),
+    ]) else {
+        unreachable!()
+    };
+    checkpoint.retained_context = Some(Default::default());
+    for call_id in ["before-steer", "after-steer"] {
+        items.push(user_message(call_id));
+        let mut call: ResponseItem = serde_json::from_value(json!({
+            "type": "function_call", "call_id": call_id,
+            "name": "request_user_input", "arguments": "{}"
+        }))
+        .expect("request_user_input call");
+        call.set_turn_id_if_missing("shared-turn");
+        items.push(rollout_response_item(call));
+        let answer: codex_rollout::RetainedContextEvent = serde_json::from_value(json!({
+            "type": "verified_answer", "turn_id": "shared-turn", "call_id": call_id,
+            "questions": [{"question": "Publish?", "answer": "Only privately."}]
+        }))
+        .expect("verified answer");
+        checkpoint
+            .retained_context
+            .as_mut()
+            .expect("retained context")
+            .record(&answer);
+        answers.push(answer);
+    }
+    // Delayed delivery must use the original call boundary, not the turn's latest steer.
+    items.extend(answers.iter().cloned().map(RolloutItem::RetainedContext));
+    items.push(completed("shared-turn"));
+    items.push(RolloutItem::Compacted(checkpoint));
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        ThreadRolledBackEvent { num_turns: 1 },
+    )));
+    let path = write_rollout(home.path(), thread_id, SessionSource::Cli, items);
+    let store = indexed_store(home.path()).await;
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate rollback of a steer");
+    let migrated = read_rollout(&path);
+    let events = migrated
+        .iter()
+        .filter_map(|line| match &line.item {
+            RolloutItem::RetainedContext(event) => Some(event.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(events, answers[..1]);
+    let checkpoint = migrated
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::Compacted(checkpoint) => checkpoint.retained_context.as_ref(),
+            _ => None,
+        })
+        .expect("retained checkpoint");
+    assert_eq!(
+        checkpoint
+            .verified_answers()
+            .cloned()
+            .map(
+                |answer| codex_rollout::RetainedContextEvent::VerifiedAnswer {
+                    answer,
+                    acceptance_order: None,
+                }
+            )
+            .collect::<Vec<_>>(),
+        answers[..1]
+    );
 }
 
 #[tokio::test]
@@ -2142,6 +2297,8 @@ async fn rollback_rewrite_resolves_requested_source_outside_selected_checkpoint(
                 metadata: None,
             },
         ]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(2),
         first_window_id: None,
@@ -2201,6 +2358,484 @@ async fn rollback_rewrite_resolves_requested_source_outside_selected_checkpoint(
 }
 
 #[tokio::test]
+async fn rollback_rewrite_removes_stale_guardian_evidence_from_newer_checkpoint() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let kept_user = input_response_message_with_id(
+        "user",
+        "guardian-kept-user",
+        vec![ContentItem::InputText {
+            text: "keep question".to_string(),
+        }],
+    );
+    let kept_answer = input_response_message_with_id(
+        "assistant",
+        "guardian-kept-answer",
+        vec![ContentItem::OutputText {
+            text: "kept answer".to_string(),
+        }],
+    );
+    let removed_user = input_response_message_with_id(
+        "user",
+        "guardian-removed-user",
+        vec![ContentItem::InputText {
+            text: "remove question".to_string(),
+        }],
+    );
+    let stale_grant = input_response_message_with_id(
+        "assistant",
+        "guardian-stale-grant",
+        vec![ContentItem::OutputText {
+            text: "stale approval evidence".to_string(),
+        }],
+    );
+    let retained_guardian = vec![kept_user.clone(), kept_answer.clone()];
+    let mut older_checkpoint = compacted(retained_guardian.clone());
+    let RolloutItem::Compacted(older) = &mut older_checkpoint else {
+        unreachable!("compacted helper creates a checkpoint");
+    };
+    older.guardian_history = Some(
+        serde_json::from_value(
+            serde_json::to_value(&retained_guardian).expect("serialize Guardian checkpoint"),
+        )
+        .expect("build older Guardian checkpoint"),
+    );
+    let stale_guardian = vec![
+        kept_user.clone(),
+        kept_answer.clone(),
+        removed_user.clone(),
+        stale_grant.clone(),
+    ];
+    let mut newer_checkpoint = compacted(stale_guardian.clone());
+    let RolloutItem::Compacted(newer) = &mut newer_checkpoint else {
+        unreachable!("compacted helper creates a checkpoint");
+    };
+    newer.guardian_history = Some(
+        serde_json::from_value(
+            serde_json::to_value(stale_guardian).expect("serialize Guardian checkpoint"),
+        )
+        .expect("build newer Guardian checkpoint"),
+    );
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            started("keep"),
+            rollout_response_item(kept_user),
+            user_message("keep question"),
+            rollout_response_item(kept_answer),
+            completed("keep"),
+            older_checkpoint,
+            started("remove"),
+            rollout_response_item(removed_user),
+            user_message("remove question"),
+            rollout_response_item(stale_grant),
+            completed("remove"),
+            newer_checkpoint,
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            started("replacement"),
+            user_message("replacement question"),
+            completed("replacement"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate rollback-aware Guardian checkpoints");
+
+    let mut lines = read_rollout(&path);
+    let mut resolver = CompactedHistoryResolver::default();
+    let mut guardian_histories = Vec::new();
+    for line in &mut lines {
+        resolver
+            .materialize_item(&mut line.item)
+            .expect("materialize migrated Guardian checkpoint");
+        if let RolloutItem::Compacted(checkpoint) = &line.item
+            && let Some(history) = &checkpoint.guardian_history
+        {
+            guardian_histories.push(history.0.clone());
+        }
+    }
+    assert_eq!(
+        guardian_histories,
+        vec![retained_guardian.clone(), retained_guardian]
+    );
+    let mut cold_context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load migrated Guardian context");
+    let mut resolver = CompactedHistoryResolver::default();
+    for item in &mut cold_context.items {
+        resolver
+            .materialize_item(item)
+            .expect("materialize cold Guardian context");
+    }
+    let restored_guardian = cold_context
+        .items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(checkpoint) => checkpoint.guardian_history.as_ref(),
+            _ => None,
+        })
+        .expect("selected checkpoint carries Guardian history");
+    assert_eq!(&restored_guardian.0, &guardian_histories[1]);
+}
+
+#[tokio::test]
+async fn migration_resolves_v2_guardian_reference_with_source_metadata() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let mut source = ResponseItemEnvelope::new(input_response_message_with_id(
+        "user",
+        "guardian-v2-metadata",
+        vec![ContentItem::InputText {
+            text: "metadata-bound Guardian source".to_string(),
+        }],
+    ));
+    source.metadata = Some(Default::default());
+    source
+        .metadata
+        .as_mut()
+        .expect("Guardian source metadata")
+        .client_authored = true;
+    let item_id = source
+        .item
+        .id()
+        .expect("Guardian source ID")
+        .as_str()
+        .to_string();
+    let reference = CompactedHistoryEntry::reference_v2(item_id.clone(), &source)
+        .expect("create metadata-bound Guardian reference");
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            RolloutItem::ResponseItem(source.clone()),
+            compacted_with_guardian(
+                Vec::new(),
+                GuardianHistoryCheckpoint::from_entries(vec![reference]),
+            ),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate metadata-bound Guardian reference");
+
+    let mut lines = read_rollout(&path);
+    let persisted_entries = lines
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::Compacted(checkpoint) => checkpoint
+                .guardian_history
+                .as_ref()
+                .and_then(GuardianHistoryCheckpoint::entries),
+            _ => None,
+        })
+        .expect("migration keeps Guardian history reference-backed");
+    assert_eq!(
+        persisted_entries,
+        &[CompactedHistoryEntry::Reference {
+            item_id: item_id.clone(),
+        }]
+    );
+
+    let mut resolver = CompactedHistoryResolver::default();
+    for line in &mut lines {
+        resolver
+            .materialize_item(&mut line.item)
+            .expect("materialize migrated metadata-bound Guardian reference");
+    }
+    let guardian = lines
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::Compacted(checkpoint) => checkpoint.guardian_history.as_ref(),
+            _ => None,
+        })
+        .expect("materialized Guardian checkpoint");
+    assert_eq!(guardian.0, vec![source.item]);
+}
+
+#[tokio::test]
+async fn selected_guardian_v1_missing_reference_fails_closed_and_preserves_source() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let missing_id = "msg_missing-guardian-source";
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![compacted_with_guardian(
+            Vec::new(),
+            GuardianHistoryCheckpoint::from_entries(vec![CompactedHistoryEntry::Reference {
+                item_id: missing_id.to_string(),
+            }]),
+        )],
+    );
+    let source = source_snapshot(&path);
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("report missing selected Guardian source");
+
+    let outcome = &report.outcomes[0];
+    assert_failed_with_reason(
+        outcome,
+        RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+    );
+    assert!(
+        outcome
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(missing_id))
+    );
+    assert_failed_migration_preserved_source(&store, home.path(), thread_id, &path, &source).await;
+}
+
+#[tokio::test]
+async fn selected_guardian_v2_digest_mismatch_fails_closed_and_preserves_source() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let actual_source = ResponseItemEnvelope::new(input_response_message_with_id(
+        "user",
+        "guardian-v2-mismatch",
+        vec![ContentItem::InputText {
+            text: "same item, different harness metadata".to_string(),
+        }],
+    ));
+    let mut signed_source = actual_source.clone();
+    signed_source.metadata = Some(Default::default());
+    signed_source
+        .metadata
+        .as_mut()
+        .expect("signed Guardian source metadata")
+        .client_authored = true;
+    let item_id = actual_source
+        .item
+        .id()
+        .expect("Guardian source ID")
+        .as_str()
+        .to_string();
+    let reference = CompactedHistoryEntry::reference_v2(item_id.clone(), &signed_source)
+        .expect("create mismatched Guardian reference");
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            RolloutItem::ResponseItem(actual_source),
+            compacted_with_guardian(
+                Vec::new(),
+                GuardianHistoryCheckpoint::from_entries(vec![reference]),
+            ),
+        ],
+    );
+    let source = source_snapshot(&path);
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("report mismatched selected Guardian source");
+
+    let outcome = &report.outcomes[0];
+    assert_failed_with_reason(
+        outcome,
+        RolloutMigrationFailureReason::LegacyRolloutConversionFailed,
+    );
+    assert!(
+        outcome
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains(&item_id))
+    );
+    assert_failed_migration_preserved_source(&store, home.path(), thread_id, &path, &source).await;
+}
+
+#[tokio::test]
+async fn migration_ignores_superseded_dangling_guardian_reference() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let missing_id = "msg_missing-superseded-guardian-source";
+    let superseded = guardian_only_checkpoint(GuardianHistoryCheckpoint::from_entries(vec![
+        CompactedHistoryEntry::Reference {
+            item_id: missing_id.to_string(),
+        },
+    ]));
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![superseded, compacted(Vec::new())],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate rollout with superseded dangling Guardian checkpoint");
+
+    let checkpoints = read_rollout(&path)
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(item) => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 2);
+    assert_eq!(
+        checkpoints[0]
+            .guardian_history
+            .as_ref()
+            .and_then(GuardianHistoryCheckpoint::entries),
+        Some(
+            [CompactedHistoryEntry::Reference {
+                item_id: missing_id.to_string(),
+            }]
+            .as_slice()
+        )
+    );
+}
+
+#[tokio::test]
+async fn later_guardian_only_checkpoint_does_not_replace_valid_model_base() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let missing_id = "msg_missing-later-guardian-only-source";
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            compacted(vec![input_response_message("user", "valid model base")]),
+            guardian_only_checkpoint(GuardianHistoryCheckpoint::from_entries(vec![
+                CompactedHistoryEntry::Reference {
+                    item_id: missing_id.to_string(),
+                },
+            ])),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("preserve later Guardian-only record without replacing model base");
+
+    let checkpoints = read_rollout(&path)
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(item) => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 2);
+    assert!(checkpoints[0].replacement_history.is_some());
+    assert_eq!(checkpoints[1].replacement_history, None);
+    assert_eq!(
+        checkpoints[1]
+            .guardian_history
+            .as_ref()
+            .and_then(GuardianHistoryCheckpoint::entries),
+        Some(
+            [CompactedHistoryEntry::Reference {
+                item_id: missing_id.to_string(),
+            }]
+            .as_slice()
+        )
+    );
+}
+
+#[tokio::test]
+async fn rollback_reinlines_surviving_guardian_evidence_when_its_carrier_is_removed() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let kept_evidence = input_response_message_with_id(
+        "assistant",
+        "guardian-carried-before-rollback",
+        vec![ContentItem::OutputText {
+            text: "surviving review evidence".to_string(),
+        }],
+    );
+    let kept_id = kept_evidence
+        .id()
+        .expect("kept Guardian evidence ID")
+        .as_str()
+        .to_string();
+    let removed_user = input_response_message_with_id(
+        "user",
+        "guardian-rollback-boundary",
+        vec![ContentItem::InputText {
+            text: "remove this instruction".to_string(),
+        }],
+    );
+    let carrier = compacted_with_guardian(
+        Vec::new(),
+        GuardianHistoryCheckpoint(vec![kept_evidence.clone()]),
+    );
+    let selected = compacted_with_guardian(
+        Vec::new(),
+        GuardianHistoryCheckpoint::from_entries(vec![
+            CompactedHistoryEntry::Reference { item_id: kept_id },
+            CompactedHistoryEntry::from(ResponseItemEnvelope::new(removed_user.clone())),
+        ]),
+    );
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            started("remove"),
+            rollout_response_item(removed_user),
+            user_message("remove this instruction"),
+            carrier,
+            completed("remove"),
+            selected,
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate Guardian checkpoint whose source carrier is rolled back");
+
+    let checkpoints = read_rollout(&path)
+        .into_iter()
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(item) => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 1);
+    let rewritten = &checkpoints[0];
+    assert_eq!(rewritten.replacement_history, Some(Vec::new()));
+    let guardian = rewritten
+        .guardian_history
+        .as_ref()
+        .expect("rollback anchor keeps surviving Guardian evidence");
+    assert_eq!(guardian.entries(), None);
+    assert_eq!(guardian.0, vec![kept_evidence]);
+}
+
+#[tokio::test]
 async fn migration_preserves_reverse_replay_anchor_after_pre_compaction_rollback() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
@@ -2235,9 +2870,193 @@ async fn migration_preserves_reverse_replay_anchor_after_pre_compaction_rollback
 }
 
 #[tokio::test]
+async fn migration_preserves_same_turn_evidence_across_rollback_checkpoints() {
+    assert_migrated_evidence_order(/*steer_order*/ None).await;
+}
+
+#[tokio::test]
+async fn migration_removes_answers_accepted_after_a_queued_steer() {
+    assert_migrated_evidence_order(Some(1)).await;
+}
+
+async fn assert_migrated_evidence_order(steer_order: Option<u64>) {
+    const INITIAL: &str = "Never publish publicly.";
+    const STEER: &str = "Also inspect the README.";
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let [initial, steer] =
+        [("initial", INITIAL), ("steer", STEER)].map(|(id, text)| ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", id)),
+            role: "user".to_owned(),
+            content: vec![ContentItem::InputText {
+                text: text.to_owned(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: Some("shared-turn".to_owned()),
+                    content_item_kinds: Some(vec![ContentItemKind("user.text".to_owned())]),
+                    ..Default::default()
+                },
+            ),
+        });
+    let RolloutItem::Compacted(mut checkpoint) = compacted(vec![initial.clone(), steer.clone()])
+    else {
+        unreachable!("compacted helper creates a checkpoint");
+    };
+    let retained = json!({
+        "user_messages": [
+            {"order": 0, "turn_id": "shared-turn", "message_id": "msg_initial", "text": INITIAL, "complete": true},
+            {"order": steer_order.unwrap_or(2), "turn_id": "shared-turn", "message_id": "msg_steer", "text": STEER, "complete": true}
+        ],
+        "verified_answers": [
+            {"order": if steer_order.is_some() { 2 } else { 1 }, "turn_id": "shared-turn", "call_id": "before", "questions": [{"question": "Publish?", "answer": "Only privately."}]},
+            {"order": 3, "turn_id": "shared-turn", "call_id": "after", "questions": [{"question": "Publish the README?", "answer": "Do not publish it."}]}
+        ],
+        "incomplete": false, "user_messages_incomplete": false, "next_order": 4
+    });
+    checkpoint.retained_context =
+        Some(serde_json::from_value(retained.clone()).expect("retained fixture"));
+    let answers = checkpoint
+        .retained_context
+        .as_ref()
+        .expect("retained checkpoint")
+        .verified_answers()
+        .cloned()
+        .map(|answer| {
+            let acceptance_order =
+                steer_order.map(|_| if answer.call_id == "before" { 2 } else { 3 });
+            codex_rollout::RetainedContextEvent::VerifiedAnswer {
+                answer,
+                acceptance_order,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut before_retained = retained.clone();
+    before_retained["user_messages"]
+        .as_array_mut()
+        .expect("user messages")
+        .truncate(/*len*/ 1);
+    before_retained["verified_answers"]
+        .as_array_mut()
+        .expect("verified answers")
+        .truncate(/*len*/ 1);
+    before_retained["next_order"] = json!(if steer_order.is_some() { 3 } else { 2 });
+    let remaining_answers = usize::from(steer_order.is_none());
+    let mut expected = retained;
+    expected["user_messages"]
+        .as_array_mut()
+        .expect("user messages")
+        .truncate(/*len*/ 1);
+    expected["verified_answers"]
+        .as_array_mut()
+        .expect("verified answers")
+        .truncate(remaining_answers);
+    let mut before_expected = expected.clone();
+    before_expected["next_order"] = before_retained["next_order"].clone();
+    let mut before_steer = checkpoint.clone();
+    before_steer.replacement_history = Some(vec![initial.clone().into()]);
+    before_steer.retained_context =
+        Some(serde_json::from_value(before_retained).expect("pre-steer checkpoint"));
+    let mut after_rollback = before_steer.clone();
+    after_rollback.retained_context =
+        Some(serde_json::from_value(expected.clone()).expect("post-rollback checkpoint"));
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            started("shared-turn"),
+            rollout_response_item(initial.clone()),
+            user_message(INITIAL),
+            RolloutItem::RetainedContext(answers[0].clone()),
+            RolloutItem::Compacted(before_steer),
+            RolloutItem::ResponseItem(codex_rollout::ResponseItemEnvelope {
+                item: steer,
+                metadata: steer_order.map(|order| {
+                    serde_json::from_value(json!({
+                        "user_input_order": order
+                    }))
+                    .expect("acceptance metadata")
+                }),
+            }),
+            user_message(STEER),
+            RolloutItem::RetainedContext(answers[1].clone()),
+            completed("shared-turn"),
+            started("compaction-turn"),
+            RolloutItem::Compacted(checkpoint),
+            completed("compaction-turn"),
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            // This checkpoint already contains the correct live rollback result.
+            started("post-rollback-compaction"),
+            RolloutItem::Compacted(after_rollback),
+            completed("post-rollback-compaction"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate same-turn rollback");
+    let mut migrated = read_rollout(&path);
+    let mut resolver = CompactedHistoryResolver::default();
+    for line in &mut migrated {
+        resolver
+            .materialize_item(&mut line.item)
+            .expect("materialize rollback checkpoint history");
+    }
+    let checkpoints = migrated
+        .iter()
+        .filter_map(|line| match &line.item {
+            RolloutItem::Compacted(item) => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        checkpoints
+            .iter()
+            .map(
+                |checkpoint| serde_json::to_value(&checkpoint.retained_context)
+                    .expect("retained context")
+            )
+            .collect::<Vec<_>>(),
+        vec![before_expected, expected.clone(), expected]
+    );
+    assert_eq!(
+        checkpoints
+            .last()
+            .expect("latest checkpoint")
+            .replacement_history,
+        Some(vec![initial.into()])
+    );
+    assert_eq!(
+        migrated
+            .into_iter()
+            .filter_map(|line| match line.item {
+                RolloutItem::RetainedContext(event) => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        answers[..remaining_answers]
+    );
+}
+
+#[tokio::test]
 async fn migration_keeps_empty_replay_anchor_from_rolled_back_turn() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
+    let retained_guardian = input_response_message("user", "keep question");
+    let removed_guardian = input_response_message("user", "remove question");
+    let mut replay_anchor = compacted(vec![input_response_message("user", "old question")]);
+    let RolloutItem::Compacted(checkpoint) = &mut replay_anchor else {
+        unreachable!("compacted helper creates a checkpoint");
+    };
+    checkpoint.guardian_history = Some(
+        serde_json::from_value(json!([retained_guardian.clone(), removed_guardian]))
+            .expect("build replay-anchor Guardian checkpoint"),
+    );
     let path = write_rollout(
         home.path(),
         thread_id,
@@ -2248,7 +3067,7 @@ async fn migration_keeps_empty_replay_anchor_from_rolled_back_turn() {
             completed("keep"),
             started("remove"),
             user_message("remove question"),
-            compacted(vec![input_response_message("user", "old question")]),
+            replay_anchor,
             completed("remove"),
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                 num_turns: 1,
@@ -2265,14 +3084,21 @@ async fn migration_keeps_empty_replay_anchor_from_rolled_back_turn() {
         .await
         .expect("migrate rolled-back replay anchor");
 
-    let replacement_history = read_rollout(&path)
+    let checkpoint = read_rollout(&path)
         .into_iter()
         .find_map(|line| match line.item {
-            RolloutItem::Compacted(item) => item.replacement_history,
+            RolloutItem::Compacted(item) => Some(item),
             _ => None,
         })
         .expect("retained compaction");
-    assert!(replacement_history.is_empty());
+    assert_eq!(checkpoint.replacement_history, Some(Vec::new()));
+    assert_eq!(
+        checkpoint
+            .guardian_history
+            .expect("retained Guardian checkpoint")
+            .0,
+        vec![retained_guardian]
+    );
 }
 
 #[tokio::test]
@@ -2491,6 +3317,8 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 message: "superseded checkpoint".repeat(1024),
                 replacement_history: Some(Vec::new()),
                 replacement_history_entries: None,
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
                 first_window_id: None,
@@ -2514,6 +3342,8 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                     .into(),
                 ]),
                 replacement_history_entries: None,
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(2),
                 first_window_id: None,
@@ -4160,6 +4990,8 @@ async fn unresolved_compaction_reference_fails_closed_and_preserves_source() {
             replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
                 item_id: missing_id.to_string(),
             }]),
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(1),
             first_window_id: None,
@@ -4215,6 +5047,8 @@ async fn migration_preserves_unresolved_superseded_checkpoint_without_selecting_
                 metadata: None,
             },
         ]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
@@ -4294,6 +5128,8 @@ async fn ordinary_migration_ignores_dangling_reference_before_newer_valid_checkp
                 replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
                     item_id: missing_id.to_string(),
                 }]),
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
                 first_window_id: None,
@@ -4419,6 +5255,8 @@ async fn rollback_aware_selected_checkpoint_still_fails_on_unresolved_reference(
         replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
             item_id: missing_id.to_string(),
         }]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(2),
         first_window_id: None,

@@ -1,5 +1,6 @@
-//! Model history and bounded original evidence for approval review.
-//! Compaction replaces only model history; explicit resets also replace retained evidence.
+//! Parent model history and bounded host-owned context facts.
+//! Compaction replaces only the model window. Snapshots include retained facts atomically;
+//! checkpoint replay and source-call rollback share their live lifecycle.
 
 use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
@@ -20,7 +21,10 @@ use codex_extension_api::ConversationHistorySnapshot;
 use codex_guardian_context::SectionHistory;
 use codex_guardian_context::TranscriptHistory;
 use codex_history::CodexHarnessMetadata;
+use codex_history::GuardianHistoryCheckpoint;
 use codex_history::ResponseItemEnvelope;
+use codex_history::RetainedContext;
+use codex_history::RetainedContextEvent;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -55,6 +59,10 @@ pub(crate) struct ContextManager {
     items: Arc<Vec<ResponseItemEnvelope>>,
     /// Starts at the first compaction; ordinary history snapshots need no second payload copy.
     review_history: Option<TranscriptHistory>,
+    /// Host facts independent of the model window; snapshots share immutable state.
+    retained_context: Arc<RetainedContext>,
+    /// Live and replay instruction capture are enabled together by the session feature flag.
+    retain_user_messages: bool,
     /// Bumped whenever history is rewritten, such as compaction or rollback.
     history_version: u64,
     /// Monotonic user-input/reset revision, independent of compaction's history generation.
@@ -78,6 +86,7 @@ pub(crate) struct ContextManager {
 struct SharedConversationHistory {
     items: Arc<Vec<ResponseItemEnvelope>>,
     review_history: Option<TranscriptHistory>,
+    retained_context: Arc<RetainedContext>,
     history_version: u64,
     user_message_revision: u64,
 }
@@ -88,6 +97,24 @@ pub(crate) enum HistoryReplacement {
 }
 
 impl ConversationHistorySnapshot for SharedConversationHistory {
+    fn latest_compaction_model_hash(&self) -> Option<&str> {
+        self.items
+            .iter()
+            .rev()
+            .find(|envelope| {
+                matches!(
+                    envelope.item,
+                    ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+                )
+            })
+            .and_then(|envelope| envelope.metadata.as_ref())
+            .and_then(|metadata| metadata.compaction_model_hash.as_deref())
+    }
+
+    fn retained_context(&self) -> Option<&RetainedContext> {
+        Some(&self.retained_context)
+    }
+
     fn review_items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         match &self.review_history {
             Some(history) => history.items(),
@@ -130,6 +157,8 @@ impl ContextManager {
         Self {
             items: Arc::new(Vec::new()),
             review_history: None,
+            retained_context: Arc::default(),
+            retain_user_messages: false,
             history_version: 0,
             user_message_revision: 0,
             token_info: TokenUsageInfo::new_or_append(
@@ -144,9 +173,56 @@ impl ContextManager {
         Arc::new(SharedConversationHistory {
             items: Arc::clone(&self.items),
             review_history: self.review_history.clone(),
+            retained_context: Arc::clone(&self.retained_context),
             history_version: self.history_version,
             user_message_revision: self.user_message_revision,
         })
+    }
+
+    pub(crate) fn retained_context(&self) -> &RetainedContext {
+        &self.retained_context
+    }
+
+    pub(crate) fn enable_user_message_retention(&mut self) {
+        self.retain_user_messages = true;
+    }
+
+    pub(crate) fn reserve_input_order(&mut self) -> u64 {
+        Arc::make_mut(&mut self.retained_context).reserve_order()
+    }
+
+    pub(crate) fn record_retained_context(&mut self, event: &RetainedContextEvent) -> bool {
+        if !Arc::make_mut(&mut self.retained_context).record(event) {
+            return false;
+        }
+        self.user_message_revision = self.user_message_revision.saturating_add(1);
+        true
+    }
+
+    pub(crate) fn restore_retained_context(&mut self, checkpoint: Option<&RetainedContext>) {
+        Arc::make_mut(&mut self.retained_context).restore(checkpoint);
+    }
+
+    pub(crate) fn guardian_history_checkpoint(&self) -> Option<GuardianHistoryCheckpoint> {
+        self.review_history
+            .as_ref()
+            .map(|history| GuardianHistoryCheckpoint(history.items().cloned().collect()))
+    }
+
+    pub(crate) fn restore_guardian_history(
+        &mut self,
+        checkpoint: Option<&GuardianHistoryCheckpoint>,
+    ) {
+        let generation = self
+            .review_history
+            .as_ref()
+            .map_or(self.history_version, TranscriptHistory::generation)
+            .saturating_add(1);
+        self.review_history = checkpoint.map(|checkpoint| {
+            let mut history = TranscriptHistory::new(generation);
+            history.reset(checkpoint.0.iter());
+            history
+        });
     }
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {
@@ -227,7 +303,7 @@ impl ContextManager {
     {
         for (item, metadata) in items {
             let item = item.deref();
-            if !is_api_message(item) {
+            if !is_api_message(item, metadata) {
                 continue;
             }
 
@@ -253,6 +329,45 @@ impl ContextManager {
             }
             Arc::make_mut(&mut self.items).push(processed);
             if crate::context::is_user_authorization_message(item) {
+                if self.retain_user_messages
+                    && let ResponseItem::Message {
+                        content,
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } = item
+                {
+                    let mut complete = internal_chat_message_metadata_passthrough
+                        .as_ref()
+                        .and_then(|metadata| metadata.content_item_kinds.as_ref())
+                        .is_some_and(|kinds| {
+                            kinds.len() == content.len()
+                                && kinds.iter().all(|kind| kind.0.starts_with("user."))
+                        });
+                    let text = content
+                        .iter()
+                        .filter_map(|content| match content {
+                            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                                Some(text.as_str())
+                            }
+                            _ => {
+                                complete = false;
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Arc::make_mut(&mut self.retained_context).record_user_message(
+                        codex_history::RetainedUserMessage {
+                            turn_id: item.turn_id().unwrap_or_default().to_owned(),
+                            message_id: item.id().map(|id| id.as_str().to_owned()),
+                            text,
+                            complete,
+                        },
+                        metadata.and_then(|metadata| metadata.user_input_order),
+                    );
+                } else {
+                    Arc::make_mut(&mut self.retained_context).mark_user_messages_incomplete();
+                }
                 self.user_message_revision = self.user_message_revision.saturating_add(1);
             }
         }
@@ -306,6 +421,12 @@ impl ContextManager {
         self.history_version
     }
 
+    pub(crate) fn review_history_version(&self) -> u64 {
+        self.review_history
+            .as_ref()
+            .map_or(self.history_version, TranscriptHistory::generation)
+    }
+
     // Estimate token usage using byte-based heuristics from the truncation helpers.
     // This is a coarse lower bound, not a tokenizer-accurate count.
     pub(crate) fn estimate_token_count(&self, turn_context: &TurnContext) -> Option<i64> {
@@ -356,6 +477,7 @@ impl ContextManager {
     }
 
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
+        self.retained_context = Arc::default();
         self.user_message_revision = self.user_message_revision.saturating_add(1);
         if let Some(review_history) = &mut self.review_history {
             review_history.reset(items.iter().map(|item| &item.item).filter(|item| {
@@ -392,7 +514,7 @@ impl ContextManager {
     ///
     /// This mirrors thread-rollback semantics:
     /// - `num_turns == 0` is a no-op
-    /// - if there are no user turns, this is a no-op
+    /// - if neither the model nor host review window has a user turn, this is a no-op
     /// - if `num_turns` exceeds the number of user turns, all user turns are dropped while
     ///   preserving any items that occurred before the first user message.
     ///
@@ -407,50 +529,202 @@ impl ContextManager {
         }
 
         let snapshot = self.items.clone();
-        let user_positions = user_message_positions(&snapshot);
-        let Some(&first_instruction_turn_idx) = user_positions.first() else {
-            self.replace_annotated(Arc::unwrap_or_clone(snapshot));
-            return;
-        };
-
         let n_from_end = usize::try_from(num_turns).unwrap_or(usize::MAX);
-        let mut cut_idx = if n_from_end >= user_positions.len() {
-            first_instruction_turn_idx
-        } else {
-            user_positions[user_positions.len() - n_from_end]
-        };
+        let user_positions = user_message_positions(&snapshot);
+        let model_cut_idx = rollback_cut_position(&user_positions, n_from_end);
 
-        cut_idx =
-            self.trim_pre_turn_context_updates(&snapshot, first_instruction_turn_idx, cut_idx);
+        let mut review_history = self.review_history.take();
+        let review_snapshot = review_history
+            .as_ref()
+            .map(|history| history.items().cloned().collect::<Vec<_>>());
+        let review_positions = review_snapshot.as_deref().map_or_else(Vec::new, |items| {
+            items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| is_user_turn_boundary(item).then_some(index))
+                .collect()
+        });
+        let review_cut_idx = rollback_cut_position(&review_positions, n_from_end);
+        let model_boundary_covers_request =
+            model_cut_idx.is_some() && n_from_end <= user_positions.len();
+        let review_boundary_covers_request =
+            review_cut_idx.is_some() && n_from_end <= review_positions.len();
+        let review_model_suffix_start = review_positions.len().saturating_sub(user_positions.len());
+        let review_cut_ordinal = review_positions
+            .len()
+            .saturating_sub(n_from_end.min(review_positions.len()));
+        let crosses_known_compacted_turn = review_cut_ordinal < review_model_suffix_start;
+        let review_cannot_disprove_crossing =
+            n_from_end > user_positions.len() && review_positions.len() <= user_positions.len();
+        let crosses_compaction_barrier = model_cut_idx.is_some_and(|cut_idx| {
+            snapshot[..cut_idx]
+                .iter()
+                .any(|item| is_compaction_barrier_item(&item.item))
+        }) && (crosses_known_compacted_turn
+            || review_cannot_disprove_crossing);
 
-        let mut retained_items = snapshot[..cut_idx].to_vec();
-        if cut_idx == first_instruction_turn_idx
-            && let Some(first_turn_id) = snapshot[first_instruction_turn_idx].turn_id()
-        {
-            retained_items.retain_mut(|item| {
-                if item.turn_id() == Some(first_turn_id)
-                    && matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer")
-                {
-                    let Some(mut content) = to_annotated_content(&mut item.item) else {
-                        return false;
-                    };
-                    content.retain(|content| {
-                        // Rebuild these from the next step's model and effort after rollback.
-                        !matches!(
-                            content.content(),
-                            ContentItem::InputText { text }
-                                if ModelSwitchInstructions::matches_text(text)
-                                    || PersistentModeState::matches_text(text)
-                        )
-                    });
-                    !content.is_empty() && set_annotated_content(&mut item.item, content).is_some()
-                } else {
-                    true
-                }
-            });
+        // The compacted model window and the host-owned review window are independent
+        // evidence surfaces. If neither can identify an instruction boundary, rollback is
+        // the documented no-op and must not revoke checkpoint facts merely because their
+        // sources are outside the current model window.
+        if model_cut_idx.is_none() && review_cut_idx.is_none() {
+            self.review_history = review_history;
+            return;
         }
 
-        self.replace_annotated(retained_items);
+        let first_removed_message_id = if review_boundary_covers_request {
+            review_cut_idx.and_then(|index| {
+                let item = review_snapshot.as_ref()?.get(index)?;
+                crate::context::is_user_authorization_message(item)
+                    .then(|| item.id())
+                    .flatten()
+            })
+        } else if model_boundary_covers_request {
+            model_cut_idx.and_then(|index| {
+                let item = &snapshot[index];
+                crate::context::is_user_authorization_message(&item.item)
+                    .then(|| item.id())
+                    .flatten()
+            })
+        } else {
+            None
+        }
+        .map(codex_protocol::ResponseItemId::as_str)
+        .map(str::to_owned);
+        let acceptance_order = if model_boundary_covers_request {
+            model_cut_idx.and_then(|index| {
+                let item = &snapshot[index];
+                crate::context::is_user_authorization_message(&item.item)
+                    .then(|| {
+                        item.metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.user_input_order)
+                    })
+                    .flatten()
+            })
+        } else {
+            None
+        };
+
+        if let Some(history) = &mut review_history {
+            if review_boundary_covers_request && let Some(index) = review_cut_idx {
+                // Use the review window's own pre-truncation item. Provider-normalized
+                // compaction output may have regenerated IDs and no harness metadata.
+                history.truncate_before(&review_snapshot.as_ref().expect("review snapshot")[index]);
+            } else {
+                // A model rollback boundary with no corresponding retained boundary is
+                // ambiguous (usually eviction). Do not leave potentially later grants alive.
+                history.reset(std::iter::empty());
+            }
+        }
+
+        // The same pre-truncation evidence surface supplies source-call correlation and tells
+        // retained mode how many of the rolled-back instruction boundaries were real user
+        // authorization messages. Inter-agent boundaries are deliberately not ledger rows.
+        let source_window = match (&review_snapshot, review_cut_idx) {
+            (Some(items), Some(cut_idx)) if review_boundary_covers_request => {
+                Some((items.iter().collect::<Vec<_>>(), cut_idx))
+            }
+            (Some(_), _) => None,
+            (None, _) if model_boundary_covers_request => model_cut_idx.map(|cut_idx| {
+                (
+                    snapshot
+                        .iter()
+                        .map(|envelope| &envelope.item)
+                        .collect::<Vec<_>>(),
+                    cut_idx,
+                )
+            }),
+            (None, _) => None,
+        };
+        let removed_user_message_boundaries = source_window.as_ref().map(|(items, cut_idx)| {
+            items[*cut_idx..]
+                .iter()
+                .filter(|item| {
+                    is_user_turn_boundary(item)
+                        && crate::context::is_user_authorization_message(item)
+                })
+                .count()
+        });
+
+        let mut retained_context = Arc::clone(&self.retained_context);
+        if self.retain_user_messages {
+            let retained_context = Arc::make_mut(&mut retained_context);
+            if !retained_context.rollback_at_user_message_boundary(
+                first_removed_message_id.as_deref(),
+                acceptance_order,
+            ) {
+                match removed_user_message_boundaries {
+                    Some(0) => retain_answers_before_rollback_source(
+                        retained_context,
+                        source_window
+                            .as_ref()
+                            .map(|(items, cut_idx)| (items.as_slice(), *cut_idx)),
+                    ),
+                    Some(count) => retained_context.rollback_latest_user_messages(count),
+                    None => retained_context.discard_ambiguous_rollback(),
+                }
+            }
+        } else {
+            // Legacy answers have no retained user-message ledger. Bind each answer to its
+            // original source call in the same pre-truncation window that owns the cutoff.
+            // After compaction, never substitute the provider-normalized model window for an
+            // existing review window: absent correlation is incomplete evidence, not survival.
+            retain_answers_before_rollback_source(
+                Arc::make_mut(&mut retained_context),
+                source_window
+                    .as_ref()
+                    .map(|(items, cut_idx)| (items.as_slice(), *cut_idx)),
+            );
+        }
+
+        if let Some(mut cut_idx) = model_cut_idx
+            && !crosses_compaction_barrier
+        {
+            let first_instruction_turn_idx = user_positions[0];
+            cut_idx =
+                self.trim_pre_turn_context_updates(&snapshot, first_instruction_turn_idx, cut_idx);
+
+            let mut retained_items = snapshot[..cut_idx].to_vec();
+            if cut_idx == first_instruction_turn_idx
+                && let Some(first_turn_id) = snapshot[first_instruction_turn_idx].turn_id()
+            {
+                retained_items.retain_mut(|item| {
+                    if item.turn_id() == Some(first_turn_id)
+                        && matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer")
+                    {
+                        let Some(mut content) = to_annotated_content(&mut item.item) else {
+                            return false;
+                        };
+                        content.retain(|content| {
+                            // Rebuild these from the next step's model and effort after rollback.
+                            !matches!(
+                                content.content(),
+                                ContentItem::InputText { text }
+                                    if ModelSwitchInstructions::matches_text(text)
+                                        || PersistentModeState::matches_text(text)
+                            )
+                        });
+                        !content.is_empty()
+                            && set_annotated_content(&mut item.item, content).is_some()
+                    } else {
+                        true
+                    }
+                });
+            }
+            self.replace_annotated(retained_items);
+            self.retained_context = retained_context;
+            self.review_history = review_history;
+        } else {
+            // The review window identified a boundary that the model window cannot represent,
+            // or the requested rollback crossed from explicit model turns into summary prose.
+            // There is no safe substring-level rollback for that summary, so discard the
+            // unreconstructable model window rather than leave rolled-back intent visible.
+            self.replace_annotated(Vec::new());
+            self.reference_context_item = None;
+            self.retained_context = retained_context;
+            self.review_history = review_history;
+        }
     }
 
     pub(crate) fn update_token_info(
@@ -599,12 +873,13 @@ impl ContextManager {
     }
 }
 
-/// API messages include every non-system item (user/assistant messages, reasoning,
-/// tool calls, tool outputs, shell calls, web-search calls, and image-generation
-/// calls).
-fn is_api_message(message: &ResponseItem) -> bool {
+/// Configuration updates require harness provenance; raw system messages are never retained.
+fn is_api_message(message: &ResponseItem, metadata: Option<&CodexHarnessMetadata>) -> bool {
     match message {
         ResponseItem::Message { role, .. } => role.as_str() != "system",
+        ResponseItem::ConfigurationUpdate { .. } => {
+            metadata.is_some_and(|metadata| metadata.harness_authored_configuration)
+        }
         ResponseItem::AdditionalTools { .. }
         | ResponseItem::AgentMessage { .. }
         | ResponseItem::FunctionCallOutput { .. }
@@ -933,13 +1208,42 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
         | ResponseItem::LocalShellCall { .. }
         | ResponseItem::Compaction { .. }
         | ResponseItem::ContextCompaction { .. } => true,
-        ResponseItem::CompactionTrigger { .. } => false,
+        ResponseItem::ConfigurationUpdate { .. } | ResponseItem::CompactionTrigger { .. } => false,
         ResponseItem::AdditionalTools { .. }
         | ResponseItem::FunctionCallOutput { .. }
         | ResponseItem::ToolSearchOutput { .. }
         | ResponseItem::CustomToolCallOutput { .. }
         | ResponseItem::AgentMessage { .. }
         | ResponseItem::Other => false,
+    }
+}
+
+fn retain_answers_before_rollback_source(
+    retained_context: &mut RetainedContext,
+    source_window: Option<(&[&ResponseItem], usize)>,
+) {
+    let mut missing_source = false;
+    retained_context.retain_answers(|answer| {
+        let Some((items, cut_idx)) = source_window else {
+            missing_source = true;
+            return false;
+        };
+        let source_index = items.iter().rposition(|item| {
+            let item = *item;
+            item.turn_id() == Some(answer.turn_id.as_str())
+                && matches!(item, ResponseItem::FunctionCall { call_id, .. }
+                    if call_id == &answer.call_id)
+        });
+        match source_index {
+            Some(source_index) => source_index < cut_idx,
+            None => {
+                missing_source = true;
+                false
+            }
+        }
+    });
+    if missing_source {
+        retained_context.mark_verified_answers_incomplete();
     }
 }
 
@@ -950,9 +1254,46 @@ pub(crate) fn is_user_turn_boundary(item: &ResponseItem) -> bool {
     let ResponseItem::Message { role, content, .. } = item else {
         return false;
     };
-
-    (role == "user" && !is_contextual_user_message_content(content))
+    (role == "user"
+        && !is_compaction_summary_item(item)
+        && !is_contextual_user_message_content(content))
         || (role == "assistant" && is_inter_agent_instruction_content(content))
+}
+
+fn is_compaction_summary_item(item: &ResponseItem) -> bool {
+    let ResponseItem::Message {
+        role,
+        content,
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = item
+    else {
+        return false;
+    };
+    if role != "user" {
+        return false;
+    }
+    // Compaction summaries deliberately have no general text markers. Prefer their exact
+    // annotation, while still recognizing the strict prefix written before annotations existed.
+    // Mixed or malformed shapes stay conservative user input.
+    match content.as_slice() {
+        [ContentItem::InputText { text }] => {
+            let content_item_kinds = internal_chat_message_metadata_passthrough
+                .as_ref()
+                .and_then(|metadata| metadata.content_item_kinds.as_ref());
+            content_item_kinds.is_some_and(
+                |kinds| matches!(kinds.as_slice(), [kind] if kind.0 == "compaction.summary"),
+            ) || (content_item_kinds.is_none() && crate::compact::is_summary_message(text))
+        }
+        _ => false,
+    }
+}
+
+fn is_compaction_barrier_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+    ) || is_compaction_summary_item(item)
 }
 
 fn is_inter_agent_instruction_content(content: &[ContentItem]) -> bool {
@@ -967,6 +1308,15 @@ fn user_message_positions(items: &[ResponseItemEnvelope]) -> Vec<usize> {
         }
     }
     positions
+}
+
+fn rollback_cut_position(positions: &[usize], n_from_end: usize) -> Option<usize> {
+    let first = *positions.first()?;
+    Some(if n_from_end >= positions.len() {
+        first
+    } else {
+        positions[positions.len() - n_from_end]
+    })
 }
 
 #[cfg(test)]

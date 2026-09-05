@@ -195,6 +195,8 @@ async fn revert_preserves_refs_v1_and_resolves_bounded_model_context() {
         replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
             item_id: "selected-source".to_string(),
         }]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,

@@ -10,6 +10,8 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub(super) struct RolloutReconstruction {
     pub(super) history: Vec<ResponseItemEnvelope>,
+    pub(super) retained_context: codex_history::RetainedContext,
+    pub(super) guardian_history: Option<codex_history::GuardianHistoryCheckpoint>,
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
     pub(super) reference_context_item: Option<TurnContextItem>,
     pub(super) world_state_baseline: Option<WorldStateSnapshot>,
@@ -43,6 +45,14 @@ enum TurnReferenceContextItem {
     Latest(Box<TurnContextItem>),
 }
 
+#[derive(Debug, Clone, Copy)]
+// The selected checkpoint and its replay tail must belong to the same surviving segment.
+struct ReplayCheckpoint<'a> {
+    compacted: &'a CompactedItem,
+    checkpoint_index: usize,
+    suffix: &'a [RolloutItem],
+}
+
 #[derive(Debug, Default)]
 struct ActiveReplaySegment<'a> {
     turn_id: Option<String>,
@@ -50,30 +60,8 @@ struct ActiveReplaySegment<'a> {
     previous_turn_settings: Option<PreviousTurnSettings>,
     reference_context_item: TurnReferenceContextItem,
     world_state_replay: Vec<&'a RolloutItem>,
-    base_replacement_history: Option<ReplacementHistoryBase<'a>>,
+    base_compaction: Option<ReplayCheckpoint<'a>>,
     window: Option<ReconstructedWindow>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ReplacementHistoryBase<'a> {
-    Legacy {
-        replacement_history: &'a [ResponseItemEnvelope],
-        checkpoint_index: usize,
-    },
-    EntryBacked {
-        checkpoint_index: usize,
-    },
-}
-
-impl ReplacementHistoryBase<'_> {
-    fn checkpoint_index(self) -> usize {
-        match self {
-            Self::Legacy {
-                checkpoint_index, ..
-            }
-            | Self::EntryBacked { checkpoint_index } => checkpoint_index,
-        }
-    }
 }
 
 fn turn_ids_are_compatible(active_turn_id: Option<&str>, item_turn_id: Option<&str>) -> bool {
@@ -83,7 +71,7 @@ fn turn_ids_are_compatible(active_turn_id: Option<&str>, item_turn_id: Option<&s
 
 fn finalize_active_segment<'a>(
     active_segment: ActiveReplaySegment<'a>,
-    base_replacement_history: &mut Option<ReplacementHistoryBase<'a>>,
+    base_compaction: &mut Option<ReplayCheckpoint<'a>>,
     previous_turn_settings: &mut Option<PreviousTurnSettings>,
     reference_context_item: &mut TurnReferenceContextItem,
     world_state_replay: &mut Vec<&'a RolloutItem>,
@@ -114,10 +102,10 @@ fn finalize_active_segment<'a>(
 
     // A surviving replacement-history checkpoint is a complete history base. Once we
     // know the newest surviving one, older rollout items do not affect rebuilt history.
-    if base_replacement_history.is_none()
-        && let Some(segment_base_replacement_history) = active_segment.base_replacement_history
+    if base_compaction.is_none()
+        && let Some(segment_base_compaction) = active_segment.base_compaction
     {
-        *base_replacement_history = Some(segment_base_replacement_history);
+        *base_compaction = Some(segment_base_compaction);
     }
 
     if window.is_none() {
@@ -156,6 +144,14 @@ fn resolve_compacted_checkpoint(
     checkpoint_index: usize,
 ) -> CodexResult<Option<Vec<ResponseItemEnvelope>>> {
     codex_history::resolve_checkpoint_at(rollout_items, checkpoint_index)
+        .map_err(unresolved_compacted_history_error)
+}
+
+fn resolve_guardian_checkpoint(
+    rollout_items: &[RolloutItem],
+    checkpoint_index: usize,
+) -> CodexResult<Option<codex_history::GuardianHistoryCheckpoint>> {
+    codex_history::resolve_guardian_checkpoint_at(rollout_items, checkpoint_index)
         .map_err(unresolved_compacted_history_error)
 }
 
@@ -271,6 +267,7 @@ pub(crate) fn selected_surviving_complete_checkpoint_index(
             }
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
@@ -310,7 +307,7 @@ impl Session {
                 _ => None,
             })
         };
-        let mut base_replacement_history: Option<ReplacementHistoryBase<'_>> = None;
+        let mut base_compaction = None;
         let mut previous_turn_settings = None;
         let mut reference_context_item = TurnReferenceContextItem::NeverSet;
         let mut world_state_replay = Vec::new();
@@ -349,26 +346,14 @@ impl Session {
                     ) {
                         active_segment.reference_context_item = TurnReferenceContextItem::Cleared;
                     }
-                    if active_segment.base_replacement_history.is_none()
+                    if active_segment.base_compaction.is_none()
                         && selected_checkpoint_index == Some(index)
                     {
-                        let replacement_history_base =
-                            if let Some(replacement_history) = &compacted.replacement_history {
-                                Some(ReplacementHistoryBase::Legacy {
-                                    replacement_history,
-                                    checkpoint_index: index,
-                                })
-                            } else if compacted.replacement_history_entries.is_some() {
-                                Some(ReplacementHistoryBase::EntryBacked {
-                                    checkpoint_index: index,
-                                })
-                            } else {
-                                None
-                            };
-                        if let Some(replacement_history_base) = replacement_history_base {
-                            active_segment.base_replacement_history =
-                                Some(replacement_history_base);
-                        }
+                        active_segment.base_compaction = Some(ReplayCheckpoint {
+                            compacted,
+                            checkpoint_index: index,
+                            suffix: &rollout_items[index + 1..],
+                        });
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
@@ -445,7 +430,7 @@ impl Session {
                     {
                         finalize_active_segment(
                             active_segment,
-                            &mut base_replacement_history,
+                            &mut base_compaction,
                             &mut previous_turn_settings,
                             &mut reference_context_item,
                             &mut world_state_replay,
@@ -468,12 +453,13 @@ impl Session {
                 RolloutItem::EventMsg(_)
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::RealtimeItem(_)
+                | RolloutItem::RetainedContext(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
             }
 
-            if base_replacement_history.is_some()
+            if base_compaction.is_some()
                 && previous_turn_settings.is_some()
                 && !matches!(reference_context_item, TurnReferenceContextItem::NeverSet)
             {
@@ -488,7 +474,7 @@ impl Session {
         if let Some(active_segment) = active_segment.take() {
             finalize_active_segment(
                 active_segment,
-                &mut base_replacement_history,
+                &mut base_compaction,
                 &mut previous_turn_settings,
                 &mut reference_context_item,
                 &mut world_state_replay,
@@ -506,35 +492,35 @@ impl Session {
         .unwrap_or(u64::MAX);
 
         let mut history = ContextManager::new();
-        let mut saw_legacy_compaction_without_replacement_history = false;
-        let rollout_suffix_start = base_replacement_history
-            .map(ReplacementHistoryBase::checkpoint_index)
-            .map_or(0, |checkpoint_index| checkpoint_index + 1);
-        if let Some(base_replacement_history) = base_replacement_history {
-            let replacement_history = match base_replacement_history {
-                ReplacementHistoryBase::Legacy {
-                    replacement_history,
-                    ..
-                } => replacement_history.to_vec(),
-                ReplacementHistoryBase::EntryBacked { checkpoint_index } => {
-                    resolve_compacted_checkpoint(rollout_items, checkpoint_index)?.ok_or_else(
-                        || {
-                            CodexErr::Fatal(format!(
-                                "entry-backed compacted history at rollout index {checkpoint_index} did not contain replacement history"
-                            ))
-                        },
-                    )?
-                }
-            };
-            history.replace_annotated(replacement_history);
+        if self.enabled(Feature::GuardianThreadContext) {
+            history.enable_user_message_retention();
         }
-        // Replay exact history semantics from the selected base's surviving suffix. The reverse
-        // scan normally excludes every history-bearing checkpoint. If a rollback or unusual legacy
-        // layout leaves one in the suffix, resolve that checkpoint alone and fail closed if any of
-        // its references are unavailable.
-        for (offset, item) in rollout_items[rollout_suffix_start..].iter().enumerate() {
+        let mut saw_legacy_compaction_without_replacement_history = false;
+        if let Some(checkpoint) = base_compaction {
+            let checkpoint_index = checkpoint.checkpoint_index;
+            let replacement_history = resolve_compacted_checkpoint(rollout_items, checkpoint_index)?
+                .ok_or_else(|| {
+                    CodexErr::Fatal(format!(
+                        "selected compacted history at rollout index {checkpoint_index} did not contain replacement history"
+                    ))
+                })?;
+            let guardian_history = resolve_guardian_checkpoint(rollout_items, checkpoint_index)?;
+            history.replace_annotated(replacement_history);
+            history.restore_guardian_history(guardian_history.as_ref());
+            history.restore_retained_context(checkpoint.compacted.retained_context.as_ref());
+        }
+        // Replay exact history semantics from the selected base's surviving suffix. The eventual
+        // lazy design should keep this replay shape, but drive it from a resumable reverse source
+        // instead of an eagerly loaded `&[RolloutItem]`.
+        let rollout_suffix = base_compaction.map_or(rollout_items, |checkpoint| checkpoint.suffix);
+        let rollout_suffix_start =
+            base_compaction.map_or(0, |checkpoint| checkpoint.checkpoint_index + 1);
+        for (offset, item) in rollout_suffix.iter().enumerate() {
             let rollout_index = rollout_suffix_start + offset;
             match item {
+                RolloutItem::RetainedContext(event) => {
+                    history.record_retained_context(event);
+                }
                 RolloutItem::ResponseItem(response_item) => {
                     history.record_annotated_items(
                         std::slice::from_ref(response_item),
@@ -551,9 +537,11 @@ impl Session {
                 RolloutItem::InterAgentCommunicationMetadata { .. } => {}
                 RolloutItem::Compacted(compacted) => {
                     if let Some(replacement_history) = &compacted.replacement_history {
-                        // This should actually never happen, because the reverse loop above (to build rollout_suffix)
-                        // should stop before any compaction that has Some replacement_history
-                        history.replace_annotated(replacement_history.clone());
+                        // A newer complete checkpoint in the suffix belongs to a rolled-back
+                        // segment. Apply its model-history snapshot so the later rollback can find
+                        // the original instruction boundary, without replacing retained
+                        // authorization or Guardian review history.
+                        history.replace_compacted(replacement_history.clone());
                     } else if compacted.replacement_history_entries.is_some() {
                         let replacement_history =
                             resolve_compacted_checkpoint(rollout_items, rollout_index)?.ok_or_else(
@@ -563,7 +551,12 @@ impl Session {
                                     ))
                                 },
                             )?;
-                        history.replace_annotated(replacement_history);
+                        history.replace_compacted(replacement_history);
+                    } else if compacted.guardian_history.is_some() {
+                        // A paginated reverse read or rollback rewrite may retain an older
+                        // Guardian-only explicit source in a Compacted envelope. It is evidence for
+                        // resolving a selected checkpoint, not an independent model checkpoint and
+                        // not a request to reset either live history here.
                     } else {
                         saw_legacy_compaction_without_replacement_history = true;
                         // Legacy rollouts without `replacement_history` should rebuild the
@@ -574,14 +567,21 @@ impl Session {
                         // prompt shape.
                         // TODO(ccunningham): if we drop support for None replacement_history compaction items,
                         // we can get rid of this second loop entirely and just build `history` directly in the first loop.
-                        let user_messages =
-                            compact::collect_annotated_user_messages(history.annotated_items());
+                        let identity = if self.enabled(Feature::GuardianThreadContext) {
+                            compact::CompactedMessageIdentity::Preserve
+                        } else {
+                            compact::CompactedMessageIdentity::Regenerate
+                        };
+                        let user_messages = compact::collect_annotated_user_messages(
+                            history.annotated_items(),
+                            identity,
+                        );
                         let rebuilt = compact::build_compacted_history(
                             Vec::new(),
                             &user_messages,
                             &compacted.message,
                         );
-                        history.replace_annotated(rebuilt);
+                        history.replace_compacted(rebuilt);
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
@@ -633,6 +633,7 @@ impl Session {
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::TokenUsageRecord(_)
+                | RolloutItem::RetainedContext(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => {
                     unreachable!("only world-state replay items are collected")
@@ -647,6 +648,8 @@ impl Session {
             id: None,
         });
         Ok(RolloutReconstruction {
+            retained_context: history.retained_context().clone(),
+            guardian_history: history.guardian_history_checkpoint(),
             history: history.into_annotated_items(),
             previous_turn_settings,
             reference_context_item,

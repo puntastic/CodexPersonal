@@ -1503,3 +1503,60 @@ fn bundled_models_json_roundtrips() {
         "bundled models.json should contain at least one model"
     );
 }
+
+#[test]
+fn bundled_astra_keeps_project_sensitive_runtime_contracts() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let astra = response
+        .models
+        .iter()
+        .find(|model| model.slug == "gpt-6-astra")
+        .expect("bundled models should include gpt-6-astra");
+
+    assert_eq!(astra.context_window, Some(272_000));
+    assert_eq!(astra.max_context_window, Some(872_000));
+    assert_eq!(astra.comp_hash.as_deref(), Some("3000"));
+    assert_eq!(
+        astra.tool_mode,
+        Some(codex_protocol::openai_models::ToolMode::CodeModeOnly)
+    );
+    assert_eq!(
+        astra.multi_agent_version,
+        Some(codex_protocol::protocol::MultiAgentVersion::V2)
+    );
+    assert!(!astra.node_repl_disabled);
+    assert!(astra.node_repl_auto_review_required);
+    assert!(!astra.include_skills_usage_instructions);
+    assert!(!astra.include_apps_usage_instructions);
+    assert!(!astra.include_plugin_usage_instructions);
+    assert!(
+        astra.guardian.is_none(),
+        "an absent policy preserves legacy Guardian coverage"
+    );
+
+    let messages = astra
+        .model_messages
+        .as_ref()
+        .expect("Astra should carry model-owned messages");
+    let token_budget = messages
+        .token_budget
+        .as_ref()
+        .expect("Astra should carry dormant token-budget defaults");
+    assert!(!token_budget.enabled);
+    assert!(!token_budget.use_history_notes_extension);
+    let instructions = messages
+        .instructions_template
+        .as_deref()
+        .expect("Astra should carry an instruction template");
+    assert!(instructions.contains("When available"));
+    assert!(instructions.contains("# Using skills"));
+    assert!(
+        messages
+            .auto_review
+            .as_ref()
+            .and_then(|review| review.rejection_instructions.as_deref())
+            .is_some()
+    );
+    assert!(messages.guardian_v2.is_some());
+}

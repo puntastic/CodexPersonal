@@ -344,6 +344,8 @@ async fn reconstruction_fails_closed_when_compacted_history_reference_is_unresol
         replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
             item_id: "missing-source".to_string(),
         }]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
@@ -359,6 +361,51 @@ async fn reconstruction_fails_closed_when_compacted_history_reference_is_unresol
         .expect_err("unresolved reference must reject replay");
 
     assert!(error.to_string().contains("missing-source"));
+}
+
+#[tokio::test]
+async fn reconstruction_fails_closed_when_compacted_history_digest_mismatches() {
+    let (session, turn_context) = make_session_and_context().await;
+    let expected = ResponseItemEnvelope::new(assistant_message_with_id(
+        "digest-bound-source",
+        "original source",
+    ));
+    let item_id = expected
+        .item
+        .id()
+        .expect("source item should have an id")
+        .as_str()
+        .to_string();
+    let reference = CompactedHistoryEntry::reference_v2(item_id.clone(), &expected)
+        .expect("source should have a durable digest");
+    let substituted = ResponseItemEnvelope::new(assistant_message_with_id(
+        "digest-bound-source",
+        "substituted source",
+    ));
+    let rollout_items = vec![
+        RolloutItem::ResponseItem(substituted),
+        RolloutItem::Compacted(CompactedItem {
+            message: String::new(),
+            replacement_history: None,
+            replacement_history_entries: Some(vec![reference]),
+            retained_context: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+        }),
+    ];
+
+    let error = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await
+        .expect_err("digest substitution must reject replay");
+
+    assert!(error.to_string().contains(&item_id));
 }
 
 #[tokio::test]
@@ -378,6 +425,8 @@ async fn reconstruction_resolves_only_selected_checkpoint_not_unrelated_older_ch
             replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
                 item_id: "missing-but-unrelated".to_string(),
             }]),
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(1),
             first_window_id: None,
@@ -393,6 +442,8 @@ async fn reconstruction_resolves_only_selected_checkpoint_not_unrelated_older_ch
             replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
                 item_id: source_item_id,
             }]),
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(2),
             first_window_id: None,
@@ -421,6 +472,302 @@ async fn reconstruction_resolves_only_selected_checkpoint_not_unrelated_older_ch
 }
 
 #[tokio::test]
+async fn reconstruction_resolves_selected_reference_backed_guardian_history() {
+    let (session, turn_context) = make_session_and_context().await;
+    let guardian_source = assistant_message_with_id("guardian-source", "original visual evidence");
+    let guardian_source_id = guardian_source
+        .id()
+        .expect("Guardian source id")
+        .as_str()
+        .to_string();
+    let model_base = assistant_message("current model base");
+    let rollout_items = vec![
+        RolloutItem::ResponseItem(ResponseItemEnvelope::new(guardian_source.clone())),
+        RolloutItem::Compacted(CompactedItem {
+            message: "selected checkpoint".to_string(),
+            replacement_history: Some(annotated(vec![model_base.clone()])),
+            replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: Some(codex_history::GuardianHistoryCheckpoint::from_entries(
+                vec![CompactedHistoryEntry::Reference {
+                    item_id: guardian_source_id,
+                }],
+            )),
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+        }),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await
+        .expect("selected Guardian reference should resolve");
+
+    assert_eq!(reconstructed.history, annotated(vec![model_base]));
+    assert_eq!(
+        reconstructed.guardian_history,
+        Some(codex_history::GuardianHistoryCheckpoint(vec![
+            guardian_source
+        ]))
+    );
+}
+
+#[tokio::test]
+async fn reconstruction_fails_closed_for_selected_missing_guardian_source() {
+    let (session, turn_context) = make_session_and_context().await;
+    let rollout_items = vec![RolloutItem::Compacted(CompactedItem {
+        message: "selected checkpoint".to_string(),
+        replacement_history: Some(annotated(vec![assistant_message("model base")])),
+        replacement_history_entries: None,
+        retained_context: None,
+        guardian_history: Some(codex_history::GuardianHistoryCheckpoint::from_entries(
+            vec![CompactedHistoryEntry::Reference {
+                item_id: "missing-guardian-source".to_string(),
+            }],
+        )),
+        mcp_resource_origins: None,
+        window_number: Some(1),
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
+    })];
+
+    let error = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await
+        .expect_err("selected missing Guardian source must fail closed");
+    assert!(error.to_string().contains("missing-guardian-source"));
+}
+
+#[tokio::test]
+async fn reconstruction_fails_closed_for_selected_guardian_digest_mismatch() {
+    let (session, turn_context) = make_session_and_context().await;
+    let expected = ResponseItemEnvelope::new(assistant_message_with_id(
+        "guardian-digest",
+        "expected evidence",
+    ));
+    let item_id = expected.item.id().expect("source id").as_str().to_string();
+    let reference = CompactedHistoryEntry::reference_v2(item_id.clone(), &expected)
+        .expect("source should have a durable digest");
+    let substituted = assistant_message_with_id("guardian-digest", "substituted evidence");
+    let rollout_items = vec![
+        RolloutItem::ResponseItem(ResponseItemEnvelope::new(substituted)),
+        RolloutItem::Compacted(CompactedItem {
+            message: "selected checkpoint".to_string(),
+            replacement_history: Some(annotated(vec![assistant_message("model base")])),
+            replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: Some(codex_history::GuardianHistoryCheckpoint::from_entries(
+                vec![reference],
+            )),
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+        }),
+    ];
+
+    let error = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await
+        .expect_err("selected Guardian digest mismatch must fail closed");
+    assert!(error.to_string().contains(&item_id));
+}
+
+#[tokio::test]
+async fn superseded_dangling_guardian_reference_is_ignored() {
+    let (session, turn_context) = make_session_and_context().await;
+    let selected_guardian = assistant_message_with_id("selected-guardian", "selected evidence");
+    let selected_guardian_id = selected_guardian
+        .id()
+        .expect("source id")
+        .as_str()
+        .to_string();
+    let selected_model = assistant_message("selected model base");
+    let rollout_items = vec![
+        RolloutItem::Compacted(CompactedItem {
+            message: "superseded checkpoint".to_string(),
+            replacement_history: Some(annotated(vec![assistant_message("older model")])),
+            replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: Some(codex_history::GuardianHistoryCheckpoint::from_entries(
+                vec![CompactedHistoryEntry::Reference {
+                    item_id: "missing-but-superseded".to_string(),
+                }],
+            )),
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+        }),
+        RolloutItem::ResponseItem(ResponseItemEnvelope::new(selected_guardian.clone())),
+        RolloutItem::Compacted(CompactedItem {
+            message: "selected checkpoint".to_string(),
+            replacement_history: Some(annotated(vec![selected_model.clone()])),
+            replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: Some(codex_history::GuardianHistoryCheckpoint::from_entries(
+                vec![CompactedHistoryEntry::Reference {
+                    item_id: selected_guardian_id,
+                }],
+            )),
+            mcp_resource_origins: None,
+            window_number: Some(2),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+        }),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await
+        .expect("only selected Guardian references should be validated");
+    assert_eq!(reconstructed.history, annotated(vec![selected_model]));
+    assert_eq!(
+        reconstructed.guardian_history,
+        Some(codex_history::GuardianHistoryCheckpoint(vec![
+            selected_guardian
+        ]))
+    );
+}
+
+#[tokio::test]
+async fn later_guardian_only_record_does_not_supersede_model_checkpoint() {
+    let (session, turn_context) = make_session_and_context().await;
+    let model_base = assistant_message("model base");
+    let rollout_items = vec![
+        RolloutItem::Compacted(CompactedItem {
+            message: "model checkpoint".to_string(),
+            replacement_history: Some(annotated(vec![model_base.clone()])),
+            replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+        }),
+        RolloutItem::Compacted(CompactedItem {
+            message: "Guardian source carrier".to_string(),
+            replacement_history: None,
+            replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: Some(codex_history::GuardianHistoryCheckpoint(vec![
+                assistant_message_with_id("carrier", "source only"),
+            ])),
+            mcp_resource_origins: None,
+            window_number: Some(2),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+        }),
+    ];
+
+    assert_eq!(
+        super::rollout_reconstruction::selected_surviving_complete_checkpoint_index(&rollout_items),
+        Some(0)
+    );
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await
+        .expect("Guardian-only source record should not reset model history");
+    assert_eq!(reconstructed.history, annotated(vec![model_base]));
+}
+
+#[tokio::test]
+async fn reconstruction_restores_checkpoint_guardian_and_retained_state_before_suffix_replay() {
+    let (session, turn_context) = make_session_and_context().await;
+    let checkpoint_answer = codex_history::RetainedContextEvent::VerifiedAnswer {
+        answer: codex_history::VerifiedAnswer {
+            turn_id: "checkpoint-turn".to_string(),
+            call_id: "checkpoint-call".to_string(),
+            questions: vec![codex_history::VerifiedQuestionAnswer {
+                question: "Publish?".to_string(),
+                answer: "Only privately.".to_string(),
+            }],
+        },
+        acceptance_order: Some(1),
+    };
+    let suffix_answer = codex_history::RetainedContextEvent::VerifiedAnswer {
+        answer: codex_history::VerifiedAnswer {
+            turn_id: "suffix-turn".to_string(),
+            call_id: "suffix-call".to_string(),
+            questions: vec![codex_history::VerifiedQuestionAnswer {
+                question: "Delete?".to_string(),
+                answer: "No.".to_string(),
+            }],
+        },
+        acceptance_order: Some(2),
+    };
+    let mut checkpoint_retained = codex_history::RetainedContext::default();
+    assert!(checkpoint_retained.record(&checkpoint_answer));
+    let guardian_base = user_message("original user authorization");
+    let history_base = assistant_message("compacted model history");
+    let suffix_message = assistant_message("continued after checkpoint");
+    let rollout_items = vec![
+        RolloutItem::Compacted(CompactedItem {
+            message: String::new(),
+            replacement_history: Some(annotated(vec![history_base.clone()])),
+            replacement_history_entries: None,
+            retained_context: Some(checkpoint_retained.clone()),
+            guardian_history: Some(codex_history::GuardianHistoryCheckpoint(vec![
+                guardian_base.clone(),
+            ])),
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+        }),
+        RolloutItem::RetainedContext(suffix_answer.clone()),
+        RolloutItem::ResponseItem(ResponseItemEnvelope::new(suffix_message.clone())),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await
+        .expect("checkpoint state and suffix should reconstruct");
+
+    let mut expected_retained = checkpoint_retained;
+    assert!(expected_retained.record(&suffix_answer));
+    assert_eq!(reconstructed.retained_context, expected_retained);
+    assert_eq!(
+        reconstructed.guardian_history,
+        Some(codex_history::GuardianHistoryCheckpoint(vec![
+            guardian_base,
+            suffix_message.clone(),
+        ]))
+    );
+    assert_eq!(
+        reconstructed.history,
+        annotated(vec![history_base, suffix_message])
+    );
+}
+
+#[tokio::test]
 async fn reconstruction_fails_closed_for_entry_backed_checkpoint_in_forward_suffix() {
     let (session, turn_context) = make_session_and_context().await;
     let surviving_base = assistant_message("surviving base");
@@ -430,6 +777,8 @@ async fn reconstruction_fails_closed_for_entry_backed_checkpoint_in_forward_suff
             message: "surviving checkpoint".to_string(),
             replacement_history: Some(annotated(vec![surviving_base])),
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(1),
             first_window_id: None,
@@ -463,6 +812,8 @@ async fn reconstruction_fails_closed_for_entry_backed_checkpoint_in_forward_suff
             replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
                 item_id: "missing-from-forward-suffix".to_string(),
             }]),
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(2),
             first_window_id: None,
@@ -1261,6 +1612,8 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
             message: String::new(),
             replacement_history: Some(Vec::new()),
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -1325,6 +1678,8 @@ async fn record_initial_history_requires_surviving_full_snapshot_without_user_tu
                 message: String::new(),
                 replacement_history: Some(Vec::new()),
                 replacement_history_entries: None,
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -1361,6 +1716,8 @@ async fn record_initial_history_resumed_does_not_seed_reference_context_item_aft
             message: String::new(),
             replacement_history: Some(Vec::new()),
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -1436,6 +1793,8 @@ async fn reconstruct_history_prefers_compacted_window_over_session_meta() {
             message: String::new(),
             replacement_history: Some(Vec::new()),
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(2),
             first_window_id: Some(compacted_first_window_id.to_string()),
@@ -1476,6 +1835,8 @@ async fn reconstruct_history_replays_world_state_from_latest_compaction_window()
                 message: String::new(),
                 replacement_history: Some(Vec::new()),
                 replacement_history_entries: None,
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
                 first_window_id: None,
@@ -1542,6 +1903,10 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions() {
                         "summary-{window_number}"
                     ))])),
                     replacement_history_entries: None,
+                    retained_context: None,
+                    guardian_history: Some(codex_history::GuardianHistoryCheckpoint(vec![
+                        user_message("original task"),
+                    ])),
                     mcp_resource_origins: None,
                     window_number: Some(window_number as u64),
                     first_window_id: Some(window_ids[0].to_string()),
@@ -1599,7 +1964,15 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions() {
         .await
         .expect("bounded rollout reconstruction should succeed");
     assert_eq!(
+        bounded.guardian_history.as_ref(),
+        Some(&codex_history::GuardianHistoryCheckpoint(vec![
+            user_message("original task"),
+            assistant_message("continued working"),
+        ])),
+    );
+    assert_eq!(
         (
+            bounded.guardian_history,
             bounded.history,
             bounded.previous_turn_settings,
             bounded.reference_context_item,
@@ -1610,6 +1983,7 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions() {
             bounded.window_id,
         ),
         (
+            full.guardian_history,
             full.history,
             full.previous_turn_settings,
             full.reference_context_item,
@@ -1643,6 +2017,8 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
             message: "legacy summary".to_string(),
             replacement_history: None,
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -1668,13 +2044,30 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
 async fn reconstruct_history_legacy_compaction_without_replacement_history_does_not_inject_current_initial_context()
  {
     let (session, turn_context) = make_session_and_context().await;
+    let answer = codex_history::RetainedContextEvent::VerifiedAnswer {
+        answer: codex_history::VerifiedAnswer {
+            turn_id: "legacy-turn".to_owned(),
+            call_id: "ask-1".to_owned(),
+            questions: vec![codex_history::VerifiedQuestionAnswer {
+                question: "Upload?".to_owned(),
+                answer: "Only privately.".to_owned(),
+            }],
+        },
+        acceptance_order: None,
+    };
+    let mut retained = codex_history::RetainedContext::default();
+    retained.mark_user_messages_incomplete();
+    retained.record(&answer);
     let rollout_items = vec![
         RolloutItem::ResponseItem(user_message("before compact").into()),
         RolloutItem::ResponseItem(assistant_message("assistant reply").into()),
+        RolloutItem::RetainedContext(answer),
         RolloutItem::Compacted(CompactedItem {
             message: "legacy summary".to_string(),
             replacement_history: None,
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -1698,6 +2091,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
         ])
     );
     assert!(reconstructed.reference_context_item.is_none());
+    assert_eq!(reconstructed.retained_context, retained);
 }
 
 #[tokio::test]
@@ -1715,6 +2109,8 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_clear
             message: "legacy summary".to_string(),
             replacement_history: None,
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -1824,6 +2220,8 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
             message: String::new(),
             replacement_history: Some(Vec::new()),
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -1997,6 +2395,8 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
             message: String::new(),
             replacement_history: Some(Vec::new()),
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -2257,6 +2657,8 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
             message: String::new(),
             replacement_history: Some(Vec::new()),
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -2437,6 +2839,8 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
             message: String::new(),
             replacement_history: Some(Vec::new()),
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,

@@ -145,7 +145,10 @@ pub struct MaterializedCompactedHistories<'a> {
 /// Incrementally resolves reference-backed compaction histories in chronological rollout order.
 #[derive(Default)]
 pub struct CompactedHistoryResolver {
+    /// Source window for the model replacement history.
     known_items: HashMap<String, ResponseItemEnvelope>,
+    /// Independent source window for bounded Guardian evidence that survives model compaction.
+    guardian_known_items: HashMap<String, ResponseItemEnvelope>,
 }
 
 impl CompactedHistoryResolver {
@@ -178,6 +181,33 @@ impl CompactedHistoryResolver {
             .collect()
     }
 
+    /// Retains exact durable envelopes for a materialized Guardian review-history window.
+    ///
+    /// Unlike model-history qualification, this includes inline Guardian entries as explicit
+    /// sources and preserves their harness metadata for future V2 digest-bound checkpoints.
+    pub fn filter_exact_guardian_sources(
+        rollout_items: &[RolloutItem],
+        candidates: &[codex_protocol::models::ResponseItem],
+    ) -> Vec<ResponseItemEnvelope> {
+        let requested_item_ids = candidates
+            .iter()
+            .filter_map(codex_protocol::models::ResponseItem::id)
+            .map(|item_id| item_id.as_str().to_string())
+            .collect::<HashSet<_>>();
+        let explicit_sources = latest_guardian_sources_for_ids(rollout_items, &requested_item_ids);
+
+        candidates
+            .iter()
+            .filter_map(|candidate| {
+                let item_id = candidate.id()?;
+                explicit_sources
+                    .get(item_id.as_str())
+                    .filter(|source| source.item == *candidate)
+                    .cloned()
+            })
+            .collect()
+    }
+
     /// Indexes the complete response-item values contributed by one rollout item.
     ///
     /// Entry-backed checkpoints are validated against the resolver's older sources before any
@@ -195,7 +225,11 @@ impl CompactedHistoryResolver {
         rollout_item: &RolloutItem,
     ) -> Result<(), CompactedHistoryReferenceError> {
         if let RolloutItem::Compacted(compacted) = rollout_item {
-            validate_compacted_history_references(&self.known_items, compacted)?;
+            validate_compacted_history_references(
+                &self.known_items,
+                &self.guardian_known_items,
+                compacted,
+            )?;
         }
         self.index_explicit_sources(rollout_item);
         Ok(())
@@ -211,23 +245,48 @@ impl CompactedHistoryResolver {
         match rollout_item {
             RolloutItem::ResponseItem(envelope) => {
                 note_known_item(&mut self.known_items, envelope);
+                note_known_item(&mut self.guardian_known_items, envelope);
             }
             RolloutItem::Compacted(compacted) => {
                 if let Some(replacement_history) = &compacted.replacement_history {
                     for envelope in replacement_history {
                         note_known_item(&mut self.known_items, envelope);
+                        note_known_item(&mut self.guardian_known_items, envelope);
                     }
                 } else if let Some(entries) = &compacted.replacement_history_entries {
                     for entry in entries {
                         if let CompactedHistoryEntry::Inline { item, metadata } = entry
                             && let Some(item_id) = item.id()
                         {
-                            self.known_items.insert(
-                                item_id.as_str().to_string(),
-                                ResponseItemEnvelope {
-                                    item: item.as_ref().clone(),
-                                    metadata: metadata.clone(),
-                                },
+                            let envelope = ResponseItemEnvelope {
+                                item: item.as_ref().clone(),
+                                metadata: metadata.as_deref().cloned(),
+                            };
+                            self.known_items
+                                .insert(item_id.as_str().to_string(), envelope.clone());
+                            self.guardian_known_items
+                                .insert(item_id.as_str().to_string(), envelope);
+                        }
+                    }
+                }
+                if let Some(guardian_history) = &compacted.guardian_history {
+                    if let Some(entries) = guardian_history.entries() {
+                        for entry in entries {
+                            if let CompactedHistoryEntry::Inline { item, metadata } = entry {
+                                note_known_item(
+                                    &mut self.guardian_known_items,
+                                    &ResponseItemEnvelope {
+                                        item: item.as_ref().clone(),
+                                        metadata: metadata.as_deref().cloned(),
+                                    },
+                                );
+                            }
+                        }
+                    } else {
+                        for item in &guardian_history.0 {
+                            note_known_item(
+                                &mut self.guardian_known_items,
+                                &ResponseItemEnvelope::new(item.clone()),
                             );
                         }
                     }
@@ -238,6 +297,7 @@ impl CompactedHistoryResolver {
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
@@ -259,11 +319,17 @@ impl CompactedHistoryResolver {
         match rollout_item {
             RolloutItem::ResponseItem(envelope) => {
                 note_requested_item(&mut self.known_items, requested_item_ids, envelope);
+                note_requested_item(&mut self.guardian_known_items, requested_item_ids, envelope);
             }
             RolloutItem::Compacted(compacted) => {
                 if let Some(replacement_history) = &compacted.replacement_history {
                     for envelope in replacement_history {
                         note_requested_item(&mut self.known_items, requested_item_ids, envelope);
+                        note_requested_item(
+                            &mut self.guardian_known_items,
+                            requested_item_ids,
+                            envelope,
+                        );
                     }
                 } else if let Some(entries) = &compacted.replacement_history_entries {
                     for entry in entries {
@@ -274,14 +340,39 @@ impl CompactedHistoryResolver {
                                 continue;
                             };
                             if requested_item_ids.contains(item_id) {
-                                self.known_items.insert(
-                                    item_id.to_string(),
-                                    ResponseItemEnvelope {
+                                let envelope = ResponseItemEnvelope {
+                                    item: item.as_ref().clone(),
+                                    metadata: metadata.as_deref().cloned(),
+                                };
+                                self.known_items
+                                    .insert(item_id.to_string(), envelope.clone());
+                                self.guardian_known_items
+                                    .insert(item_id.to_string(), envelope);
+                            }
+                        }
+                    }
+                }
+                if let Some(guardian_history) = &compacted.guardian_history {
+                    if let Some(entries) = guardian_history.entries() {
+                        for entry in entries {
+                            if let CompactedHistoryEntry::Inline { item, metadata } = entry {
+                                note_requested_item(
+                                    &mut self.guardian_known_items,
+                                    requested_item_ids,
+                                    &ResponseItemEnvelope {
                                         item: item.as_ref().clone(),
-                                        metadata: metadata.clone(),
+                                        metadata: metadata.as_deref().cloned(),
                                     },
                                 );
                             }
+                        }
+                    } else {
+                        for item in &guardian_history.0 {
+                            note_requested_item(
+                                &mut self.guardian_known_items,
+                                requested_item_ids,
+                                &ResponseItemEnvelope::new(item.clone()),
+                            );
                         }
                     }
                 }
@@ -291,6 +382,7 @@ impl CompactedHistoryResolver {
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
@@ -315,6 +407,23 @@ impl CompactedHistoryResolver {
         compacted: &crate::CompactedItem,
     ) -> Result<Option<Vec<ResponseItemEnvelope>>, CompactedHistoryReferenceError> {
         resolve_compacted_history(&self.known_items, compacted)
+    }
+
+    /// Resolves a checkpoint's Guardian review history from already-indexed older sources.
+    pub fn resolve_guardian_history(
+        &self,
+        compacted: &crate::CompactedItem,
+    ) -> Result<Option<crate::GuardianHistoryCheckpoint>, Vec<String>> {
+        self.resolve_guardian_history_detailed(compacted)
+            .map_err(|error| error.affected_item_ids())
+    }
+
+    /// Integrity-aware form of [`Self::resolve_guardian_history`].
+    pub fn resolve_guardian_history_detailed(
+        &self,
+        compacted: &crate::CompactedItem,
+    ) -> Result<Option<crate::GuardianHistoryCheckpoint>, CompactedHistoryReferenceError> {
+        resolve_guardian_history(&self.guardian_known_items, compacted)
     }
 
     /// Returns whether this exact response-item envelope is the source currently known by ID.
@@ -348,17 +457,30 @@ impl CompactedHistoryResolver {
         match rollout_item {
             RolloutItem::ResponseItem(envelope) => {
                 note_known_item(&mut self.known_items, envelope);
+                note_known_item(&mut self.guardian_known_items, envelope);
             }
             RolloutItem::Compacted(compacted) => {
-                let was_entry_backed = compacted.replacement_history_entries.is_some();
+                let replacement_was_entry_backed = compacted.replacement_history_entries.is_some();
+                let guardian_was_entry_backed = compacted
+                    .guardian_history
+                    .as_ref()
+                    .is_some_and(crate::GuardianHistoryCheckpoint::is_reference_backed);
                 let resolved = resolve_compacted_history(&self.known_items, compacted)?;
+                let resolved_guardian =
+                    resolve_guardian_history(&self.guardian_known_items, compacted)?;
 
-                if let Some(resolved) = resolved {
-                    replace_known_items(&mut self.known_items, &resolved);
-                    if was_entry_backed {
-                        compacted.replacement_history = Some(resolved);
-                        compacted.replacement_history_entries = None;
-                    }
+                if replacement_was_entry_backed && let Some(resolved) = &resolved {
+                    compacted.replacement_history = Some(resolved.clone());
+                    compacted.replacement_history_entries = None;
+                }
+                if guardian_was_entry_backed {
+                    compacted.guardian_history = resolved_guardian.clone();
+                }
+                if let Some(resolved) = &resolved {
+                    replace_known_items(&mut self.known_items, resolved);
+                }
+                if let Some(guardian_history) = &resolved_guardian {
+                    replace_guardian_known_items(&mut self.guardian_known_items, guardian_history);
                 }
             }
             RolloutItem::SessionMeta(_)
@@ -366,6 +488,7 @@ impl CompactedHistoryResolver {
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
@@ -409,69 +532,43 @@ impl CompactedHistoryResolver {
         match rollout_item {
             RolloutItem::ResponseItem(envelope) => {
                 note_known_item(&mut self.known_items, envelope);
+                note_known_item(&mut self.guardian_known_items, envelope);
             }
             RolloutItem::Compacted(compacted) => {
-                let Some(resolved) = resolve_compacted_history(&self.known_items, compacted)?
-                else {
-                    return Ok(());
-                };
+                let resolved = resolve_compacted_history(&self.known_items, compacted)?;
+                let resolved_guardian =
+                    resolve_guardian_history(&self.guardian_known_items, compacted)?;
 
-                // One stable ID cannot address multiple ordered occurrences. If it appears more
-                // than once in a checkpoint, retain every occurrence inline so a later
-                // last-write-wins source lookup cannot silently substitute one value for another.
-                let conflicting_item_ids = conflicting_history_item_ids(&resolved);
-                let mut has_reference = false;
-                let entries = resolved
-                    .iter()
-                    .cloned()
-                    .map(|envelope| {
-                        let exact_older_item_id = envelope.item.id().and_then(|item_id| {
-                            if conflicting_item_ids.contains(item_id.as_str()) {
-                                None
-                            } else {
-                                self.known_items
-                                    .get(item_id.as_str())
-                                    .filter(|known| *known == &envelope)
-                                    .map(|_| item_id.as_str().to_string())
-                            }
-                        });
-
-                        if let Some(item_id) = exact_older_item_id {
-                            if integrity_bound {
-                                match CompactedHistoryEntry::reference_v2(item_id, &envelope) {
-                                    Ok(reference) => {
-                                        has_reference = true;
-                                        reference
-                                    }
-                                    // Durable-projection failure cannot justify a weaker reference.
-                                    // Keep the complete envelope inline instead.
-                                    Err(_) => CompactedHistoryEntry::from(envelope),
-                                }
-                            } else {
-                                has_reference = true;
-                                CompactedHistoryEntry::Reference { item_id }
-                            }
-                        } else {
-                            CompactedHistoryEntry::from(envelope)
-                        }
-                    })
-                    .collect();
-
-                if has_reference {
-                    compacted.replacement_history = None;
-                    compacted.replacement_history_entries = Some(entries);
-                } else {
-                    compacted.replacement_history = Some(resolved.clone());
-                    compacted.replacement_history_entries = None;
+                if let Some(resolved) = &resolved {
+                    let (legacy, entries) = encode_envelopes_with_references(
+                        resolved,
+                        &self.known_items,
+                        integrity_bound,
+                    );
+                    compacted.replacement_history = legacy;
+                    compacted.replacement_history_entries = entries;
+                }
+                if let Some(guardian_history) = &resolved_guardian {
+                    compacted.guardian_history = Some(encode_guardian_with_references(
+                        guardian_history,
+                        &self.guardian_known_items,
+                        integrity_bound,
+                    ));
                 }
 
-                replace_known_items(&mut self.known_items, &resolved);
+                if let Some(resolved) = &resolved {
+                    replace_known_items(&mut self.known_items, resolved);
+                }
+                if let Some(guardian_history) = &resolved_guardian {
+                    replace_guardian_known_items(&mut self.guardian_known_items, guardian_history);
+                }
             }
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
@@ -525,6 +622,41 @@ pub fn resolve_checkpoint_at_detailed(
     resolve_compacted_history(&known_items, compacted)
 }
 
+/// Resolves the selected checkpoint's Guardian review history using only older explicit sources.
+///
+/// Guardian evidence has an independent bounded source window: inline Guardian entries may source
+/// later Guardian references, but they are never allowed to source model replacement-history
+/// references. Only the selected checkpoint is validated, so a superseded dangling Guardian
+/// reference does not prevent a later valid checkpoint from being restored.
+pub fn resolve_guardian_checkpoint_at(
+    rollout_items: &[RolloutItem],
+    checkpoint_index: usize,
+) -> Result<Option<crate::GuardianHistoryCheckpoint>, Vec<String>> {
+    resolve_guardian_checkpoint_at_detailed(rollout_items, checkpoint_index)
+        .map_err(|error| error.affected_item_ids())
+}
+
+/// Typed form of [`resolve_guardian_checkpoint_at`] for integrity-aware callers.
+pub fn resolve_guardian_checkpoint_at_detailed(
+    rollout_items: &[RolloutItem],
+    checkpoint_index: usize,
+) -> Result<Option<crate::GuardianHistoryCheckpoint>, CompactedHistoryReferenceError> {
+    let Some(RolloutItem::Compacted(compacted)) = rollout_items.get(checkpoint_index) else {
+        return Ok(None);
+    };
+    let Some(checkpoint) = &compacted.guardian_history else {
+        return Ok(None);
+    };
+    let Some(entries) = checkpoint.entries() else {
+        return Ok(Some(checkpoint.clone()));
+    };
+
+    let requested_item_ids = referenced_item_ids(entries);
+    let known_items =
+        latest_guardian_sources_for_ids(&rollout_items[..checkpoint_index], &requested_item_ids);
+    resolve_guardian_history(&known_items, compacted)
+}
+
 /// Resolves reference-backed checkpoints into their complete inline history shape.
 ///
 /// References are backward-only: a source must have appeared in a top-level response item or an
@@ -536,7 +668,12 @@ pub fn materialize_compacted_histories(
     if !rollout_items.iter().any(|item| {
         matches!(
             item,
-            RolloutItem::Compacted(compacted) if compacted.replacement_history_entries.is_some()
+            RolloutItem::Compacted(compacted)
+                if compacted.replacement_history_entries.is_some()
+                    || compacted
+                        .guardian_history
+                        .as_ref()
+                        .is_some_and(crate::GuardianHistoryCheckpoint::is_reference_backed)
         )
     }) {
         return MaterializedCompactedHistories {
@@ -581,6 +718,24 @@ fn replace_known_items(
     }
 }
 
+fn replace_guardian_known_items(
+    known_items: &mut HashMap<String, ResponseItemEnvelope>,
+    guardian_history: &crate::GuardianHistoryCheckpoint,
+) {
+    let previous = std::mem::take(known_items);
+    for item in &guardian_history.0 {
+        let Some(item_id) = item.id().map(codex_protocol::ResponseItemId::as_str) else {
+            continue;
+        };
+        let envelope = previous
+            .get(item_id)
+            .filter(|source| source.item == *item)
+            .cloned()
+            .unwrap_or_else(|| ResponseItemEnvelope::new(item.clone()));
+        known_items.insert(item_id.to_string(), envelope);
+    }
+}
+
 fn conflicting_history_item_ids(items: &[ResponseItemEnvelope]) -> HashSet<String> {
     let mut first_by_id = HashMap::new();
     let mut conflicting = HashSet::new();
@@ -604,6 +759,128 @@ fn conflicting_history_item_ids(items: &[ResponseItemEnvelope]) -> HashSet<Strin
     conflicting
 }
 
+fn conflicting_response_item_ids(
+    items: &[codex_protocol::models::ResponseItem],
+) -> HashSet<String> {
+    let mut first_by_id = HashMap::new();
+    let mut conflicting = HashSet::new();
+    for item in items {
+        if let Some(item_id) = item.id().map(codex_protocol::ResponseItemId::as_str) {
+            match first_by_id.entry(item_id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(item);
+                }
+                std::collections::hash_map::Entry::Occupied(entry) if entry.get() != &item => {
+                    conflicting.insert(item_id.to_string());
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+            }
+        }
+    }
+    conflicting
+}
+
+fn encode_envelopes_with_references(
+    resolved: &[ResponseItemEnvelope],
+    known_items: &HashMap<String, ResponseItemEnvelope>,
+    integrity_bound: bool,
+) -> (
+    Option<Vec<ResponseItemEnvelope>>,
+    Option<Vec<CompactedHistoryEntry>>,
+) {
+    let conflicting_item_ids = conflicting_history_item_ids(resolved);
+    let mut has_reference = false;
+    let entries = resolved
+        .iter()
+        .cloned()
+        .map(|envelope| {
+            let exact_older_item_id = envelope.item.id().and_then(|item_id| {
+                if conflicting_item_ids.contains(item_id.as_str()) {
+                    None
+                } else {
+                    known_items
+                        .get(item_id.as_str())
+                        .filter(|known| *known == &envelope)
+                        .map(|_| item_id.as_str().to_string())
+                }
+            });
+
+            if let Some(item_id) = exact_older_item_id {
+                if integrity_bound {
+                    match CompactedHistoryEntry::reference_v2(item_id, &envelope) {
+                        Ok(reference) => {
+                            has_reference = true;
+                            reference
+                        }
+                        // Durable-projection failure cannot justify a weaker reference.
+                        // Keep the complete envelope inline instead.
+                        Err(_) => CompactedHistoryEntry::from(envelope),
+                    }
+                } else {
+                    has_reference = true;
+                    CompactedHistoryEntry::Reference { item_id }
+                }
+            } else {
+                CompactedHistoryEntry::from(envelope)
+            }
+        })
+        .collect();
+
+    if has_reference {
+        (None, Some(entries))
+    } else {
+        (Some(resolved.to_vec()), None)
+    }
+}
+
+fn encode_guardian_with_references(
+    checkpoint: &crate::GuardianHistoryCheckpoint,
+    known_items: &HashMap<String, ResponseItemEnvelope>,
+    integrity_bound: bool,
+) -> crate::GuardianHistoryCheckpoint {
+    let conflicting_item_ids = conflicting_response_item_ids(&checkpoint.0);
+    let mut has_reference = false;
+    let entries = checkpoint
+        .0
+        .iter()
+        .cloned()
+        .map(|item| {
+            let exact_source = item.id().and_then(|item_id| {
+                if conflicting_item_ids.contains(item_id.as_str()) {
+                    None
+                } else {
+                    known_items
+                        .get(item_id.as_str())
+                        .filter(|source| source.item == item)
+                        .map(|source| (item_id.as_str().to_string(), source))
+                }
+            });
+            if let Some((item_id, source)) = exact_source {
+                if integrity_bound {
+                    match CompactedHistoryEntry::reference_v2(item_id, source) {
+                        Ok(reference) => {
+                            has_reference = true;
+                            reference
+                        }
+                        Err(_) => CompactedHistoryEntry::from(ResponseItemEnvelope::new(item)),
+                    }
+                } else {
+                    has_reference = true;
+                    CompactedHistoryEntry::Reference { item_id }
+                }
+            } else {
+                CompactedHistoryEntry::from(ResponseItemEnvelope::new(item))
+            }
+        })
+        .collect();
+
+    if has_reference {
+        crate::GuardianHistoryCheckpoint::from_entries(entries)
+    } else {
+        checkpoint.clone()
+    }
+}
+
 /// Collects only the newest explicit source for each requested ID.
 ///
 /// The scan runs newest-to-oldest and visits checkpoint contents in reverse storage order. This is
@@ -612,6 +889,21 @@ fn conflicting_history_item_ids(items: &[ResponseItemEnvelope]) -> HashSet<Strin
 fn latest_explicit_sources_for_ids(
     rollout_items: &[RolloutItem],
     requested_item_ids: &HashSet<String>,
+) -> HashMap<String, ResponseItemEnvelope> {
+    latest_sources_for_ids(rollout_items, requested_item_ids, false)
+}
+
+fn latest_guardian_sources_for_ids(
+    rollout_items: &[RolloutItem],
+    requested_item_ids: &HashSet<String>,
+) -> HashMap<String, ResponseItemEnvelope> {
+    latest_sources_for_ids(rollout_items, requested_item_ids, true)
+}
+
+fn latest_sources_for_ids(
+    rollout_items: &[RolloutItem],
+    requested_item_ids: &HashSet<String>,
+    include_guardian_sources: bool,
 ) -> HashMap<String, ResponseItemEnvelope> {
     let mut sources = HashMap::with_capacity(requested_item_ids.len());
     if requested_item_ids.is_empty() {
@@ -624,6 +916,34 @@ fn latest_explicit_sources_for_ids(
                 note_requested_item(&mut sources, requested_item_ids, envelope);
             }
             RolloutItem::Compacted(compacted) => {
+                // Guardian is serialized after replacement history. Visit it first during the
+                // reverse scan so same-ID inline evidence matches chronological indexing.
+                if include_guardian_sources
+                    && let Some(guardian_history) = &compacted.guardian_history
+                {
+                    if let Some(entries) = guardian_history.entries() {
+                        for entry in entries.iter().rev() {
+                            if let CompactedHistoryEntry::Inline { item, metadata } = entry {
+                                note_requested_item(
+                                    &mut sources,
+                                    requested_item_ids,
+                                    &ResponseItemEnvelope {
+                                        item: item.as_ref().clone(),
+                                        metadata: metadata.as_deref().cloned(),
+                                    },
+                                );
+                            }
+                        }
+                    } else {
+                        for item in guardian_history.0.iter().rev() {
+                            note_requested_item(
+                                &mut sources,
+                                requested_item_ids,
+                                &ResponseItemEnvelope::new(item.clone()),
+                            );
+                        }
+                    }
+                }
                 if let Some(replacement_history) = &compacted.replacement_history {
                     for envelope in replacement_history.iter().rev() {
                         note_requested_item(&mut sources, requested_item_ids, envelope);
@@ -643,7 +963,7 @@ fn latest_explicit_sources_for_ids(
                                     item_id.to_string(),
                                     ResponseItemEnvelope {
                                         item: item.as_ref().clone(),
-                                        metadata: metadata.clone(),
+                                        metadata: metadata.as_deref().cloned(),
                                     },
                                 );
                             }
@@ -656,6 +976,7 @@ fn latest_explicit_sources_for_ids(
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::EventMsg(_)
@@ -667,6 +988,17 @@ fn latest_explicit_sources_for_ids(
         }
     }
     sources
+}
+
+fn referenced_item_ids(entries: &[CompactedHistoryEntry]) -> HashSet<String> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            CompactedHistoryEntry::Reference { item_id }
+            | CompactedHistoryEntry::ReferenceV2 { item_id, .. } => Some(item_id.clone()),
+            CompactedHistoryEntry::Inline { .. } => None,
+        })
+        .collect()
 }
 
 fn note_requested_item(
@@ -697,6 +1029,31 @@ fn resolve_compacted_history(
         return Ok(None);
     };
 
+    resolve_history_entries(known_items, entries).map(Some)
+}
+
+fn resolve_guardian_history(
+    known_items: &HashMap<String, ResponseItemEnvelope>,
+    compacted: &crate::CompactedItem,
+) -> Result<Option<crate::GuardianHistoryCheckpoint>, CompactedHistoryReferenceError> {
+    let Some(checkpoint) = &compacted.guardian_history else {
+        return Ok(None);
+    };
+    let Some(entries) = checkpoint.entries() else {
+        return Ok(Some(checkpoint.clone()));
+    };
+
+    let history = resolve_history_entries(known_items, entries)?
+        .into_iter()
+        .map(|envelope| envelope.item)
+        .collect();
+    Ok(Some(crate::GuardianHistoryCheckpoint(history)))
+}
+
+fn resolve_history_entries(
+    known_items: &HashMap<String, ResponseItemEnvelope>,
+    entries: &[CompactedHistoryEntry],
+) -> Result<Vec<ResponseItemEnvelope>, CompactedHistoryReferenceError> {
     let mut history = Vec::with_capacity(entries.len());
     let mut errors = CompactedHistoryReferenceError::empty();
     for entry in entries {
@@ -704,7 +1061,7 @@ fn resolve_compacted_history(
             CompactedHistoryEntry::Inline { item, metadata } => {
                 history.push(ResponseItemEnvelope {
                     item: item.as_ref().clone(),
-                    metadata: metadata.clone(),
+                    metadata: metadata.as_deref().cloned(),
                 });
             }
             CompactedHistoryEntry::Reference { item_id } => {
@@ -737,7 +1094,7 @@ fn resolve_compacted_history(
     }
 
     if errors.is_empty() {
-        Ok(Some(history))
+        Ok(history)
     } else {
         Err(errors.normalized())
     }
@@ -745,14 +1102,36 @@ fn resolve_compacted_history(
 
 fn validate_compacted_history_references(
     known_items: &HashMap<String, ResponseItemEnvelope>,
+    guardian_known_items: &HashMap<String, ResponseItemEnvelope>,
     compacted: &crate::CompactedItem,
 ) -> Result<(), CompactedHistoryReferenceError> {
-    let Some(entries) = &compacted.replacement_history_entries else {
-        return Ok(());
-    };
-
     let mut errors = CompactedHistoryReferenceError::empty();
-    for entry in entries {
+    validate_history_entries(
+        known_items,
+        compacted.replacement_history_entries.as_deref(),
+        &mut errors,
+    );
+    validate_history_entries(
+        guardian_known_items,
+        compacted
+            .guardian_history
+            .as_ref()
+            .and_then(crate::GuardianHistoryCheckpoint::entries),
+        &mut errors,
+    );
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.normalized())
+    }
+}
+
+fn validate_history_entries(
+    known_items: &HashMap<String, ResponseItemEnvelope>,
+    entries: Option<&[CompactedHistoryEntry]>,
+    errors: &mut CompactedHistoryReferenceError,
+) {
+    for entry in entries.into_iter().flatten() {
         match entry {
             CompactedHistoryEntry::Reference { item_id } => {
                 if !known_items.contains_key(item_id) {
@@ -780,10 +1159,5 @@ fn validate_compacted_history_references(
             },
             CompactedHistoryEntry::Inline { .. } => {}
         }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.normalized())
     }
 }

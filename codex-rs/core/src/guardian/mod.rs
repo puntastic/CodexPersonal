@@ -1,5 +1,6 @@
 //! Guardian review decides whether an `on-request` approval should be granted
 //! automatically instead of shown to the user.
+//! Full Access (`never` approvals with a disabled sandbox) approves without review.
 //!
 //! High-level approach:
 //! 1. Reconstruct a compact transcript that preserves user intent plus the most
@@ -17,11 +18,13 @@ mod metrics;
 mod prompt;
 mod review;
 mod review_session;
+mod runtime;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -44,12 +47,14 @@ pub(crate) use approval_request::guardian_approval_request_to_json;
 pub(crate) use prompt::BUNDLED_GUARDIAN_POLICY;
 pub(crate) use prompt::BUNDLED_GUARDIAN_POLICY_TEMPLATE;
 pub(crate) use prompt::guardian_truncate_text;
+pub(crate) use review::GuardianApprovalOutcome;
 pub(crate) use review::GuardianReviewOptions;
 pub(crate) use review::guardian_timeout_message;
 pub(crate) use review::is_basic_session_source;
 pub(crate) use review::new_guardian_review_id;
 #[cfg(test)]
 pub(crate) use review::record_guardian_denial_for_test;
+#[cfg(test)]
 pub(crate) use review::review_approval_request;
 pub(crate) use review::review_approval_request_with_cancel;
 pub(crate) use review::routes_approval_policy_to_guardian;
@@ -78,21 +83,17 @@ const GUARDIAN_RECENT_ENTRY_LIMIT: usize = 40;
 /// Captures review inputs from the issuing step without retaining its MCP bindings or tool router.
 /// Background network approvals and Unix interception use the active task's resolved settings.
 /// Startup reviewer prewarming intentionally uses turn-only inputs because it has no issuing step.
-///
-/// MCP elicitation reviews still use turn-only inputs.
-/// TODO(sayan): See if we can find a way to model those as StepContext as well without holding
-/// step-scoped things past their lifetime (like MCP bindings)
 #[derive(Clone)]
 pub(crate) struct GuardianReviewContext {
+    /// Ticket from the response currently handled in this execution context.
+    pub(crate) guardian_ticket: Option<codex_protocol::guardian_ticket::GuardianTicket>,
     turn: Arc<TurnContext>,
     environments: TurnEnvironmentSnapshot,
-    // Model and reasoning inputs are carried for the follow-up Guardian and V2 migrations.
-    #[expect(dead_code)]
+    // Model and reasoning inputs are pinned to the step that issued the approval.
     pub(crate) model_info: Arc<ModelInfo>,
-    #[expect(dead_code)]
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
-    #[expect(dead_code)]
     pub(crate) reasoning_summary: ReasoningSummary,
+    pub(crate) personality: Option<Personality>,
     pub(crate) approval_policy: AskForApproval,
     pub(crate) approvals_reviewer: ApprovalsReviewer,
 }
@@ -103,10 +104,16 @@ impl GuardianReviewContext {
         settings: &ResolvedStepSettings,
     ) -> Self {
         Self {
+            guardian_ticket: turn
+                .extension_data
+                .get::<codex_protocol::guardian_ticket::GuardianTicket>()
+                .as_deref()
+                .cloned(),
             environments: turn.environments.clone(),
             model_info: Arc::clone(&settings.model_info),
             reasoning_effort: settings.reasoning_effort().cloned(),
             reasoning_summary: settings.reasoning_summary,
+            personality: settings.personality(),
             approval_policy: settings.approval_policy(),
             approvals_reviewer: settings.approvals_reviewer(),
             turn,
@@ -125,11 +132,18 @@ impl GuardianReviewContext {
 impl From<&Arc<StepContext>> for GuardianReviewContext {
     fn from(step: &Arc<StepContext>) -> Self {
         Self {
+            guardian_ticket: step
+                .turn
+                .extension_data
+                .get::<codex_protocol::guardian_ticket::GuardianTicket>()
+                .as_deref()
+                .cloned(),
             turn: Arc::clone(&step.turn),
             environments: step.environments.clone(),
             model_info: Arc::clone(&step.settings.model_info),
             reasoning_effort: step.settings.reasoning_effort().cloned(),
             reasoning_summary: step.settings.reasoning_summary,
+            personality: step.settings.personality(),
             approval_policy: step.settings.approval_policy(),
             approvals_reviewer: step.settings.approvals_reviewer(),
         }
@@ -139,10 +153,16 @@ impl From<&Arc<StepContext>> for GuardianReviewContext {
 impl From<Arc<TurnContext>> for GuardianReviewContext {
     fn from(turn: Arc<TurnContext>) -> Self {
         Self {
+            guardian_ticket: turn
+                .extension_data
+                .get::<codex_protocol::guardian_ticket::GuardianTicket>()
+                .as_deref()
+                .cloned(),
             environments: turn.environments.clone(),
             model_info: Arc::clone(turn.model_info()),
             reasoning_effort: turn.reasoning_effort().cloned(),
             reasoning_summary: turn.reasoning_summary(),
+            personality: turn.personality(),
             approval_policy: turn.approval_policy(),
             approvals_reviewer: turn.config.approvals_reviewer,
             turn,
@@ -269,8 +289,6 @@ use prompt::GuardianTranscriptCursor;
 use prompt::build_guardian_prompt_items;
 #[cfg(test)]
 use prompt::build_guardian_prompt_items_with_parent_turn;
-#[cfg(test)]
-use prompt::collect_guardian_transcript_entries;
 #[cfg(test)]
 use prompt::guardian_output_schema;
 #[cfg(test)]

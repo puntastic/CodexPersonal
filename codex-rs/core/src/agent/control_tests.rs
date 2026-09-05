@@ -23,7 +23,6 @@ use codex_features::Feature;
 use codex_history::CompactedHistoryEntry;
 use codex_history::CompactedItem;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
@@ -138,6 +137,8 @@ fn fork_source_demand_excludes_truncated_and_superseded_checkpoint_references() 
             replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
                 item_id: item_id.to_string(),
             }]),
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -308,6 +309,7 @@ async fn persisted_originator(thread: &CodexThread) -> String {
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::TurnContext(_) => None,
@@ -1292,7 +1294,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
     let lines = std::fs::read_to_string(&rollout_path)
         .expect("read child rollout")
         .lines()
-        .map(|line| serde_json::from_str::<RolloutLine>(line).expect("parse rollout line"))
+        .map(|line| codex_rollout::parse_rollout_line(line).expect("parse rollout line"))
         .collect::<Vec<_>>();
     let RolloutItem::SessionMeta(meta_line) = &lines[0].item else {
         panic!("child rollout should start with session metadata");
@@ -1442,6 +1444,8 @@ async fn spawn_agent_fork_drops_inherited_token_usage_state() {
                 message: String::new(),
                 replacement_history: Some(vec![user_message("compacted parent context").into()]),
                 replacement_history_entries: None,
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -1495,7 +1499,7 @@ async fn spawn_agent_fork_drops_inherited_token_usage_state() {
     let lines = std::fs::read_to_string(&rollout_path)
         .expect("read child rollout")
         .lines()
-        .map(|line| serde_json::from_str::<RolloutLine>(line).expect("parse rollout line"))
+        .map(|line| codex_rollout::parse_rollout_line(line).expect("parse rollout line"))
         .collect::<Vec<_>>();
     assert!(
         !lines.iter().any(|line| {
@@ -1558,6 +1562,8 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
                     .into(),
                 ]),
                 replacement_history_entries: None,
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -1666,6 +1672,8 @@ async fn spawn_agent_last_n_fork_inlines_truncated_compaction_sources_without_da
                         item_id: retained_item_id.to_string(),
                     },
                 ]),
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -1714,7 +1722,7 @@ async fn spawn_agent_last_n_fork_inlines_truncated_compaction_sources_without_da
         .expect("read child rollout")
         .lines()
         .map(|line| {
-            serde_json::from_str::<RolloutLine>(line)
+            codex_rollout::parse_rollout_line(line)
                 .expect("parse child rollout line")
                 .item
         })
@@ -2147,10 +2155,18 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .expect("parent shutdown should submit");
 }
 
+#[test_case::test_case(true; "thread context enabled")]
+#[test_case::test_case(false; "thread context disabled")]
 #[tokio::test]
-async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
+async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(
+    thread_context_enabled: bool,
+) {
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
+    parent_config
+        .features
+        .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
+        .expect("test context mode");
     let _ = parent_config.features.enable(Feature::MultiAgentV2);
     parent_config.developer_instructions = Some("Parent developer instructions.".to_string());
     parent_config.multi_agent_v2.root_agent_usage_hint_text =
@@ -2158,6 +2174,10 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
     parent_config.multi_agent_v2.subagent_usage_hint_text =
         Some("Parent subagent guidance.".to_string());
     let mut child_config = harness.config.clone();
+    child_config
+        .features
+        .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
+        .expect("test context mode");
     let _ = child_config.features.enable(Feature::MultiAgentV2);
     child_config.developer_instructions = Some("Child developer instructions.".to_string());
     child_config.multi_agent_v2.subagent_developer_instructions =
@@ -2183,6 +2203,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
         /*trigger_turn*/ true,
     );
     let replacement_history = vec![
+        ContextualUserFragment::into(crate::context::GuardianApprovedAction::new("parent-private-release".to_owned())),
         ResponseItem::Message {
             id: None,
             role: "user".to_string(),
@@ -2225,6 +2246,12 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
             internal_chat_message_metadata_passthrough: None,
         },
     ];
+    let answer_event: codex_history::RetainedContextEvent = serde_json::from_value(serde_json::json!({
+        "type": "verified_answer", "turn_id": "parent-answer-turn", "call_id": "parent-answer-call",
+        "questions": [{"question": "Parent-local action?", "answer": "Parent only."}]
+    })).expect("verified answer fixture");
+    let mut retained_context = codex_history::RetainedContext::default();
+    retained_context.record(&answer_event);
     parent_thread
         .session
         .persist_rollout_items(&[
@@ -2234,6 +2261,10 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
                     replacement_history.into_iter().map(Into::into).collect(),
                 ),
                 replacement_history_entries: None,
+                retained_context: Some(retained_context),
+                guardian_history: Some(codex_history::GuardianHistoryCheckpoint(vec![
+                    user_message("Parent-local approval must not be inherited."),
+                ])),
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -2242,6 +2273,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
                 compaction_response_id: None,
                 latest_token_usage_record: None,
             }),
+            RolloutItem::RetainedContext(answer_event),
             RolloutItem::TurnContext(turn_context.to_turn_context_item()),
             rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
         ])
@@ -2290,6 +2322,26 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
         .await
         .expect("child thread should be registered");
     let history = child_thread.session.clone_history().await;
+    assert!(
+        !history_contains_text(
+            history.conversation_history_snapshot().review_items(),
+            "Parent-local approval must not be inherited.",
+        ),
+        "a subagent must not inherit its parent review checkpoint",
+    );
+    assert_eq!(
+        history_contains_text(history.raw_items(), "parent-private-release"),
+        !thread_context_enabled,
+        "only retained mode changes parent approval inheritance",
+    );
+    let mut inherited_context = codex_history::RetainedContext::default();
+    if thread_context_enabled {
+        inherited_context.restore(/*checkpoint*/ None);
+        inherited_context.reserve_order();
+    } else {
+        inherited_context.mark_user_messages_incomplete();
+    }
+    assert_eq!(history.retained_context(), &inherited_context);
     assert!(
         history_contains_text(history.raw_items(), "compacted parent summary"),
         "forked child history should retain compacted non-hint content"
@@ -2366,7 +2418,7 @@ async fn spawn_agent_full_fork_reencodes_sanitized_entry_history_without_danglin
     let new_thread = harness
         .manager
         .start_thread(StartThreadOptions {
-            history_mode: Some(ThreadHistoryMode::PaginatedRefsV1),
+            history_mode: Some(ThreadHistoryMode::PaginatedRefsV2),
             environments: Some(Vec::new()),
             ..StartThreadOptions::new(parent_config)
         })
@@ -2416,6 +2468,16 @@ async fn spawn_agent_full_fork_reencodes_sanitized_entry_history_without_danglin
             ..Default::default()
         }),
     };
+    let parent_answer_event: codex_history::RetainedContextEvent =
+        serde_json::from_value(serde_json::json!({
+            "type": "verified_answer",
+            "turn_id": "entry-backed-parent-turn",
+            "call_id": "entry-backed-parent-call",
+            "questions": [{"question": "Parent-only action?", "answer": "Parent only."}]
+        }))
+        .expect("verified answer fixture");
+    let mut parent_retained_context = codex_history::RetainedContext::default();
+    assert!(parent_retained_context.record(&parent_answer_event));
     let parent_spawn_call_id = "spawn-call-sanitized-entry-history".to_string();
     let turn_context = parent_thread.session.new_default_turn().await;
     parent_thread
@@ -2438,6 +2500,10 @@ async fn spawn_agent_full_fork_reencodes_sanitized_entry_history_without_danglin
                         item_id: rewritten_developer_id.to_string(),
                     },
                 ]),
+                retained_context: Some(parent_retained_context),
+                guardian_history: Some(codex_history::GuardianHistoryCheckpoint(vec![
+                    user_message("Entry-backed parent approval must not be inherited."),
+                ])),
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -2446,6 +2512,7 @@ async fn spawn_agent_full_fork_reencodes_sanitized_entry_history_without_danglin
                 compaction_response_id: None,
                 latest_token_usage_record: None,
             }),
+            RolloutItem::RetainedContext(parent_answer_event),
             RolloutItem::TurnContext(turn_context.to_turn_context_item()),
             rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
         ])
@@ -2498,7 +2565,7 @@ async fn spawn_agent_full_fork_reencodes_sanitized_entry_history_without_danglin
         .expect("read child rollout")
         .lines()
         .map(|line| {
-            serde_json::from_str::<RolloutLine>(line)
+            codex_rollout::parse_rollout_line(line)
                 .expect("parse child rollout line")
                 .item
         })
@@ -2510,6 +2577,14 @@ async fn spawn_agent_full_fork_reencodes_sanitized_entry_history_without_danglin
             _ => None,
         })
         .expect("child rollout should retain the compacted checkpoint");
+    assert!(checkpoint.retained_context.is_none());
+    assert!(checkpoint.guardian_history.is_none());
+    assert!(
+        child_rollout_items
+            .iter()
+            .all(|item| !matches!(item, RolloutItem::RetainedContext(_))),
+        "child rollout must not retain parent-local authorization events"
+    );
     let entries = checkpoint
         .replacement_history_entries
         .as_ref()
@@ -2517,9 +2592,13 @@ async fn spawn_agent_full_fork_reencodes_sanitized_entry_history_without_danglin
     assert_matches!(
         entries.as_slice(),
         [
-            CompactedHistoryEntry::Reference { item_id: user_id },
-            CompactedHistoryEntry::Reference {
-                item_id: developer_id
+            CompactedHistoryEntry::ReferenceV2 {
+                item_id: user_id,
+                ..
+            },
+            CompactedHistoryEntry::ReferenceV2 {
+                item_id: developer_id,
+                ..
             }
         ] if user_id.as_str() == retained_user_id.as_ref()
             && developer_id.as_str() == rewritten_developer_id.as_ref()
@@ -2650,6 +2729,8 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                     replacement_history.into_iter().map(Into::into).collect(),
                 ),
                 replacement_history_entries: None,
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -2806,6 +2887,8 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                 message: "legacy compacted summary".to_string(),
                 replacement_history: None,
                 replacement_history_entries: None,
+                retained_context: None,
+                guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
                 first_window_id: None,
@@ -4053,6 +4136,7 @@ async fn resume_thread_subagent_restores_stored_metadata() {
         empty_extension_registry(),
         Arc::new(crate::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
+        crate::thread_manager::passthrough_image_store(),
         thread_store.clone(),
         /*agent_graph_store*/ None,
         uuid::Uuid::new_v4().to_string(),

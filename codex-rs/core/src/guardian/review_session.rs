@@ -193,7 +193,11 @@ struct GuardianReviewForkSnapshot {
 struct GuardianReviewSessionReuseKey {
     // Only include settings that affect spawned-session behavior and parent
     // history rewrites that invalidate existing reviewer context.
+    // Rotates a reviewer onto an available opaque parent checkpoint.
     parent_history_version: u64,
+    // Prevents reuse when rollback, reset, or eviction changed review evidence.
+    review_history_version: u64,
+    root_authorization_version: Option<crate::codex_thread::GuardianAuthorizationVersion>,
     node_repl_auto_review_required: bool,
     node_repl_policy: String,
     model: Option<String>,
@@ -223,13 +227,20 @@ impl GuardianReviewSessionReuseKey {
         spawn_config: &Config,
         user_instructions: Option<Instructions>,
         parent_history_version: u64,
+        review_history_version: u64,
     ) -> Self {
+        let tracks_parent_compaction = spawn_config
+            .features
+            .enabled(Feature::GuardianReuseParentCompaction);
         Self {
-            parent_history_version: if spawn_config
-                .features
-                .enabled(Feature::GuardianReuseParentCompaction)
-            {
+            root_authorization_version: None,
+            parent_history_version: if tracks_parent_compaction {
                 parent_history_version
+            } else {
+                0
+            },
+            review_history_version: if tracks_parent_compaction {
+                review_history_version
             } else {
                 0
             },
@@ -255,6 +266,12 @@ impl GuardianReviewSessionReuseKey {
             zsh_path: spawn_config.zsh_path.clone(),
             features: spawn_config.features.clone(),
             environment_ids: Vec::new(),
+        }
+    }
+
+    fn align_summary_free_parent_history(&mut self, cached: &Self) {
+        if self.review_history_version == cached.review_history_version {
+            self.parent_history_version = cached.parent_history_version;
         }
     }
 
@@ -429,29 +446,39 @@ impl GuardianReviewSessionManager {
     ) -> BoxFuture<'_, anyhow::Result<()>> {
         // Boxing breaks the Session::new -> Guardian -> Session::new future recursion.
         Box::pin(async move {
+            let parent_context = GuardianReviewContext::from(parent_turn);
             let session_config =
-                guardian_review_session_config(&parent_session, &parent_turn).await?;
+                guardian_review_session_config(&parent_session, &parent_context).await?;
             let spawn_config = session_config.spawn_config;
             let parent_history = parent_session.clone_history().await;
+            let root_authorization_version =
+                if parent_session.enabled(Feature::GuardianThreadContext) {
+                    parent_session
+                        .services
+                        .agent_control
+                        .root_user_authorization(parent_session.thread_id)
+                        .await
+                        .map(|snapshot| snapshot.authorization_version)
+                } else {
+                    None
+                };
             let parent_compaction = spawn_config
                 .features
                 .enabled(Feature::GuardianReuseParentCompaction)
                 .then(|| encrypted_parent_compaction(parent_history.raw_items()))
                 .flatten();
-            let parent_context = GuardianReviewContext::from(parent_turn);
-            let reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
+            let mut reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
                 &spawn_config,
                 parent_session.user_instructions().await,
                 parent_history.history_version(),
+                parent_history.review_history_version(),
             )
             .with_environments(parent_context.environments())
             .with_node_repl_policy_eligibility(
-                parent_context
-                    .turn()
-                    .model_info()
-                    .node_repl_auto_review_required,
+                parent_context.model_info.node_repl_auto_review_required,
             )
             .with_node_repl_policy(&session_config.node_repl_policy);
+            reuse_key.root_authorization_version = root_authorization_version;
             let spawn_cancel_token = self.cancellation_token.child_token();
             let spawn_cancel_guard = spawn_cancel_token.clone().drop_guard();
             let review_session = spawn_guardian_review_session(
@@ -523,6 +550,20 @@ impl GuardianReviewSessionManager {
     ) -> (GuardianReviewSessionOutcome, GuardianReviewAnalyticsResult) {
         let deadline = params.deadline;
         let parent_history = params.parent_session.clone_history().await;
+        let root_authorization_version = if params
+            .parent_session
+            .enabled(Feature::GuardianThreadContext)
+        {
+            params
+                .parent_session
+                .services
+                .agent_control
+                .root_user_authorization(params.parent_session.thread_id)
+                .await
+                .map(|snapshot| snapshot.authorization_version)
+        } else {
+            None
+        };
         let parent_compaction = params
             .spawn_config
             .features
@@ -533,16 +574,17 @@ impl GuardianReviewSessionManager {
             &params.spawn_config,
             params.parent_session.user_instructions().await,
             parent_history.history_version(),
+            parent_history.review_history_version(),
         )
         .with_environments(params.parent_context.environments())
         .with_node_repl_policy_eligibility(
             params
                 .parent_context
-                .turn()
-                .model_info()
+                .model_info
                 .node_repl_auto_review_required,
         )
         .with_node_repl_policy(&params.node_repl_policy);
+        next_reuse_key.root_authorization_version = root_authorization_version;
         let mut spawned_trunk = false;
         let trunk_candidate = match run_before_review_deadline(
             deadline,
@@ -555,9 +597,10 @@ impl GuardianReviewSessionManager {
                 if parent_compaction.is_none()
                     && let Some(trunk) = state.trunk.as_ref()
                 {
-                    // Without a decryptable summary, the existing reviewer may
-                    // hold the only remaining authorization or restriction.
-                    next_reuse_key.parent_history_version = trunk.reuse_key.parent_history_version;
+                    // A model-only compaction without a decryptable checkpoint may reuse the
+                    // existing reviewer, but only while its retained review evidence is the
+                    // same generation. Rollback, reset, and eviction advance that generation.
+                    next_reuse_key.align_summary_free_parent_history(&trunk.reuse_key);
                 }
                 if let Some(trunk) = state.trunk.as_ref()
                     && trunk.reuse_key != next_reuse_key
@@ -671,10 +714,12 @@ impl GuardianReviewSessionManager {
 
     #[cfg(test)]
     pub(crate) async fn cache_for_test(&self, session: Arc<Session>, io: SessionIo) {
+        let history = session.clone_history().await;
         let reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
             session.get_config().await.as_ref(),
             session.user_instructions().await,
-            session.clone_history().await.history_version(),
+            history.history_version(),
+            history.review_history_version(),
         );
         self.state.lock().await.trunk = Some(Arc::new(GuardianReviewSession {
             reuse_key,
@@ -694,10 +739,12 @@ impl GuardianReviewSessionManager {
 
     #[cfg(test)]
     pub(crate) async fn register_ephemeral_for_test(&self, session: Arc<Session>, io: SessionIo) {
+        let history = session.clone_history().await;
         let reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
             session.get_config().await.as_ref(),
             session.user_instructions().await,
-            session.clone_history().await.history_version(),
+            history.history_version(),
+            history.review_history_version(),
         );
         self.state
             .lock()
@@ -1226,6 +1273,7 @@ async fn run_review_on_session(
                 ..Default::default()
             })
             .on_start(TurnStartOptions {
+                guardian_ticket: params.parent_context.guardian_ticket.clone(),
                 final_output_json_schema: Some(params.schema.clone()),
                 service_tier: None,
                 parent_turn_id: Some(parent_turn.sub_id.clone()),
@@ -1329,8 +1377,7 @@ async fn ensure_guardian_node_repl_policy(
 ) -> anyhow::Result<()> {
     if !params
         .parent_context
-        .turn()
-        .model_info()
+        .model_info
         .node_repl_auto_review_required
         || !matches!(
             &params.request,

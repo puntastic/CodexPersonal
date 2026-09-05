@@ -27,6 +27,7 @@ use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TokenUsageRecord;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_output_truncation::TruncationPolicy;
+use tokio_util::task::AbortOnDropHandle;
 
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
@@ -39,6 +40,12 @@ pub(crate) struct SessionState {
     /// IDs alone are insufficient because a provider can reuse an ID for a changed envelope. Keep
     /// the exact durable value so a failed update can never make a stale source referenceable.
     persisted_history_items: HashMap<String, ResponseItemEnvelope>,
+    /// Independent durable sources for the bounded Guardian review-history window.
+    ///
+    /// Guardian checkpoints consume response items without harness metadata and can outlive the
+    /// model replacement window. Keeping a separate map prevents either projection from
+    /// overwriting an exact same-ID source needed by the other.
+    persisted_guardian_history_items: HashMap<String, ResponseItemEnvelope>,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
     pub(crate) server_reasoning_included: bool,
@@ -52,6 +59,8 @@ pub(crate) struct SessionState {
     auto_compact_window: AutoCompactWindow,
     /// Startup prewarmed session prepared during session initialization.
     pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
+    /// Retained after completion so later turns do not repeat speculative captures.
+    pub(crate) shell_snapshot_prewarm: Option<AbortOnDropHandle<()>>,
     pub(crate) current_time_reminder: CurrentTimeReminderState,
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) pending_session_start_sources: VecDeque<codex_hooks::SessionStartSource>,
@@ -79,6 +88,7 @@ impl SessionState {
             base_instructions_provenance: None,
             history,
             persisted_history_items: HashMap::new(),
+            persisted_guardian_history_items: HashMap::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
             server_reasoning_included: false,
@@ -87,6 +97,7 @@ impl SessionState {
             previous_turn_settings: None,
             auto_compact_window: AutoCompactWindow::new_with_ids(auto_compact_window_ids),
             startup_prewarm: None,
+            shell_snapshot_prewarm: None,
             current_time_reminder: CurrentTimeReminderState::default(),
             active_connector_selection: HashSet::new(),
             pending_session_start_sources: VecDeque::new(),
@@ -132,6 +143,12 @@ impl SessionState {
         &self.persisted_history_items
     }
 
+    pub(crate) fn persisted_guardian_history_items(
+        &self,
+    ) -> &HashMap<String, ResponseItemEnvelope> {
+        &self.persisted_guardian_history_items
+    }
+
     pub(crate) fn note_persisted_history_items(
         &mut self,
         items: impl IntoIterator<Item = ResponseItemEnvelope>,
@@ -139,6 +156,8 @@ impl SessionState {
         for envelope in items {
             if let Some(item_id) = envelope.item.id() {
                 self.persisted_history_items
+                    .insert(item_id.as_str().to_string(), envelope.clone());
+                self.persisted_guardian_history_items
                     .insert(item_id.as_str().to_string(), envelope);
             }
         }
@@ -149,11 +168,35 @@ impl SessionState {
         items: impl IntoIterator<Item = ResponseItemEnvelope>,
     ) {
         self.persisted_history_items.clear();
-        self.note_persisted_history_items(items);
+        for envelope in items {
+            if let Some(item_id) = envelope.item.id() {
+                self.persisted_history_items
+                    .insert(item_id.as_str().to_string(), envelope);
+            }
+        }
+    }
+
+    pub(crate) fn replace_persisted_guardian_history_items(
+        &mut self,
+        items: impl IntoIterator<Item = ResponseItemEnvelope>,
+    ) {
+        self.persisted_guardian_history_items.clear();
+        for envelope in items {
+            if let Some(item_id) = envelope.item.id() {
+                self.persisted_guardian_history_items
+                    .insert(item_id.as_str().to_string(), envelope);
+            }
+        }
     }
 
     pub(crate) fn take_persisted_history_items(&mut self) -> Vec<ResponseItemEnvelope> {
         std::mem::take(&mut self.persisted_history_items)
+            .into_values()
+            .collect()
+    }
+
+    pub(crate) fn take_persisted_guardian_history_items(&mut self) -> Vec<ResponseItemEnvelope> {
+        std::mem::take(&mut self.persisted_guardian_history_items)
             .into_values()
             .collect()
     }

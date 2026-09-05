@@ -1159,10 +1159,11 @@ async fn turn_start_tracks_thread_originator_in_analytics() -> Result<()> {
                     url: TINY_PNG_DATA_URL.to_string(),
                     detail: None,
                 }],
-                responsesapi_client_metadata: Some(HashMap::from([(
-                    "workspace_kind".to_string(),
-                    "projectless".to_string(),
-                )])),
+                turn_trigger: Some("user".to_string()),
+                responsesapi_client_metadata: Some(HashMap::from([
+                    ("workspace_kind".to_string(), "projectless".to_string()),
+                    ("source".to_string(), "composer".to_string()),
+                ])),
                 ..Default::default()
             },
         })
@@ -1179,6 +1180,26 @@ async fn turn_start_tracks_thread_originator_in_analytics() -> Result<()> {
     assert_eq!(event["event_params"]["session_id"], thread.session_id);
     assert_eq!(event["event_params"]["turn_id"], turn.id);
     assert_eq!(event["event_params"]["root_turn_id"], turn.id);
+    let request = response_mock.requests()[0].body_json();
+    let request_metadata: Value = serde_json::from_str(
+        request["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .context("expected turn metadata")?,
+    )?;
+    assert_eq!(
+        json!({
+            "eventTrigger": event["event_params"]["turn_trigger"],
+            "eventSource": event["event_params"]["codex_turn_source"],
+            "requestTrigger": request_metadata["turn_trigger"],
+            "requestSource": request_metadata["source"],
+        }),
+        json!({
+            "eventTrigger": "user",
+            "eventSource": "composer",
+            "requestTrigger": "user",
+            "requestSource": "composer",
+        })
+    );
     assert_eq!(
         event["event_params"]["app_server_client"]["product_client_id"],
         "codex_work_desktop"
@@ -4303,7 +4324,6 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
     MockResponsesConfig::new(&server.uri())
         .enable_feature(Feature::MultiAgentV2)
         .enable_feature(Feature::Goals)
-        .enable_feature(Feature::RealtimeConversation)
         .with_root_config(&format!("chatgpt_base_url = \"{}\"", server.uri()))
         .write(codex_home.path())?;
     write_models_cache(codex_home.path())?;
@@ -4362,6 +4382,7 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
         .request(|request_id| ClientRequest::ThreadList {
             request_id,
             params: codex_app_server_protocol::ThreadListParams {
+                originators: None,
                 cursor: None,
                 limit: Some(10),
                 sort_key: None,

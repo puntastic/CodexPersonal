@@ -14,9 +14,13 @@ use crate::guardian::prompt::guardian_policy_prompt_with_config_and_template;
 use crate::guardian::review::guardian_review_session_config;
 use crate::guardian::review::routes_approval_to_guardian_with_reviewer;
 use crate::session::session::Session;
+use crate::session::tests::update_selected_settings_for_test;
 use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::TurnContext;
 use crate::test_support;
+use crate::tools::ApprovalContext;
+use crate::tools::hook_names::HookToolName;
+use crate::tools::sandboxing::ApprovalAction;
 use codex_analytics::GuardianApprovalRequestSource;
 use codex_config::ConfigLayerStack;
 use codex_config::FeatureRequirementsToml;
@@ -26,6 +30,7 @@ use codex_config::NetworkDomainPermissionsToml;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
 use codex_config::config_toml::ConfigToml;
+use codex_config::types::AppToolApproval;
 use codex_config::types::McpServerConfig;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
@@ -43,11 +48,14 @@ use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentAction;
 use codex_protocol::approvals::NetworkApprovalProtocol;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::Personality;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::SandboxPermissions;
+use codex_protocol::openai_models::GuardianScope;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -64,6 +72,7 @@ use codex_protocol::protocol::GuardianRiskLevel;
 use codex_protocol::protocol::GuardianUserAuthorization;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_tools::ToolName;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::TempDirExt;
@@ -90,6 +99,7 @@ use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -102,6 +112,31 @@ fn fixed_guardian_parent_session_id() -> ThreadId {
 const GUARDIAN_MEMORY_CONTEXT_PROBE: &str = "guardian memory context probe";
 const GUARDIAN_SKILL_NAME: &str = "guardian-context-probe";
 const GUARDIAN_SKILL_BODY_PROBE: &str = "guardian skill body probe";
+
+struct AskUserReviewContributor {
+    observed: Arc<Mutex<Vec<(GuardianScope, bool, bool)>>>,
+    expected_model: Option<String>,
+}
+
+impl codex_extension_api::ApprovalReviewContributor for AskUserReviewContributor {
+    fn decide<'a>(
+        &'a self,
+        input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
+    ) -> codex_extension_api::ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>>
+    {
+        Box::pin(async move {
+            if let Some(expected_model) = self.expected_model.as_deref() {
+                assert_eq!(input.model_info.slug, expected_model);
+            }
+            self.observed.lock().expect("observed approvals").push((
+                input.category,
+                input.require_guardian,
+                input.require_fresh_review,
+            ));
+            Some(codex_extension_api::ApprovalDecision::AskUser)
+        })
+    }
+}
 
 // The memories extension depends on codex-core, so this probe verifies the nested Guardian config
 // at request assembly without introducing a circular test dependency.
@@ -334,6 +369,99 @@ fn guardian_exec_command_request(id: &str) -> GuardianApprovalRequest {
         additional_permissions: None,
         justification: Some("Need to push the reviewed docs fix.".to_string()),
         tty: false,
+    }
+}
+
+#[test]
+fn guardian_requests_map_to_exact_model_policy_scopes() {
+    let cwd = test_path_buf("/repo/codex-rs/core").abs();
+    let path_uri = PathUri::from_abs_path(&cwd);
+    let cases = [
+        (guardian_exec_command_request("exec"), GuardianScope::Shell),
+        (
+            GuardianApprovalRequest::WriteStdin {
+                id: "stdin".to_string(),
+                approval_id: "approval".to_string(),
+                environment_id: "local".to_string(),
+                process_id: 7,
+                input: "y".to_string(),
+                cwd: path_uri,
+                tty: true,
+                sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
+                additional_permissions: None,
+            },
+            GuardianScope::Shell,
+        ),
+        (
+            GuardianApprovalRequest::ApplyPatch {
+                id: "patch".to_string(),
+                cwd: cwd.clone(),
+                files: vec![cwd.join("README.md")],
+                patch: "*** Begin Patch\n*** End Patch".to_string(),
+            },
+            GuardianScope::FileChanges,
+        ),
+        (
+            GuardianApprovalRequest::NetworkAccess {
+                id: "network".to_string(),
+                turn_id: "turn".to_string(),
+                target: "https://example.com".to_string(),
+                host: "example.com".to_string(),
+                protocol: NetworkApprovalProtocol::Https,
+                port: 443,
+                trigger: None,
+            },
+            GuardianScope::Network,
+        ),
+        (
+            GuardianApprovalRequest::McpToolCall {
+                id: "cua".to_string(),
+                server: "node_repl".to_string(),
+                tool_name: "js".to_string(),
+                arguments: None,
+                connector_id: None,
+                connector_name: None,
+                connector_description: None,
+                connected_account_email: None,
+                tool_title: None,
+                tool_description: None,
+                annotations: None,
+            },
+            GuardianScope::ComputerUse,
+        ),
+        (
+            GuardianApprovalRequest::McpToolCall {
+                id: "mcp".to_string(),
+                server: "ordinary".to_string(),
+                tool_name: "write".to_string(),
+                arguments: None,
+                connector_id: None,
+                connector_name: None,
+                connector_description: None,
+                connected_account_email: None,
+                tool_title: None,
+                tool_description: None,
+                annotations: None,
+            },
+            GuardianScope::Mcp,
+        ),
+        (
+            GuardianApprovalRequest::RequestPermissions {
+                id: "permissions".to_string(),
+                turn_id: "turn".to_string(),
+                reason: None,
+                permissions: Default::default(),
+            },
+            GuardianScope::Permissions,
+        ),
+    ];
+
+    for (request, expected) in cases {
+        assert_eq!(
+            crate::guardian::review::guardian_scope(&request),
+            expected,
+            "wrong scope for {request:?}"
+        );
     }
 }
 
@@ -955,6 +1083,15 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
     assert_eq!(prompt.transcript_cursor.transcript_entry_count, 4);
 
     Ok(())
+}
+
+fn collect_guardian_transcript_entries(
+    history: &dyn codex_guardian_context::SectionHistory,
+    node_repl_result_token_limit: usize,
+) -> Vec<ConversationTranscriptEntry> {
+    prompt::collect_guardian_context(history, node_repl_result_token_limit, &[], &[])
+        .expect("collect Guardian context")
+        .transcript
 }
 
 #[test]
@@ -1644,12 +1781,16 @@ async fn cancelled_guardian_review_emits_terminal_abort_without_warning() {
             plugin_attribution_override: None,
             approval_request_source: GuardianApprovalRequestSource::MainTurn,
             external_cancel: Some(cancel_token),
+            require_guardian: false,
             require_synchronous_review: false,
         },
     )
     .await;
 
-    assert_eq!(decision, ReviewDecision::Abort);
+    assert_eq!(
+        decision,
+        GuardianApprovalOutcome::Decision(ReviewDecision::Abort)
+    );
 
     let mut guardian_statuses = Vec::new();
     let mut warnings = Vec::new();
@@ -3025,7 +3166,7 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     )
     .await;
 
-    let ReviewDecision::Denied { rejection } = decision else {
+    let GuardianApprovalOutcome::Decision(ReviewDecision::Denied { rejection }) = decision else {
         panic!("guardian error should deny the approval");
     };
     assert_eq!(request_log.requests().len(), 1);
@@ -3153,7 +3294,10 @@ async fn guardian_review_does_not_retry_missing_assessment_payload() -> anyhow::
     )
     .await;
 
-    assert!(matches!(decision, ReviewDecision::Denied { .. }));
+    assert!(matches!(
+        decision,
+        GuardianApprovalOutcome::Decision(ReviewDecision::Denied { .. })
+    ));
     assert_eq!(request_log.requests().len(), 1);
     Ok(())
 }
@@ -3257,7 +3401,10 @@ async fn guardian_review_exhausts_three_failures_with_one_terminal_event() -> an
     )
     .await;
 
-    assert!(matches!(decision, ReviewDecision::Denied { .. }));
+    assert!(matches!(
+        decision,
+        GuardianApprovalOutcome::Decision(ReviewDecision::Denied { .. })
+    ));
     assert_eq!(request_log.requests().len(), 3);
     let mut statuses = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -3308,7 +3455,10 @@ async fn guardian_review_does_not_retry_valid_denial() -> anyhow::Result<()> {
     )
     .await;
 
-    assert!(matches!(decision, ReviewDecision::Denied { .. }));
+    assert!(matches!(
+        decision,
+        GuardianApprovalOutcome::Decision(ReviewDecision::Denied { .. })
+    ));
     assert_eq!(request_log.requests().len(), 1);
     Ok(())
 }
@@ -3352,7 +3502,8 @@ async fn guardian_review_closes_lane_and_rejects_next_request_without_review() -
             ApprovalRequestReasons::default(),
         )
         .await;
-        let ReviewDecision::Denied { rejection } = decision else {
+        let GuardianApprovalOutcome::Decision(ReviewDecision::Denied { rejection }) = decision
+        else {
             panic!("Guardian should deny review {id}: {decision:?}");
         };
         denial_rejections.push(rejection);
@@ -3372,7 +3523,7 @@ async fn guardian_review_closes_lane_and_rejects_next_request_without_review() -
         ApprovalRequestReasons::default(),
     )
     .await;
-    let ReviewDecision::Denied { rejection } = fourth else {
+    let GuardianApprovalOutcome::Decision(ReviewDecision::Denied { rejection }) = fourth else {
         panic!("closed approval lane should deny without review: {fourth:?}");
     };
     assert!(rejection.contains("closed for the remainder of this turn"));
@@ -3424,6 +3575,250 @@ async fn guardian_review_closes_lane_and_rejects_next_request_without_review() -
     Ok(())
 }
 
+#[tokio::test]
+async fn full_access_approves_with_closed_guardian_lane_without_mutating_breaker() {
+    let (session, mut turn) =
+        guardian_test_session_and_turn_with_base_url("http://localhost").await;
+    let turn_id = turn.sub_id.to_string();
+    {
+        let mut breaker = session
+            .services
+            .guardian_rejection_circuit_breaker
+            .lock()
+            .await;
+        for _ in 0..3 {
+            breaker.record_denial(&turn_id, GuardianRejectionCircuitBreakerPolicy::Standard);
+        }
+        assert!(breaker.should_reject_without_review(&turn_id));
+    }
+
+    let turn_mut = Arc::get_mut(&mut turn).expect("turn should be unique");
+    let config = Arc::make_mut(&mut turn_mut.config);
+    config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("full access permission profile should be allowed");
+    let TurnEnvironmentState::Ready(environment) = &mut turn_mut.environments.environments[0]
+    else {
+        panic!("parent environment should be ready");
+    };
+    environment.config_mut().permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::Disabled);
+
+    let breaker_before = {
+        let breaker = session
+            .services
+            .guardian_rejection_circuit_breaker
+            .lock()
+            .await;
+        let state = breaker
+            .turns
+            .get(&turn_id)
+            .expect("closed turn should remain recorded");
+        (
+            state.consecutive_denials,
+            state.recent_denials.clone(),
+            state.approval_lane_closed,
+        )
+    };
+    let decision = review_approval_request(
+        &session,
+        &turn,
+        "full-access-closed-lane".to_string(),
+        guardian_exec_command_request("shell-full-access"),
+        ApprovalRequestReasons::default(),
+    )
+    .await;
+    let breaker_after = {
+        let breaker = session
+            .services
+            .guardian_rejection_circuit_breaker
+            .lock()
+            .await;
+        let state = breaker
+            .turns
+            .get(&turn_id)
+            .expect("closed turn should remain recorded");
+        (
+            state.consecutive_denials,
+            state.recent_denials.clone(),
+            state.approval_lane_closed,
+        )
+    };
+
+    assert_eq!(
+        decision,
+        GuardianApprovalOutcome::Decision(ReviewDecision::Approved)
+    );
+    assert_eq!(breaker_after, breaker_before);
+}
+
+#[tokio::test]
+async fn extension_ask_user_uses_the_existing_user_approval_path() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let (mut session, turn, events) = guardian_test_session_turn_and_rx(&server).await;
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::<Config>::new();
+    extensions.approval_review_contributor(Arc::new(AskUserReviewContributor {
+        observed: Arc::clone(&observed),
+        expected_model: None,
+    }));
+    Arc::get_mut(&mut session)
+        .expect("session should be uniquely owned")
+        .services
+        .extensions = Arc::new(extensions.build());
+
+    let action = ApprovalAction::McpToolCall {
+        id: "mcp-ask-user".to_string(),
+        server: "example".to_string(),
+        tool_name: "dangerous".to_string(),
+        arguments: None,
+        connector_id: None,
+        connector_name: None,
+        connector_description: None,
+        connected_account_email: None,
+        tool_title: None,
+        tool_description: None,
+        annotations: None,
+        hook_tool_name: HookToolName::new("mcp__example__dangerous"),
+        approval_policy: AskForApproval::OnRequest,
+        reviewer: ApprovalsReviewer::AutoReview,
+        approval_mode: AppToolApproval::Prompt,
+        allow_session_remember: false,
+        allow_persistent_approval: false,
+    };
+    let mut review_context = GuardianReviewContext::from(&turn);
+    review_context.approval_policy = AskForApproval::OnRequest;
+    review_context.approvals_reviewer = ApprovalsReviewer::AutoReview;
+    let context = ApprovalContext {
+        review_context,
+        cancellation_token: None,
+        call_id: "mcp-ask-user".to_string(),
+        tool_name: ToolName::plain("dangerous"),
+        strict_auto_review: false,
+        approval_reason: None,
+        retry_reason: None,
+        network_approval_context: None,
+    };
+    let session_for_approval = Arc::clone(&session);
+    let approval =
+        tokio::spawn(async move { session_for_approval.request_approval(action, context).await });
+
+    let elicitation = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let event = events.recv().await.expect("approval event");
+            if let EventMsg::ElicitationRequest(request) = event.msg {
+                break request;
+            }
+        }
+    })
+    .await?;
+    assert_eq!(elicitation.server_name, "example");
+    assert_eq!(
+        observed.lock().expect("observed approvals").as_slice(),
+        &[(GuardianScope::Mcp, false, false)]
+    );
+    approval.abort();
+    let _ = approval.await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_guardian_without_cancellation_overrides_extension_ask_user() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let denial = serde_json::json!({
+        "risk_level": "high",
+        "user_authorization": "unknown",
+        "outcome": "deny",
+        "rationale": "Host-required review rejected the action.",
+    })
+    .to_string();
+    let request_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-required-no-cancel"),
+            ev_assistant_message("msg-required-no-cancel", &denial),
+            ev_completed("resp-required-no-cancel"),
+        ]),
+    )
+    .await;
+
+    let (mut session, turn) = guardian_test_session_and_turn(&server).await;
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::<Config>::new();
+    extensions.approval_review_contributor(Arc::new(AskUserReviewContributor {
+        observed: Arc::clone(&observed),
+        expected_model: Some("issuing-strict-model".to_string()),
+    }));
+    Arc::get_mut(&mut session)
+        .expect("session should be uniquely owned")
+        .services
+        .extensions = Arc::new(extensions.build());
+    seed_guardian_parent_history(&session, &turn).await;
+
+    let action = ApprovalAction::McpToolCall {
+        id: "mcp-required-no-cancel".to_string(),
+        server: "example".to_string(),
+        tool_name: "dangerous".to_string(),
+        arguments: None,
+        connector_id: None,
+        connector_name: None,
+        connector_description: None,
+        connected_account_email: None,
+        tool_title: None,
+        tool_description: None,
+        annotations: None,
+        hook_tool_name: HookToolName::new("mcp__example__dangerous"),
+        approval_policy: AskForApproval::OnRequest,
+        reviewer: ApprovalsReviewer::AutoReview,
+        approval_mode: AppToolApproval::Prompt,
+        allow_session_remember: false,
+        allow_persistent_approval: false,
+    };
+    let mut issuing_settings = turn.initial_settings.as_ref().clone();
+    Arc::make_mut(&mut issuing_settings.model_info).slug = "issuing-strict-model".to_string();
+    let mut review_context =
+        GuardianReviewContext::from_resolved_settings(Arc::clone(&turn), &issuing_settings);
+    review_context.approval_policy = AskForApproval::OnRequest;
+    review_context.approvals_reviewer = ApprovalsReviewer::AutoReview;
+    let context = ApprovalContext {
+        review_context,
+        cancellation_token: None,
+        call_id: "mcp-required-no-cancel".to_string(),
+        tool_name: ToolName::plain("dangerous"),
+        strict_auto_review: true,
+        approval_reason: None,
+        retry_reason: None,
+        network_approval_context: None,
+    };
+
+    let decision = session.request_guardian_approval(action, &context).await;
+    assert!(matches!(
+        decision,
+        GuardianApprovalOutcome::Decision(ReviewDecision::Denied { .. })
+    ));
+    assert_eq!(request_log.requests().len(), 1);
+    assert_eq!(
+        observed.lock().expect("observed approvals").as_slice(),
+        &[(GuardianScope::Mcp, true, false)]
+    );
+    let breaker = session
+        .services
+        .guardian_rejection_circuit_breaker
+        .lock()
+        .await;
+    let breaker_state = breaker
+        .turns
+        .get(&turn.sub_id)
+        .expect("synchronous denial should be recorded");
+    assert_eq!(breaker_state.consecutive_denials, 1);
+    assert_eq!(breaker_state.recent_denials.len(), 1);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn escalated_retry_bypasses_extension_approval_and_runs_guardian() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -3431,6 +3826,14 @@ async fn escalated_retry_bypasses_extension_approval_and_runs_guardian() -> anyh
     struct AutoApprovingReviewContributor;
 
     impl codex_extension_api::ApprovalReviewContributor for AutoApprovingReviewContributor {
+        fn decide<'a>(
+            &'a self,
+            _input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
+        ) -> codex_extension_api::ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>>
+        {
+            Box::pin(async move { Some(codex_extension_api::ApprovalDecision::Allow) })
+        }
+
         fn fast_decision<'a>(
             &'a self,
             _session_store: &'a codex_extension_api::ExtensionData,
@@ -3482,7 +3885,10 @@ async fn escalated_retry_bypasses_extension_approval_and_runs_guardian() -> anyh
     )
     .await;
 
-    assert!(matches!(decision, ReviewDecision::Denied { .. }));
+    assert!(matches!(
+        decision,
+        GuardianApprovalOutcome::Decision(ReviewDecision::Denied { .. })
+    ));
     assert!(
         request_log
             .single_request()
@@ -3596,7 +4002,7 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
                 ApprovalRequestReasons::default()
             )
             .await,
-            ReviewDecision::Approved
+            GuardianApprovalOutcome::Decision(ReviewDecision::Approved)
         );
         session
             .record_conversation_items(
@@ -3705,7 +4111,10 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
             },
         )
         .await;
-        assert_eq!(third_decision, ReviewDecision::Approved);
+        assert_eq!(
+            third_decision,
+            GuardianApprovalOutcome::Decision(ReviewDecision::Approved)
+        );
         let requests = server.requests().await;
         assert_eq!(requests.len(), 4);
         let first_request_body = serde_json::from_slice::<serde_json::Value>(&requests[0])?;
@@ -3765,12 +4174,19 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
         gate_tx
             .send(())
             .expect("second guardian review gate should still be open");
-        assert_eq!(second_review.await?, ReviewDecision::Approved);
-        let feedback = codex_feedback::guardian_review_failures_attachment(&[session.thread_id()])
+        assert_eq!(
+            second_review.await?,
+            GuardianApprovalOutcome::Decision(ReviewDecision::Approved)
+        );
+        let feedback = codex_feedback::guardian_review_failures(&[session.thread_id()])
+            .attachment
             .expect("failed ephemeral review survives cleanup and subsequent allowed reviews");
         let record: serde_json::Value = serde_json::from_slice(&feedback.buffer)?;
         assert_eq!(
             serde_json::json!({
+                "reviewed_thread_id": record["reviewed_thread_id"],
+                "reviewed_turn_id": record["reviewed_turn_id"],
+                "target_item_id": record["target_item_id"],
                 "reviewer_thread_id": record["reviewer_thread_id"],
                 "status": record["status"],
                 "decision": record["decision"],
@@ -3779,6 +4195,9 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
                 )?["command"],
             }),
             serde_json::json!({
+                "reviewed_thread_id": session.thread_id(),
+                "reviewed_turn_id": turn.sub_id,
+                "target_item_id": "shell-guardian-3",
                 "reviewer_thread_id": failed_ephemeral_request_body["client_metadata"]["thread_id"],
                 "status": "invalid_decision",
                 "decision": "not valid guardian json",
@@ -3858,7 +4277,8 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
         .expect("turn should be unique")
         .config = Arc::new(config);
 
-    let guardian_config = guardian_review_session_config(session.as_ref(), turn.as_ref())
+    let review_context = GuardianReviewContext::from(&turn);
+    let guardian_config = guardian_review_session_config(session.as_ref(), &review_context)
         .await
         .expect("guardian config")
         .spawn_config;
@@ -3895,7 +4315,8 @@ async fn guardian_review_session_config_preserves_context_overrides_for_same_eff
         .expect("turn should be unique")
         .config = Arc::new(config);
 
-    let guardian_config = guardian_review_session_config(session.as_ref(), turn.as_ref())
+    let review_context = GuardianReviewContext::from(&turn);
+    let guardian_config = guardian_review_session_config(session.as_ref(), &review_context)
         .await
         .expect("guardian config")
         .spawn_config;
@@ -3906,6 +4327,54 @@ async fn guardian_review_session_config_preserves_context_overrides_for_same_eff
             guardian_config.model_auto_compact_token_limit,
         ),
         (Some(128_000), Some(100_000))
+    );
+}
+
+#[tokio::test]
+async fn guardian_review_session_config_uses_the_issuing_step_model() {
+    let server = start_mock_server().await;
+    let (session, turn) = guardian_test_session_and_turn(&server).await;
+    let mut issuing_settings = turn.initial_settings.as_ref().clone();
+    let issuing_personality = if turn.personality() == Some(Personality::Friendly) {
+        Personality::Pragmatic
+    } else {
+        Personality::Friendly
+    };
+    let issuing_effort = if turn.reasoning_effort() == Some(&ReasoningEffort::High) {
+        ReasoningEffort::Low
+    } else {
+        ReasoningEffort::High
+    };
+    let issuing_summary = if turn.reasoning_summary() == ReasoningSummary::Detailed {
+        ReasoningSummary::Concise
+    } else {
+        ReasoningSummary::Detailed
+    };
+    update_selected_settings_for_test(&mut issuing_settings, |selected| {
+        selected.personality = Some(issuing_personality);
+        selected.collaboration_mode = selected.collaboration_mode.with_updates(
+            /*model*/ None,
+            Some(Some(issuing_effort.clone())),
+            /*developer_instructions*/ None,
+        );
+    });
+    issuing_settings.reasoning_summary = issuing_summary;
+    let issuing_model = Arc::make_mut(&mut issuing_settings.model_info);
+    issuing_model.slug = "issuing-step-model".to_string();
+    issuing_model.auto_review_model_override = Some("issuing-step-review-model".to_string());
+    let review_context =
+        GuardianReviewContext::from_resolved_settings(Arc::clone(&turn), &issuing_settings);
+    assert_eq!(review_context.personality, Some(issuing_personality));
+    assert_eq!(review_context.reasoning_effort, Some(issuing_effort));
+    assert_eq!(review_context.reasoning_summary, issuing_summary);
+
+    let guardian_config = guardian_review_session_config(session.as_ref(), &review_context)
+        .await
+        .expect("guardian config");
+
+    assert_eq!(
+        guardian_config.spawn_config.model,
+        Some("issuing-step-review-model".to_string())
     );
 }
 

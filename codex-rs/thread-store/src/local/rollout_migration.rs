@@ -20,6 +20,7 @@ use std::time::Duration;
 use chrono::DateTime;
 use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::ThreadId;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -2395,7 +2396,7 @@ fn parse_rollout_record_with_mode(
                     .to_string(),
             });
         }
-        return serde_json::from_slice::<RolloutLine>(bytes)
+        return codex_rollout::parse_rollout_line_bytes(bytes)
             .map(Some)
             .map_err(|error| RolloutRecordValidationError::Malformed {
                 ordinal: cursor.ordinal,
@@ -2565,6 +2566,7 @@ fn inspect_rollout_reader<R: StdBufRead>(
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => {}
         }
@@ -2712,22 +2714,17 @@ fn collect_response_item_ids(item: &RolloutItem, item_ids: &mut HashSet<String>)
             }
             if let Some(entries) = &compacted.replacement_history_entries {
                 for entry in entries {
-                    match entry {
-                        codex_rollout::CompactedHistoryEntry::Inline { item, .. } => {
-                            if let Some(item_id) =
-                                item.id().filter(|item_id| !item_id.as_str().is_empty())
-                            {
-                                item_ids.insert(item_id.as_str().to_string());
-                            }
-                        }
-                        codex_rollout::CompactedHistoryEntry::Reference { item_id }
-                        | codex_rollout::CompactedHistoryEntry::ReferenceV2 { item_id, .. }
-                            if !item_id.is_empty() =>
-                        {
-                            item_ids.insert(item_id.clone());
-                        }
-                        codex_rollout::CompactedHistoryEntry::Reference { .. }
-                        | codex_rollout::CompactedHistoryEntry::ReferenceV2 { .. } => {}
+                    collect_compacted_history_entry_id(entry, item_ids);
+                }
+            }
+            if let Some(guardian_history) = &compacted.guardian_history {
+                if let Some(entries) = guardian_history.entries() {
+                    for entry in entries {
+                        collect_compacted_history_entry_id(entry, item_ids);
+                    }
+                } else {
+                    for item in &guardian_history.0 {
+                        collect_response_item_id(item, item_ids);
                     }
                 }
             }
@@ -2738,6 +2735,7 @@ fn collect_response_item_ids(item: &RolloutItem, item_ids: &mut HashSet<String>)
         | RolloutItem::TurnContext(_)
         | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::RetainedContext(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_)
         | RolloutItem::RealtimeItem(_) => {}
@@ -2748,11 +2746,30 @@ fn collect_response_item_envelope_id(
     envelope: &codex_rollout::ResponseItemEnvelope,
     item_ids: &mut HashSet<String>,
 ) {
-    if let Some(item_id) = envelope
-        .item
-        .id()
-        .filter(|item_id| !item_id.as_str().is_empty())
-    {
+    collect_response_item_id(&envelope.item, item_ids);
+}
+
+fn collect_compacted_history_entry_id(
+    entry: &codex_rollout::CompactedHistoryEntry,
+    item_ids: &mut HashSet<String>,
+) {
+    match entry {
+        codex_rollout::CompactedHistoryEntry::Inline { item, .. } => {
+            collect_response_item_id(item, item_ids);
+        }
+        codex_rollout::CompactedHistoryEntry::Reference { item_id }
+        | codex_rollout::CompactedHistoryEntry::ReferenceV2 { item_id, .. }
+            if !item_id.is_empty() =>
+        {
+            item_ids.insert(item_id.clone());
+        }
+        codex_rollout::CompactedHistoryEntry::Reference { .. }
+        | codex_rollout::CompactedHistoryEntry::ReferenceV2 { .. } => {}
+    }
+}
+
+fn collect_response_item_id(item: &ResponseItem, item_ids: &mut HashSet<String>) {
+    if let Some(item_id) = item.id().filter(|item_id| !item_id.as_str().is_empty()) {
         item_ids.insert(item_id.as_str().to_string());
     }
 }

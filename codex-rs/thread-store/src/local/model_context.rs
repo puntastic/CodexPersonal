@@ -8,7 +8,6 @@ use codex_rollout::ModelContextScan;
 use codex_rollout::ModelContextScanProgress;
 use codex_rollout::ReverseJsonlScanner;
 use codex_rollout::RolloutItem;
-use codex_rollout::RolloutLine;
 use codex_rollout::ScanOutcome;
 
 use super::LocalThreadStore;
@@ -150,7 +149,7 @@ fn scan_model_context_from_lineage_blocking(
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
             None => ReverseJsonlScanner::new(file)?,
         };
-        while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
+        while let Some(outcome) = scanner.scan_next_rollout_line()? {
             let ScanOutcome::Parsed(line) = outcome else {
                 continue;
             };
@@ -196,7 +195,7 @@ fn load_full_model_context_from_lineage_blocking(
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
             None => ReverseJsonlScanner::new(file)?,
         };
-        while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
+        while let Some(outcome) = scanner.scan_next_rollout_line()? {
             let ScanOutcome::Parsed(line) = outcome else {
                 continue;
             };

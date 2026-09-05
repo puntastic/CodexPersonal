@@ -36,6 +36,7 @@ fn exact_persisted_items_are_referenced_and_new_items_stay_inline() {
     inline.metadata = Some(CodexHarnessMetadata {
         client_authored: true,
         fallback_token_limit_override: None,
+        ..Default::default()
     });
     let persisted_items = HashMap::from([(
         persisted
@@ -71,6 +72,7 @@ fn v2_mode_emits_complete_envelope_digest_without_changing_v1_shape() {
     persisted.metadata = Some(CodexHarnessMetadata {
         client_authored: true,
         fallback_token_limit_override: None,
+        ..Default::default()
     });
     let item_id = persisted.item.id().expect("item id").as_str().to_string();
     let persisted_items = HashMap::from([(item_id.clone(), persisted.clone())]);
@@ -182,6 +184,8 @@ fn copied_fork_source_demand_excludes_superseded_checkpoint_references() {
             message: String::new(),
             replacement_history: None,
             replacement_history_entries: Some(entries),
+            guardian_history: None,
+            retained_context: None,
             mcp_resource_origins: None,
             window_number: None,
             first_window_id: None,
@@ -227,6 +231,8 @@ fn copied_fork_inlines_writer_filtered_source_at_durable_checkpoint() {
                     replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
                         item_id: filtered_id.to_string(),
                     }]),
+                    guardian_history: None,
+                    retained_context: None,
                     mcp_resource_origins: None,
                     window_number: Some(1),
                     first_window_id: None,
@@ -261,6 +267,8 @@ fn copied_fork_reencodes_exact_sources_only_in_gated_mode() {
                 replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
                     item_id: source_id.clone(),
                 }]),
+                guardian_history: None,
+                retained_context: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
                 first_window_id: None,
@@ -295,6 +303,8 @@ fn copied_fork_ignores_unrelated_dangling_reference_in_superseded_checkpoint() {
             message: message.to_string(),
             replacement_history: None,
             replacement_history_entries: Some(entries),
+            guardian_history: None,
+            retained_context: None,
             mcp_resource_origins: None,
             window_number: Some(1),
             first_window_id: None,

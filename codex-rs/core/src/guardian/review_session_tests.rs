@@ -16,10 +16,12 @@ async fn test_review_session() -> (
     let (tx_sub, rx_sub) = async_channel::bounded(4);
     let (tx_event, rx_event) = async_channel::unbounded();
     let (_agent_status_tx, agent_status) = tokio::sync::watch::channel(AgentStatus::PendingInit);
+    let history = session.clone_history().await;
     let reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
         session.get_config().await.as_ref(),
         session.user_instructions().await,
-        session.clone_history().await.history_version(),
+        history.history_version(),
+        history.review_history_version(),
     );
 
     (
@@ -168,6 +170,7 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
         &cached_spawn_config,
         /*user_instructions*/ None,
         /*parent_history_version*/ 0,
+        /*review_history_version*/ 0,
     );
 
     let mut changed_parent_config = parent_config;
@@ -185,6 +188,7 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
         &next_spawn_config,
         /*user_instructions*/ None,
         /*parent_history_version*/ 0,
+        /*review_history_version*/ 0,
     );
 
     assert_eq!(
@@ -198,6 +202,7 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
             &cached_spawn_config,
             /*user_instructions*/ None,
             /*parent_history_version*/ 0,
+            /*review_history_version*/ 0,
         )
     );
 
@@ -207,6 +212,7 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
             &cached_spawn_config,
             /*user_instructions*/ None,
             /*parent_history_version*/ 1,
+            /*review_history_version*/ 1,
         )
     );
     assert_ne!(
@@ -242,13 +248,47 @@ async fn guardian_review_session_config_change_invalidates_cached_session() {
             &compaction_enabled_config,
             /*user_instructions*/ None,
             /*parent_history_version*/ 0,
+            /*review_history_version*/ 0,
         ),
         GuardianReviewSessionReuseKey::from_spawn_config(
             &compaction_enabled_config,
             /*user_instructions*/ None,
             /*parent_history_version*/ 1,
+            /*review_history_version*/ 0,
         )
     );
+}
+
+#[tokio::test]
+async fn summary_free_reuse_requires_unchanged_review_history() {
+    let mut spawn_config = crate::config::test_config().await;
+    spawn_config
+        .features
+        .enable(Feature::GuardianReuseParentCompaction)
+        .expect("Guardian parent-compaction reuse should be configurable");
+    let cached = GuardianReviewSessionReuseKey::from_spawn_config(
+        &spawn_config,
+        /*user_instructions*/ None,
+        /*parent_history_version*/ 1,
+        /*review_history_version*/ 7,
+    );
+    let mut model_compacted = GuardianReviewSessionReuseKey::from_spawn_config(
+        &spawn_config,
+        /*user_instructions*/ None,
+        /*parent_history_version*/ 2,
+        /*review_history_version*/ 7,
+    );
+    model_compacted.align_summary_free_parent_history(&cached);
+    assert_eq!(model_compacted, cached);
+
+    let mut review_evidence_changed = GuardianReviewSessionReuseKey::from_spawn_config(
+        &spawn_config,
+        /*user_instructions*/ None,
+        /*parent_history_version*/ 2,
+        /*review_history_version*/ 8,
+    );
+    review_evidence_changed.align_summary_free_parent_history(&cached);
+    assert_ne!(review_evidence_changed, cached);
 }
 
 #[test]
@@ -326,6 +366,7 @@ async fn guardian_review_session_compact_scope_change_invalidates_cached_session
         &cached_spawn_config,
         /*user_instructions*/ None,
         /*parent_history_version*/ 0,
+        /*review_history_version*/ 0,
     );
 
     let mut changed_parent_config = parent_config;
@@ -343,6 +384,7 @@ async fn guardian_review_session_compact_scope_change_invalidates_cached_session
         &next_spawn_config,
         /*user_instructions*/ None,
         /*parent_history_version*/ 0,
+        /*review_history_version*/ 0,
     );
 
     assert_ne!(cached_reuse_key, next_reuse_key);
@@ -731,14 +773,12 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
 async fn run_review_removes_trunk_when_event_stream_is_broken() {
     let (mut review_session, tx_event, rx_sub) = test_review_session().await;
     let params = test_review_params().await;
+    let history = params.parent_session.clone_history().await;
     review_session.reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
         &params.spawn_config,
         params.parent_session.user_instructions().await,
-        params
-            .parent_session
-            .clone_history()
-            .await
-            .history_version(),
+        history.history_version(),
+        history.review_history_version(),
     )
     .with_environments(params.parent_context.environments())
     .with_node_repl_policy(&params.node_repl_policy);

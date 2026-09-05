@@ -19,6 +19,7 @@ use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::CompactedHistoryEntry;
+use codex_history::GuardianHistoryCheckpoint;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
@@ -35,6 +36,7 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::DeleteThreadParams;
 use codex_thread_store::ForkBoundary;
 use codex_thread_store::ListTurnsParams;
 use codex_thread_store::LoadThreadHistoryParams;
@@ -110,7 +112,7 @@ fn assert_reference_backed_rollout(path: &Path) {
         .expect("read reference-backed rollout")
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<RolloutLine>(line).expect("parse rollout line"))
+        .map(|line| codex_rollout::parse_rollout_line(line).expect("parse rollout line"))
         .collect::<Vec<_>>();
     let history_mode = lines.iter().find_map(|line| match &line.item {
         RolloutItem::SessionMeta(meta) => Some(meta.meta.history_mode),
@@ -141,7 +143,7 @@ fn seed_reference_backed_checkpoint(path: &Path, retained_text: &str) -> Result<
     let mut lines = std::fs::read_to_string(path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?;
     let (checkpoint_index, retained_envelope) = lines
         .iter()
@@ -173,11 +175,41 @@ fn seed_reference_backed_checkpoint(path: &Path, retained_text: &str) -> Result<
             )
         })
         .context("rollout missing older explicit source for retained user message")?;
+    let RolloutItem::ResponseItem(displaced_source) = &lines[source_index].item else {
+        unreachable!("source index was selected from a response item");
+    };
+    let displaced_source = displaced_source.clone();
+    let displaced_item_id = displaced_source
+        .item
+        .id()
+        .context("older explicit source missing stable ID")?
+        .as_str()
+        .to_string();
+
+    // Materialize only checkpoints that depend on the exact source this fixture is about to
+    // repurpose. Broadly materializing the rollout changes unrelated checkpoint representations
+    // and obscures the reference behavior this integration scenario is meant to exercise.
+    for line in &mut lines[source_index + 1..] {
+        let RolloutItem::Compacted(compacted) = &mut line.item else {
+            continue;
+        };
+        if let Some(entries) = &mut compacted.replacement_history_entries {
+            materialize_references_to_source(entries, &displaced_item_id, &displaced_source);
+        }
+        if let Some(guardian_history) = &mut compacted.guardian_history
+            && let Some(entries) = guardian_history.entries()
+        {
+            let mut entries = entries.to_vec();
+            materialize_references_to_source(&mut entries, &displaced_item_id, &displaced_source);
+            *guardian_history = GuardianHistoryCheckpoint::from_entries(entries);
+        }
+    }
 
     // The production compactor rebuilds text user messages, so its first checkpoint has fresh
-    // item IDs even in RefsV1 mode. Rebase the matching older source to that exact envelope before
-    // encoding the checkpoint as a backward reference. Model-visible content stays unchanged,
-    // while resume and fork now have a real reference to resolve end to end.
+    // item IDs even in RefsV1 mode. With dependent checkpoints safely materialized above, rebase
+    // the matching older source to that exact envelope before encoding the model checkpoint as a
+    // backward reference. Model-visible content stays unchanged, while resume and fork now have a
+    // real reference to resolve end to end.
     lines[source_index].item = RolloutItem::ResponseItem(retained_envelope.clone());
     let RolloutItem::Compacted(compacted) = &mut lines[checkpoint_index].item else {
         unreachable!("checkpoint index was selected from a compacted item");
@@ -215,6 +247,39 @@ fn seed_reference_backed_checkpoint(path: &Path, retained_text: &str) -> Result<
     Ok(())
 }
 
+fn materialize_references_to_source(
+    entries: &mut [CompactedHistoryEntry],
+    source_id: &str,
+    source: &codex_history::ResponseItemEnvelope,
+) {
+    for entry in entries {
+        let references_source = match entry {
+            CompactedHistoryEntry::Reference { item_id }
+            | CompactedHistoryEntry::ReferenceV2 { item_id, .. } => item_id == source_id,
+            CompactedHistoryEntry::Inline { .. } => false,
+        };
+        if references_source {
+            *entry = CompactedHistoryEntry::from(source.clone());
+        }
+    }
+}
+
+async fn rebuild_projection_after_fixture_rewrite(
+    thread_store: &Arc<dyn ThreadStore>,
+    thread_id: codex_protocol::ThreadId,
+    path: &Path,
+) {
+    // These tests intentionally rewrite a closed rollout behind the store. Clear the projection
+    // through its public lifecycle API and restore the exact fixture so the next read rebuilds
+    // line ordinals and byte offsets from the rewritten JSONL rather than stale pre-edit offsets.
+    let rewritten = std::fs::read(path).expect("read rewritten rollout fixture");
+    thread_store
+        .delete_thread(DeleteThreadParams { thread_id })
+        .await
+        .expect("clear stale rollout projection after fixture rewrite");
+    std::fs::write(path, rewritten).expect("restore rewritten rollout fixture");
+}
+
 fn normalize_line_endings_str(text: &str) -> String {
     if text.contains('\r') {
         text.replace("\r\n", "\n").replace('\r', "\n")
@@ -238,7 +303,7 @@ fn seed_first_checkpoint_harness_metadata(path: &Path, retained_text: &str) -> R
     let mut lines = std::fs::read_to_string(path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?;
     materialize_rollout_lines(&mut lines)?;
     let replacement_history = lines
@@ -265,21 +330,30 @@ fn seed_first_checkpoint_harness_metadata(path: &Path, retained_text: &str) -> R
     Ok(())
 }
 
-fn assert_latest_checkpoint_retains_harness_metadata(
-    path: &Path,
+async fn assert_latest_checkpoint_retains_harness_metadata(
+    thread_store: &Arc<dyn ThreadStore>,
+    thread_id: codex_protocol::ThreadId,
     retained_text: &str,
 ) -> Result<()> {
-    let mut lines = std::fs::read_to_string(path)?
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
-        .collect::<Result<Vec<_>, _>>()?;
-    materialize_rollout_lines(&mut lines)?;
-    let replacement_history = lines
-        .into_iter()
+    let model_context = thread_store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: true,
+        })
+        .await?;
+    let materialized = codex_history::materialize_compacted_histories(&model_context.items);
+    if !materialized.unresolved_item_ids.is_empty() {
+        anyhow::bail!(
+            "unresolved compacted history references: {}",
+            materialized.unresolved_item_ids.join(", ")
+        );
+    }
+    let replacement_history = materialized
+        .rollout_items
+        .iter()
         .rev()
-        .find_map(|line| match line.item {
-            RolloutItem::Compacted(compacted) => compacted.replacement_history,
+        .find_map(|item| match item {
+            RolloutItem::Compacted(compacted) => compacted.replacement_history.clone(),
             _ => None,
         })
         .context("latest compacted checkpoint missing replacement history")?;
@@ -390,6 +464,7 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         .expect("read RefsV1 thread metadata")
         .expect("RefsV1 thread metadata should exist");
     assert!(stored_metadata.history_mode.is_paginated());
+    rebuild_projection_after_fixture_rewrite(&thread_store, base_thread_id, &base_path).await;
     let resumed = resume_paginated_conversation(&manager, &thread_store, &config, base_path).await;
     user_turn(&resumed, "AFTER_RESUME").await;
     let resumed_path = fetch_conversation_path(&resumed);
@@ -552,6 +627,7 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
     compact_conversation(&base).await;
     user_turn(&base, "AFTER_COMPACT").await;
     let base_path = fetch_conversation_path(&base);
+    let base_thread_id = base.session_configured().thread_id;
     assert!(
         base_path.exists(),
         "second compact test expects base path {base_path:?} to exist",
@@ -561,6 +637,7 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
     seed_first_checkpoint_harness_metadata(&base_path, "hello world")?;
     seed_reference_backed_checkpoint(&base_path, "hello world")?;
     assert_reference_backed_rollout(&base_path);
+    rebuild_projection_after_fixture_rewrite(&thread_store, base_thread_id, &base_path).await;
     let resumed = resume_paginated_conversation(&manager, &thread_store, &config, base_path).await;
     user_turn(&resumed, "AFTER_RESUME").await;
     let resumed_path = fetch_conversation_path(&resumed);
@@ -588,7 +665,12 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
     );
 
     shutdown_conversation(&forked).await;
-    assert_latest_checkpoint_retains_harness_metadata(&forked_path, "hello world")?;
+    assert_latest_checkpoint_retains_harness_metadata(
+        &thread_store,
+        forked.session_configured().thread_id,
+        "hello world",
+    )
+    .await?;
     let resumed_again =
         resume_paginated_conversation(&manager, &thread_store, &config, forked_path).await;
     user_turn(&resumed_again, AFTER_SECOND_RESUME).await;

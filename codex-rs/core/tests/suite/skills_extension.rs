@@ -512,8 +512,13 @@ async fn rendered_catalogs_for_turns(
     Ok((developer_texts, client_warning_messages))
 }
 
+#[test_case("gpt-5.5", true; "usage prose enabled")]
+#[test_case("gpt-6-astra", false; "astra omits usage prose")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() -> Result<()> {
+async fn capability_catalogs_survive_model_usage_prose_policy(
+    model: &'static str,
+    expect_usage_prose: bool,
+) -> Result<()> {
     skip_if_wine_exec!(
         Ok(()),
         "executor-backed repo skills require matching host and executor path conventions"
@@ -523,12 +528,32 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
     const HOST_SKILL_BODY: &str = "Use the host skill instructions.";
     const REPO_SKILL_BODY: &str = "Use the repository skill instructions.";
     const PLUGIN_SKILL_BODY: &str = "Use the legacy plugin skill instructions.";
+    const ASTRA_CATALOG_PROBE_CALL_ID: &str = "astra-capability-catalog-probe";
 
     let server = responses::start_mock_server().await;
     let apps_server = AppsTestServer::mount_with_connector_name(&server, "Google Calendar").await?;
-    let response = mount_sse_once(
+    let response = responses::mount_sse_sequence(
         &server,
-        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+        if model == "gpt-6-astra" {
+            vec![
+                sse(vec![
+                    ev_response_created("resp1"),
+                    responses::ev_custom_tool_call(
+                        ASTRA_CATALOG_PROBE_CALL_ID,
+                        "exec",
+                        r#"const app = ALL_TOOLS.find(({ name }) => name.startsWith("mcp__codex_apps__"));
+text(JSON.stringify({ app: app?.name ?? null }));"#,
+                    ),
+                    ev_completed("resp1"),
+                ]),
+                sse(vec![ev_response_created("resp2"), ev_completed("resp2")]),
+            ]
+        } else {
+            vec![sse(vec![
+                ev_response_created("resp1"),
+                ev_completed("resp1"),
+            ])]
+        },
     )
     .await;
 
@@ -578,6 +603,7 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
         .with_home(Arc::clone(&codex_home))
         .with_extensions(Arc::new(extensions.build()))
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_model(model)
         .with_workspace_setup(|cwd, fs| async move {
             let skill_dir = cwd.join(".agents/skills/repo-search");
             fs.create_directory(
@@ -641,29 +667,37 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
     })
     .await;
 
-    let request = response.single_request();
+    let requests = response.requests();
+    let request = &requests[0];
     let developer_messages = request.message_input_texts("developer");
     let developer_text = developer_messages.join("\n\n");
-    let apps_pos = developer_text
-        .find("## Apps")
-        .expect("expected apps section in developer message");
     let skills_pos = developer_text
         .find("## Skills")
         .expect("expected skills section in developer message");
-    let plugins_pos = developer_text
-        .find("## Plugins")
-        .expect("expected plugins section in developer message");
-    assert!(
-        skills_pos < apps_pos && apps_pos < plugins_pos,
-        "expected Skills -> Apps -> Plugins order: {developer_messages:?}"
-    );
+    if expect_usage_prose {
+        let apps_pos = developer_text
+            .find("## Apps")
+            .expect("expected apps usage section in developer message");
+        let plugins_pos = developer_text
+            .find("## Plugins")
+            .expect("expected plugins usage section in developer message");
+        assert!(
+            skills_pos < apps_pos && apps_pos < plugins_pos,
+            "expected Skills -> Apps -> Plugins order: {developer_messages:?}"
+        );
+    } else {
+        assert!(!developer_text.contains("## Apps"));
+        assert!(!developer_text.contains("## Plugins"));
+        assert!(!developer_text.contains("### How to use skills"));
+    }
     assert!(
         !developer_text.contains("`sample`: inspect sample data"),
         "did not expect plugin description in developer message: {developer_messages:?}"
     );
-    assert!(
+    assert_eq!(
         developer_text.contains("skill entries are prefixed with `plugin_name:`"),
-        "expected plugin skill naming guidance in developer message: {developer_messages:?}"
+        expect_usage_prose,
+        "plugin usage guidance should follow the model policy: {developer_messages:?}"
     );
     assert!(
         developer_text.contains("sample:sample-search: inspect sample data"),
@@ -677,6 +711,21 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
         developer_text.contains("host-search: inspect host data"),
         "expected host skill summary in developer message: {developer_messages:?}"
     );
+    if !expect_usage_prose {
+        let output = requests[1].custom_tool_call_output(ASTRA_CATALOG_PROBE_CALL_ID);
+        let catalog_probe = output["output"]
+            .as_array()
+            .and_then(|items| items.last())
+            .and_then(|item| item["text"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("Astra capability catalog probe should return JSON"))?;
+        let app_tool = serde_json::from_str::<Value>(catalog_probe)?["app"]
+            .as_str()
+            .map(str::to_owned);
+        assert!(
+            app_tool.is_some_and(|name| name.starts_with("mcp__codex_apps__")),
+            "Astra should retain installed app tools in ALL_TOOLS: {catalog_probe}"
+        );
+    }
 
     let user_text = request.message_input_texts("user").join("\n");
     for (name, path, body) in [

@@ -1,4 +1,6 @@
 use anyhow::Result;
+use codex_protocol::models::ConfigurationReasoning;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -51,7 +53,11 @@ fn response_item_rollout_line_preserves_shape() -> Result<()> {
         },
     });
 
-    let line = serde_json::from_value::<RolloutLine>(legacy_line.clone())?;
+    let line = RolloutLine {
+        timestamp: "2025-01-03T12:00:00.000Z".to_string(),
+        ordinal: Some(7),
+        item: serde_json::from_value(legacy_line.clone())?,
+    };
     let RolloutItem::ResponseItem(envelope) = &line.item else {
         panic!("expected response item");
     };
@@ -73,6 +79,7 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
             metadata: Some(CodexHarnessMetadata {
                 client_authored: true,
                 fallback_token_limit_override: Some(20_000),
+                ..Default::default()
             }),
         }),
     };
@@ -90,8 +97,8 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
     );
     assert_eq!(serialized["payload"].get("metadata"), None);
 
-    let restored = serde_json::from_value::<RolloutLine>(serialized)?;
-    let RolloutItem::ResponseItem(envelope) = restored.item else {
+    let restored = serde_json::from_value(serialized)?;
+    let RolloutItem::ResponseItem(envelope) = restored else {
         panic!("expected response item");
     };
     assert_eq!(
@@ -99,7 +106,54 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
         Some(CodexHarnessMetadata {
             client_authored: true,
             fallback_token_limit_override: Some(20_000),
+            ..Default::default()
         })
+    );
+    Ok(())
+}
+
+#[test]
+fn response_item_envelope_preserves_harness_authored_configuration_provenance() -> Result<()> {
+    let response_item = ResponseItem::ConfigurationUpdate {
+        reasoning: ConfigurationReasoning {
+            effort: ReasoningEffort::High,
+        },
+    };
+    let metadata = CodexHarnessMetadata {
+        harness_authored_configuration: true,
+        ..Default::default()
+    };
+    let rollout_item = RolloutItem::ResponseItem(ResponseItemEnvelope {
+        item: response_item.clone(),
+        metadata: Some(metadata.clone()),
+    });
+
+    let serialized = serde_json::to_value(&rollout_item)?;
+    assert_eq!(
+        serialized,
+        json!({
+            "type": "response_item",
+            "payload": {
+                "type": "configuration_update",
+                "reasoning": { "effort": "high" },
+            },
+            "metadata": {
+                "client_authored": false,
+                "harness_authored_configuration": true,
+            },
+        })
+    );
+
+    let restored = serde_json::from_value::<RolloutItem>(serialized)?;
+    let RolloutItem::ResponseItem(envelope) = restored else {
+        panic!("expected response item");
+    };
+    assert_eq!(
+        envelope,
+        ResponseItemEnvelope {
+            item: response_item,
+            metadata: Some(metadata),
+        }
     );
     Ok(())
 }
@@ -107,7 +161,7 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
 #[test]
 /// Keeps future metadata fields from making older binaries reject persisted items.
 fn response_item_envelope_ignores_unknown_harness_metadata_fields() -> Result<()> {
-    let line = serde_json::from_value::<RolloutLine>(json!({
+    let line = serde_json::from_value(json!({
         "timestamp": "2025-01-03T12:00:00.000Z",
         "ordinal": 7,
         "type": "response_item",
@@ -124,7 +178,7 @@ fn response_item_envelope_ignores_unknown_harness_metadata_fields() -> Result<()
         },
     }))?;
 
-    let RolloutItem::ResponseItem(envelope) = line.item else {
+    let RolloutItem::ResponseItem(envelope) = line else {
         panic!("expected response item");
     };
     assert_eq!(envelope.metadata, Some(CodexHarnessMetadata::default()));
@@ -195,6 +249,8 @@ fn compacted_replacement_history_stores_metadata_in_an_aligned_sidecar() -> Resu
             ResponseItemEnvelope::new(compaction_item.clone()),
         ]),
         replacement_history_entries: None,
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
@@ -249,15 +305,17 @@ fn compacted_replacement_history_entries_round_trip_mixed_entries() -> Result<()
         replacement_history_entries: Some(vec![
             CompactedHistoryEntry::Inline {
                 item: Box::new(response_item.clone()),
-                metadata: Some(CodexHarnessMetadata {
+                metadata: Some(Box::new(CodexHarnessMetadata {
                     client_authored: true,
                     ..Default::default()
-                }),
+                })),
             },
             CompactedHistoryEntry::Reference {
                 item_id: "item-123".to_string(),
             },
         ]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
@@ -293,7 +351,8 @@ fn compacted_replacement_history_entries_round_trip_mixed_entries() -> Result<()
 
 #[test]
 fn compacted_history_entry_layout_stays_bounded() {
-    assert!(std::mem::size_of::<CompactedHistoryEntry>() <= 64);
+    let actual = std::mem::size_of::<CompactedHistoryEntry>();
+    assert!(actual <= 64, "compacted history entry is {actual} bytes");
 }
 
 #[test]
@@ -376,10 +435,17 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
     };
     assert_eq!(*legacy_response, response_item);
 
+    let checkpoint = crate::GuardianHistoryCheckpoint(vec![response_item.clone()]);
+    assert!(
+        serde_json::to_value(&checkpoint)?.is_array(),
+        "legacy inline Guardian checkpoints must keep their array wire shape"
+    );
     let compacted_line = serde_json::to_value(RolloutItem::Compacted(CompactedItem {
         message: "summary".to_string(),
         replacement_history: Some(vec![envelope]),
         replacement_history_entries: None,
+        retained_context: None,
+        guardian_history: Some(checkpoint.clone()),
         mcp_resource_origins: Some(McpResourceOriginCheckpoint::default()),
         window_number: None,
         first_window_id: None,
@@ -389,12 +455,32 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
         latest_token_usage_record: None,
     }))?;
 
+    let restored: RolloutItem = serde_json::from_value(compacted_line.clone())?;
+    let RolloutItem::Compacted(restored) = restored else {
+        panic!("expected compacted item");
+    };
+    assert_eq!(restored.guardian_history, Some(checkpoint));
     let LegacyRolloutItem::Compacted(legacy) =
         serde_json::from_value::<LegacyRolloutItem>(compacted_line)?
     else {
         panic!("expected legacy compacted item");
     };
     assert_eq!(legacy.replacement_history, vec![response_item]);
+    Ok(())
+}
+
+#[test]
+fn guardian_reference_checkpoint_round_trips_without_changing_legacy_inline_wire() -> Result<()> {
+    let checkpoint =
+        GuardianHistoryCheckpoint::from_entries(vec![CompactedHistoryEntry::Reference {
+            item_id: "guardian-source".to_string(),
+        }]);
+    let value = serde_json::to_value(&checkpoint)?;
+
+    assert_eq!(value["entries"][0]["type"], json!("reference"));
+    let restored: GuardianHistoryCheckpoint = serde_json::from_value(value)?;
+    assert!(restored.is_reference_backed());
+    assert_eq!(restored.entries(), checkpoint.entries());
     Ok(())
 }
 
@@ -498,6 +584,15 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
             "payload": { "type": "warning", "message": "heads up" },
         }),
         json!({
+            "type": "retained_context",
+            "payload": {
+                "type": "verified_answer",
+                "turn_id": "turn-1",
+                "call_id": "ask-1",
+                "questions": [{"question": "Publish?", "answer": "Only privately."}],
+            },
+        }),
+        json!({
             "type": "realtime_item",
             "payload": {
                 "id": "segment-1",
@@ -521,7 +616,7 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
 fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;
     let variants = schema["oneOf"].as_array().expect("rollout variants");
-    assert_eq!(variants.len(), 11);
+    assert_eq!(variants.len(), 12);
 
     for variant in variants {
         let required = variant["required"].as_array().expect("required fields");
@@ -600,6 +695,8 @@ fn legacy_checkpoint(message: &str, history: Vec<ResponseItemEnvelope>) -> Rollo
         message: message.to_string(),
         replacement_history: Some(history),
         replacement_history_entries: None,
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
@@ -615,6 +712,8 @@ fn entry_checkpoint(message: &str, entries: Vec<CompactedHistoryEntry>) -> Rollo
         message: message.to_string(),
         replacement_history: None,
         replacement_history_entries: Some(entries),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
@@ -634,6 +733,202 @@ fn integrity_reference(envelope: &ResponseItemEnvelope) -> CompactedHistoryEntry
         .to_string();
     CompactedHistoryEntry::reference_v2(item_id, envelope)
         .expect("test envelope should have a canonical digest")
+}
+
+fn guardian_checkpoint(
+    message: &str,
+    replacement_history: Vec<ResponseItemEnvelope>,
+    guardian_history: GuardianHistoryCheckpoint,
+) -> RolloutItem {
+    let RolloutItem::Compacted(mut compacted) = legacy_checkpoint(message, replacement_history)
+    else {
+        unreachable!("legacy_checkpoint always returns a compacted item");
+    };
+    compacted.guardian_history = Some(guardian_history);
+    RolloutItem::Compacted(compacted)
+}
+
+#[test]
+fn guardian_v1_reference_resolves_from_an_older_top_level_source() {
+    let source = identified_message("guardian-v1", "visual evidence placeholder");
+    let item_id = source.item.id().expect("source id").as_str().to_string();
+    let checkpoint = guardian_checkpoint(
+        "guardian v1",
+        Vec::new(),
+        GuardianHistoryCheckpoint::from_entries(vec![CompactedHistoryEntry::Reference { item_id }]),
+    );
+    let RolloutItem::Compacted(compacted) = &checkpoint else {
+        panic!("expected compacted checkpoint");
+    };
+    let mut resolver = CompactedHistoryResolver::default();
+    resolver.index_explicit_sources(&RolloutItem::ResponseItem(source.clone()));
+
+    assert_eq!(
+        resolver
+            .resolve_guardian_history(compacted)
+            .expect("older source should resolve")
+            .expect("Guardian checkpoint")
+            .0,
+        vec![source.item]
+    );
+}
+
+#[test]
+fn guardian_v2_reference_binds_source_metadata_and_fails_closed() {
+    let mut source = identified_message("guardian-v2", "metadata-bound evidence");
+    source.metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+        ..Default::default()
+    });
+    let reference = integrity_reference(&source);
+    let checkpoint = guardian_checkpoint(
+        "guardian v2",
+        Vec::new(),
+        GuardianHistoryCheckpoint::from_entries(vec![reference]),
+    );
+    let RolloutItem::Compacted(compacted) = &checkpoint else {
+        panic!("expected compacted checkpoint");
+    };
+
+    let mut exact = CompactedHistoryResolver::default();
+    exact.index_explicit_sources(&RolloutItem::ResponseItem(source.clone()));
+    assert_eq!(
+        exact
+            .resolve_guardian_history_detailed(compacted)
+            .expect("exact envelope should resolve")
+            .expect("Guardian checkpoint")
+            .0,
+        vec![source.item.clone()]
+    );
+
+    let mut substituted = source.clone();
+    substituted.metadata = None;
+    let mut mismatch = CompactedHistoryResolver::default();
+    mismatch.index_explicit_sources(&RolloutItem::ResponseItem(substituted));
+    let error = mismatch
+        .resolve_guardian_history_detailed(compacted)
+        .expect_err("metadata-only substitution must fail closed");
+    assert_eq!(error.digest_mismatches().len(), 1);
+
+    let missing = CompactedHistoryResolver::default()
+        .resolve_guardian_history_detailed(compacted)
+        .expect_err("missing Guardian source must fail closed");
+    assert_eq!(
+        missing.missing_item_ids(),
+        &[source.item.id().expect("source id").as_str().to_string()]
+    );
+}
+
+#[test]
+fn guardian_source_window_survives_model_rebase_without_sourcing_model_refs() {
+    let mut guardian_source = identified_message("guardian-retained", "retained evidence");
+    guardian_source.metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+        ..Default::default()
+    });
+    let guardian_id = guardian_source
+        .item
+        .id()
+        .expect("Guardian source id")
+        .as_str()
+        .to_string();
+    let model_item = identified_message("new-model-window", "replacement model item");
+    let first = guardian_checkpoint(
+        "model rebase",
+        vec![model_item],
+        GuardianHistoryCheckpoint(vec![guardian_source.item.clone()]),
+    );
+    let RolloutItem::Compacted(first) = &first else {
+        panic!("expected first checkpoint");
+    };
+    let second = guardian_checkpoint(
+        "later checkpoint",
+        Vec::new(),
+        GuardianHistoryCheckpoint::from_entries(vec![integrity_reference(&guardian_source)]),
+    );
+    let RolloutItem::Compacted(second) = &second else {
+        panic!("expected second checkpoint");
+    };
+
+    let mut resolver = CompactedHistoryResolver::default();
+    resolver.index_explicit_sources(&RolloutItem::ResponseItem(guardian_source.clone()));
+    let mut first_to_materialize = RolloutItem::Compacted(first.clone());
+    resolver
+        .materialize_item(&mut first_to_materialize)
+        .expect("first checkpoint should rebase both windows");
+
+    assert_eq!(
+        resolver
+            .resolve_guardian_history_detailed(second)
+            .expect("Guardian's retained metadata-bearing source should survive")
+            .expect("Guardian checkpoint")
+            .0,
+        vec![guardian_source.item]
+    );
+    let RolloutItem::Compacted(model_reference) = entry_checkpoint(
+        "invalid model lookup",
+        vec![CompactedHistoryEntry::Reference {
+            item_id: guardian_id.clone(),
+        }],
+    ) else {
+        panic!("expected model reference checkpoint");
+    };
+    assert_eq!(
+        resolver
+            .resolve_compacted_item(&model_reference)
+            .expect_err("Guardian-only retained evidence cannot source model history"),
+        vec![guardian_id]
+    );
+}
+
+#[test]
+fn guardian_reencode_keeps_conflicting_same_id_occurrences_inline() {
+    let source = identified_message("guardian-conflict", "older value");
+    let changed = identified_message("guardian-conflict", "newer value");
+    let expected = vec![source.item.clone(), changed.item];
+    let mut checkpoint = guardian_checkpoint(
+        "conflicting Guardian IDs",
+        Vec::new(),
+        GuardianHistoryCheckpoint(expected.clone()),
+    );
+    let mut resolver = CompactedHistoryResolver::default();
+    let mut source_item = RolloutItem::ResponseItem(source);
+    resolver
+        .reencode_item_with_integrity_references(&mut source_item)
+        .expect("source should index");
+    resolver
+        .reencode_item_with_integrity_references(&mut checkpoint)
+        .expect("conflicting checkpoint should remain exact");
+
+    let RolloutItem::Compacted(compacted) = checkpoint else {
+        panic!("expected compacted checkpoint");
+    };
+    let guardian = compacted.guardian_history.expect("Guardian checkpoint");
+    assert!(!guardian.is_reference_backed());
+    assert_eq!(guardian.0, expected);
+}
+
+#[test]
+fn selected_guardian_checkpoint_resolves_source_outside_the_model_window() {
+    let source = identified_message("guardian-static", "older visual evidence");
+    let source_id = source.item.id().expect("source id").as_str().to_string();
+    let model_item = identified_message("model-static", "current model context");
+    let checkpoint = guardian_checkpoint(
+        "selected",
+        vec![model_item],
+        GuardianHistoryCheckpoint::from_entries(vec![CompactedHistoryEntry::Reference {
+            item_id: source_id,
+        }]),
+    );
+    let rollout = vec![RolloutItem::ResponseItem(source.clone()), checkpoint];
+
+    assert_eq!(
+        resolve_guardian_checkpoint_at_detailed(&rollout, 1)
+            .expect("older Guardian source should resolve")
+            .expect("Guardian checkpoint")
+            .0,
+        vec![source.item]
+    );
 }
 
 #[test]
@@ -1388,6 +1683,8 @@ fn reencode_unresolved_checkpoint_fails_without_mutating_or_indexing_it() {
                 item_id: "missing-z".to_string(),
             },
         ]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
@@ -1447,6 +1744,8 @@ fn materialize_compacted_histories_resolves_top_level_and_checkpoint_sources() {
                 },
                 CompactedHistoryEntry::from(checkpoint_source.clone()),
             ]),
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(1),
             first_window_id: None,
@@ -1466,6 +1765,8 @@ fn materialize_compacted_histories_resolves_top_level_and_checkpoint_sources() {
                     item_id: top_level_id,
                 },
             ]),
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(2),
             first_window_id: None,
@@ -1505,6 +1806,8 @@ fn materialize_compacted_histories_reports_and_preserves_unresolved_checkpoint()
         replacement_history_entries: Some(vec![CompactedHistoryEntry::Reference {
             item_id: "missing-item".to_string(),
         }]),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
@@ -1531,6 +1834,8 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
         message: "summary".to_string(),
         replacement_history: None,
         replacement_history_entries: None,
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(3),
         first_window_id: Some("019b3f6e-0000-7000-8000-000000000001".to_string()),
@@ -1569,6 +1874,8 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
             message: "summary".to_string(),
             replacement_history: None,
             replacement_history_entries: None,
+            retained_context: None,
+            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(3),
             first_window_id: None,

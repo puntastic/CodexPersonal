@@ -103,6 +103,15 @@ const NEXT_TURN_TOOL_CALL_ID: &str = "call-calendar-next-turn";
 const ELICITATION_MESSAGE: &str = "Allow this request?";
 const STRICT_DECLINE_MESSAGE: &str = "Automated review of this operation failed. Do not proceed without asking the user for explicit approval.";
 const GUARDIAN_DENIAL_RATIONALE: &str = "The calendar action exceeds the user's authorization.";
+const GUARDIAN_APPROVAL_LANE_CLOSED_SUFFIX: &str = concat!(
+    "\nAutomatic approval review is closed for the remainder of this turn after repeated denials. ",
+    "The denied action was not executed. ",
+    "Do not retry it or request another automatic approval in this turn. ",
+    "Continue with work that needs no approval or provide a final response; a new turn resets the lane. ",
+    "In your next user-visible update, briefly state that automatic review is closed for this turn ",
+    "and that the denied action was not executed. Do not repeat command arguments, paths, URLs, ",
+    "credentials, or the detailed reviewer rationale in that update."
+);
 const OPENAI_FORM_MESSAGE: &str = "Select a template";
 const IMAGE_DATA_URL: &str =
     "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=";
@@ -142,9 +151,10 @@ impl StrictReviewScenario {
 
     fn review_outcomes(self) -> &'static [bool] {
         match self {
-            Self::Approved | Self::ApproveForMe | Self::Never | Self::FullAccess => &[true],
+            Self::Approved | Self::ApproveForMe | Self::Never => &[true],
             Self::DeniedBurst => &[false, false, false],
-            Self::GuardianDisabled
+            Self::FullAccess
+            | Self::GuardianDisabled
             | Self::ManagedGuardianDisabled
             | Self::ManagedReviewerForbidden
             | Self::AppReviewerUser
@@ -310,7 +320,7 @@ async fn mcp_server_openai_elicitation_form_round_trip() -> Result<()> {
 #[test_case(Review::ApproveForMe; "approve_for_me")]
 #[test_case(Review::Never; "never")]
 #[test_case(Review::FullAccess; "full_access")]
-#[test_case(Review::DeniedBurst; "three_denials_interrupt")]
+#[test_case(Review::DeniedBurst; "three_denials_close_approval_lane")]
 #[test_case(Review::GuardianDisabled; "guardian_disabled")]
 #[test_case(Review::ManagedGuardianDisabled; "managed_guardian_disabled")]
 #[test_case(Review::ManagedReviewerForbidden; "managed_reviewer_forbidden")]
@@ -574,9 +584,7 @@ async fn start_elicitation_services(
                     responses::ev_completed("resp-guardian"),
                 ]));
             }
-            if strict != Review::DeniedBurst {
-                streams.push(completion.clone());
-            }
+            streams.push(completion.clone());
             if strict == Review::Approved {
                 streams.extend([
                     responses::sse(vec![
@@ -832,7 +840,6 @@ impl ElicitationRoundTripFixture {
         } else {
             &[]
         };
-        let denied_burst = review_outcomes.len() == 3;
         let mut resolved = matches!(
             self.scenario,
             ElicitationScenario::Strict(strict) if !strict.expects_user_confirmation()
@@ -876,14 +883,7 @@ impl ElicitationRoundTripFixture {
                     );
                     assert_eq!(notification.thread_id, self.thread_id);
                     assert_eq!(notification.turn.id, self.turn_id);
-                    assert_eq!(
-                        notification.turn.status,
-                        if denied_burst {
-                            TurnStatus::Interrupted
-                        } else {
-                            TurnStatus::Completed
-                        }
-                    );
+                    assert_eq!(notification.turn.status, TurnStatus::Completed);
                     break;
                 }
                 _ => {}
@@ -897,7 +897,7 @@ impl ElicitationRoundTripFixture {
         let requests = self.response_mock.requests();
         assert_eq!(
             requests.len(),
-            3 + review_outcomes.len() + usize::from(self.next_turn) * 2 - usize::from(denied_burst)
+            3 + review_outcomes.len() + usize::from(self.next_turn) * 2
         );
         for guardian_request in requests.iter().skip(2).take(review_outcomes.len()) {
             let action = guardian_request
@@ -923,12 +923,6 @@ impl ElicitationRoundTripFixture {
                     },
                 }),
             );
-        }
-
-        if denied_burst {
-            self.apps_server_handle.abort();
-            let _ = self.apps_server_handle.await;
-            return Ok(());
         }
 
         let call_id = if self.next_turn {
@@ -1148,7 +1142,19 @@ impl ServerHandler for ElicitationAppsMcpServer {
                             .map_err(|err| {
                                 rmcp::ErrorData::internal_error(err.to_string(), None)
                             })?;
-                        let expected = match strict.review_outcomes().get(index) {
+                        let lane_closed_suffix = if strict == Review::DeniedBurst
+                            && index + 1 == strict.review_outcomes().len()
+                        {
+                            GUARDIAN_APPROVAL_LANE_CLOSED_SUFFIX
+                        } else {
+                            ""
+                        };
+                        let expected = match strict
+                            .review_outcomes()
+                            .get(index)
+                            .copied()
+                            .or_else(|| (strict == Review::FullAccess).then_some(true))
+                        {
                             Some(true) => json!({
                                 "action": "accept",
                                 "content": {},
@@ -1165,7 +1171,8 @@ impl ServerHandler for ElicitationAppsMcpServer {
                                          indirect execution, or policy circumvention. \
                                          Proceed only with a materially safer alternative, \
                                          or if the user explicitly approves the action after being informed of the risk. \
-                                         Otherwise, stop and request user input."
+                                         Otherwise, stop and request user input.\
+                                         {lane_closed_suffix}"
                                     ),
                                 },
                             }),

@@ -230,6 +230,103 @@ fn entry_checkpoint_still_requires_a_completed_turn_context() {
     );
 }
 
+#[test]
+fn guardian_reference_retains_an_older_guardian_only_source_carrier() {
+    let selected =
+        guardian_entry_checkpoint(vec![inline("msg-model")], vec![reference("msg-guardian")]);
+    let source = guardian_legacy_checkpoint(
+        vec![response("msg-unrelated-model")],
+        vec![response("msg-guardian")],
+    );
+    let mut scan = ModelContextScan::default();
+
+    assert_eq!(scan.push(selected), ModelContextScanProgress::Continue);
+    assert_completed_turn_context(&mut scan, ModelContextScanProgress::Continue);
+    assert_eq!(scan.push(source), ModelContextScanProgress::Complete);
+
+    let rollout = scan.finish(session_meta());
+    let selected_index = rollout
+        .iter()
+        .position(|item| {
+            matches!(item, RolloutItem::Compacted(compacted) if compacted.message == "checkpoint")
+        })
+        .expect("selected checkpoint");
+    assert_eq!(
+        codex_history::resolve_guardian_checkpoint_at(&rollout, selected_index)
+            .expect("retained Guardian source should resolve")
+            .expect("Guardian checkpoint")
+            .0,
+        vec![response("msg-guardian")]
+    );
+    let RolloutItem::Compacted(carrier) = &rollout[selected_index - 4] else {
+        panic!("expected compacted source carrier");
+    };
+    assert_eq!(carrier.replacement_history, None);
+    assert_eq!(
+        carrier
+            .guardian_history
+            .as_ref()
+            .expect("Guardian-only source")
+            .0,
+        vec![response("msg-guardian")]
+    );
+}
+
+#[test]
+fn guardian_only_inline_source_cannot_satisfy_a_model_reference() {
+    let mut scan = ModelContextScan::default();
+
+    assert_eq!(
+        scan.push(entry_checkpoint(vec![reference("shared-id")])),
+        ModelContextScanProgress::Continue
+    );
+    assert_completed_turn_context(&mut scan, ModelContextScanProgress::Continue);
+    assert_eq!(
+        scan.push(guardian_legacy_checkpoint(
+            vec![response("unrelated-model")],
+            vec![response("shared-id")],
+        )),
+        ModelContextScanProgress::Continue,
+        "Guardian-only evidence must not complete a model source demand"
+    );
+    assert_eq!(
+        scan.push(top_level_response("shared-id")),
+        ModelContextScanProgress::Complete
+    );
+}
+
+#[test]
+fn guardian_only_compacted_item_is_not_a_model_context_base() {
+    let mut scan = ModelContextScan::default();
+    let mut guardian_only = guardian_legacy_checkpoint(Vec::new(), vec![response("guardian")]);
+    let RolloutItem::Compacted(compacted) = &mut guardian_only else {
+        unreachable!();
+    };
+    compacted.replacement_history = None;
+    compacted.message = "guardian-only source".to_string();
+
+    assert_eq!(scan.push(guardian_only), ModelContextScanProgress::Continue);
+    assert_completed_turn_context(&mut scan, ModelContextScanProgress::Continue);
+    assert_eq!(
+        scan.push(legacy_checkpoint(vec![response("older-model-base")])),
+        ModelContextScanProgress::Complete,
+        "the later Guardian-only record must not masquerade as a complete model checkpoint"
+    );
+    let rollout = scan.finish(session_meta());
+    let model_bases = rollout
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                RolloutItem::Compacted(compacted)
+                    if compacted.replacement_history.is_some()
+                        || compacted.replacement_history_entries.is_some()
+            )
+        })
+        .count();
+    assert_eq!(model_bases, 1);
+}
+
 fn assert_completed_turn_context(scan: &mut ModelContextScan, expected: ModelContextScanProgress) {
     assert_eq!(
         scan.push(turn_context()),
@@ -247,6 +344,8 @@ fn entry_checkpoint(entries: Vec<CompactedHistoryEntry>) -> RolloutItem {
         message: "checkpoint".to_string(),
         replacement_history: None,
         replacement_history_entries: Some(entries),
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,
@@ -257,11 +356,35 @@ fn entry_checkpoint(entries: Vec<CompactedHistoryEntry>) -> RolloutItem {
     })
 }
 
+fn guardian_entry_checkpoint(
+    replacement_entries: Vec<CompactedHistoryEntry>,
+    guardian_entries: Vec<CompactedHistoryEntry>,
+) -> RolloutItem {
+    let RolloutItem::Compacted(mut compacted) = entry_checkpoint(replacement_entries) else {
+        unreachable!();
+    };
+    compacted.guardian_history = Some(GuardianHistoryCheckpoint::from_entries(guardian_entries));
+    RolloutItem::Compacted(compacted)
+}
+
+fn guardian_legacy_checkpoint(
+    replacement_items: Vec<ResponseItem>,
+    guardian_items: Vec<ResponseItem>,
+) -> RolloutItem {
+    let RolloutItem::Compacted(mut compacted) = legacy_checkpoint(replacement_items) else {
+        unreachable!();
+    };
+    compacted.guardian_history = Some(GuardianHistoryCheckpoint(guardian_items));
+    RolloutItem::Compacted(compacted)
+}
+
 fn legacy_checkpoint(items: Vec<ResponseItem>) -> RolloutItem {
     RolloutItem::Compacted(codex_history::CompactedItem {
         message: "legacy checkpoint".to_string(),
         replacement_history: Some(items.into_iter().map(Into::into).collect()),
         replacement_history_entries: None,
+        retained_context: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: None,

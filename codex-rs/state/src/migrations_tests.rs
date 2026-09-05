@@ -8,36 +8,135 @@ use std::borrow::Cow;
 #[cfg(windows)]
 use std::fmt::Write as _;
 
+use super::HISTORY_MODE_MIGRATION_VERSION;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
 #[cfg(windows)]
 use super::migration_with_windows_crlf;
 #[cfg(windows)]
 use super::normalize_windows_crlf;
-use super::repair_legacy_history_mode_migration_version;
 use super::repair_legacy_recency_migration_version;
 use super::runtime_state_migrator;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::PINNED_THREAD_SECTION_NAME;
 
 const CUSTOM_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf317";
+const COLLISION_THREAD_ID: &str = "00000000-0000-0000-0000-000000000053";
+const COLLISION_THREAD_RECENCY_AT_MS: i64 = 1_700_000_123_456;
+
+#[derive(Clone, Copy)]
+enum CollisionStartingState {
+    Fresh,
+    Upstream,
+    OldFork,
+    CurrentFork,
+}
+
+fn owned_migrator_like(template: &Migrator, migrations: Vec<Migration>) -> Migrator {
+    Migrator {
+        migrations: Cow::Owned(migrations),
+        ignore_missing: template.ignore_missing,
+        locking: template.locking,
+        table_name: template.table_name.clone(),
+        create_schemas: template.create_schemas.clone(),
+        no_tx: template.no_tx,
+    }
+}
+
+fn migrator_through_from(template: &Migrator, version: i64) -> Migrator {
+    owned_migrator_like(
+        template,
+        template
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= version)
+            .cloned()
+            .collect(),
+    )
+}
 
 fn migrator_through(version: i64) -> Migrator {
-    Migrator {
-        migrations: Cow::Owned(
-            STATE_MIGRATOR
-                .migrations
-                .iter()
-                .filter(|migration| migration.version <= version)
-                .cloned()
-                .collect(),
-        ),
-        ignore_missing: STATE_MIGRATOR.ignore_missing,
-        locking: STATE_MIGRATOR.locking,
-        table_name: STATE_MIGRATOR.table_name.clone(),
-        create_schemas: STATE_MIGRATOR.create_schemas.clone(),
-        no_tx: STATE_MIGRATOR.no_tx,
-    }
+    migrator_through_from(&STATE_MIGRATOR, version)
+}
+
+fn fork_migrator_with_history_mode_at(template: &Migrator, legacy_version: i64) -> Migrator {
+    let history_mode_migration = template
+        .migrations
+        .iter()
+        .find(|migration| migration.version == HISTORY_MODE_MIGRATION_VERSION)
+        .expect("canonical history-mode migration should exist");
+    let mut migrations = template
+        .migrations
+        .iter()
+        .filter(|migration| migration.version < legacy_version)
+        .cloned()
+        .collect::<Vec<_>>();
+    migrations.push(Migration::new(
+        legacy_version,
+        history_mode_migration.description.clone(),
+        history_mode_migration.migration_type,
+        history_mode_migration.sql.clone(),
+        history_mode_migration.no_tx,
+    ));
+    owned_migrator_like(template, migrations)
+}
+
+async fn insert_collision_test_thread(pool: &sqlx::SqlitePool, history_mode: &str) {
+    sqlx::query(
+        r#"
+INSERT INTO projects (id, name, position, created_at_ms, updated_at_ms)
+VALUES (?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind("project-53")
+    .bind("Migration collision project")
+    .bind(0_i64)
+    .bind(1_700_000_000_000_i64)
+    .bind(1_700_000_123_456_i64)
+    .execute(pool)
+    .await
+    .expect("collision test project should insert");
+    sqlx::query(
+        r#"
+INSERT INTO threads (
+    id,
+    rollout_path,
+    created_at,
+    updated_at,
+    recency_at,
+    created_at_ms,
+    updated_at_ms,
+    recency_at_ms,
+    source,
+    model_provider,
+    cwd,
+    title,
+    sandbox_policy,
+    approval_mode,
+    history_mode,
+    project_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(COLLISION_THREAD_ID)
+    .bind("/tmp/migration-collision.jsonl")
+    .bind(1_700_000_000_i64)
+    .bind(1_700_000_123_i64)
+    .bind(1_700_000_123_i64)
+    .bind(1_700_000_000_000_i64)
+    .bind(COLLISION_THREAD_RECENCY_AT_MS)
+    .bind(COLLISION_THREAD_RECENCY_AT_MS)
+    .bind("cli")
+    .bind("openai")
+    .bind("/tmp")
+    .bind("")
+    .bind("read-only")
+    .bind("on-request")
+    .bind(history_mode)
+    .bind("project-53")
+    .execute(pool)
+    .await
+    .expect("collision test thread should insert");
 }
 
 #[cfg(windows)]
@@ -119,6 +218,32 @@ fn runtime_migrations_preserve_embedded_bytes_off_windows() {
         assert_eq!(actual.checksum, embedded.checksum);
         assert_eq!(actual.no_tx, embedded.no_tx);
     }
+}
+
+#[test]
+fn history_mode_migration_keeps_deployed_checksum() {
+    let runtime = runtime_state_migrator();
+    let migration = runtime
+        .migrations
+        .iter()
+        .find(|migration| migration.version == HISTORY_MODE_MIGRATION_VERSION)
+        .expect("canonical history-mode migration should exist");
+    let mut checksum = String::with_capacity(migration.checksum.len() * 2);
+    for byte in migration.checksum.iter() {
+        write!(&mut checksum, "{byte:02X}")
+            .expect("writing a checksum byte to a String should succeed");
+    }
+
+    #[cfg(windows)]
+    assert_eq!(
+        checksum,
+        "72B662B90B6907C514CBC0C46F3BD5267B4F07815AFF6ED418F03E32B38724CD31C3B6235BEC62C06586A7A50E0B97ED"
+    );
+    #[cfg(not(windows))]
+    assert_eq!(
+        checksum,
+        "028EB64082777A8C6F3618131760376A5ED7BE7616EF51FBC6EFE6912BCEAA420A02706EED7DB497933901E80F14D4EC"
+    );
 }
 
 #[tokio::test]
@@ -213,8 +338,7 @@ INSERT INTO threads (
     pool.close().await;
 }
 
-#[tokio::test]
-async fn repairs_history_mode_migration_that_was_applied_as_version_52() {
+async fn assert_collision_state_converges(starting_state: CollisionStartingState) {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
         .await
@@ -223,64 +347,79 @@ async fn repairs_history_mode_migration_that_was_applied_as_version_52() {
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
     let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let pool = sqlite
-        .open_read_write_pool(&sqlite.state_db_path())
-        .await
-        .expect("sqlite database should open");
+    let state_path = sqlite.state_db_path();
     let runtime_migrator = runtime_state_migrator();
-    let pre_collision_migrator = Migrator {
-        migrations: Cow::Owned(
-            runtime_migrator
-                .migrations
-                .iter()
-                .filter(|migration| migration.version <= 51)
-                .cloned()
-                .collect(),
-        ),
-        ignore_missing: runtime_migrator.ignore_missing,
-        locking: runtime_migrator.locking,
-        table_name: runtime_migrator.table_name.clone(),
-        create_schemas: runtime_migrator.create_schemas.clone(),
-        no_tx: runtime_migrator.no_tx,
+
+    match starting_state {
+        CollisionStartingState::Fresh => {}
+        CollisionStartingState::Upstream
+        | CollisionStartingState::OldFork
+        | CollisionStartingState::CurrentFork => {
+            let pool = sqlite
+                .open_read_write_pool(&state_path)
+                .await
+                .expect("sqlite database should open");
+            migrator_through_from(&runtime_migrator, 51)
+                .run(&pool)
+                .await
+                .expect("pre-collision migrations should apply");
+            insert_collision_test_thread(&pool, "paginated_refs_v1").await;
+
+            let starting_migrator = match starting_state {
+                CollisionStartingState::Upstream => migrator_through_from(&runtime_migrator, 53),
+                CollisionStartingState::OldFork => {
+                    fork_migrator_with_history_mode_at(&runtime_migrator, 52)
+                }
+                CollisionStartingState::CurrentFork => {
+                    fork_migrator_with_history_mode_at(&runtime_migrator, 53)
+                }
+                CollisionStartingState::Fresh => unreachable!("fresh state was handled above"),
+            };
+            starting_migrator
+                .run(&pool)
+                .await
+                .expect("starting migration state should apply");
+            if matches!(starting_state, CollisionStartingState::Upstream) {
+                sqlx::query("UPDATE threads SET originator = ? WHERE id = ?")
+                    .bind("upstream-originator")
+                    .bind(COLLISION_THREAD_ID)
+                    .execute(&pool)
+                    .await
+                    .expect("upstream originator should be recorded");
+            }
+            pool.close().await;
+        }
+    }
+
+    let pool = sqlite
+        .open_state_db(&runtime_migrator, /*telemetry_override*/ None)
+        .await
+        .expect("current state migrations should apply after collision repair");
+    if matches!(starting_state, CollisionStartingState::Fresh) {
+        insert_collision_test_thread(&pool, "paginated").await;
+    }
+    let expected_originator = match starting_state {
+        CollisionStartingState::Fresh => "fresh-originator",
+        CollisionStartingState::Upstream => "upstream-originator",
+        CollisionStartingState::OldFork => "old-fork-originator",
+        CollisionStartingState::CurrentFork => "current-fork-originator",
     };
-    pre_collision_migrator
-        .run(&pool)
-        .await
-        .expect("pre-collision migrations should apply");
-
-    let history_mode_migration = runtime_migrator
-        .migrations
-        .iter()
-        .find(|migration| migration.version == 53)
-        .expect("history-mode migration should exist");
-    let mut legacy_migrations = runtime_migrator
-        .migrations
-        .iter()
-        .filter(|migration| migration.version <= 51)
-        .cloned()
-        .collect::<Vec<_>>();
-    legacy_migrations.push(Migration::new(
-        52,
-        history_mode_migration.description.clone(),
-        history_mode_migration.migration_type,
-        history_mode_migration.sql.clone(),
-        history_mode_migration.no_tx,
-    ));
-    Migrator::with_migrations(legacy_migrations)
-        .run(&pool)
-        .await
-        .expect("legacy history-mode migration should apply as version 52");
-
-    repair_legacy_history_mode_migration_version(&pool, &runtime_migrator)
-        .await
-        .expect("legacy migration history should be repaired");
-    runtime_migrator
-        .run(&pool)
-        .await
-        .expect("current migrations should apply after repair");
+    if !matches!(starting_state, CollisionStartingState::Upstream) {
+        sqlx::query("UPDATE threads SET originator = ? WHERE id = ?")
+            .bind(expected_originator)
+            .bind(COLLISION_THREAD_ID)
+            .execute(&pool)
+            .await
+            .expect("originator column should be writable after migration");
+    }
 
     let applied = sqlx::query(
-        "SELECT version, checksum FROM _sqlx_migrations WHERE version >= 52 ORDER BY version",
+        r#"
+SELECT version, description, success, checksum
+FROM _sqlx_migrations
+WHERE version >= 52
+ORDER BY version
+        "#,
     )
     .fetch_all(&pool)
     .await
@@ -289,28 +428,79 @@ async fn repairs_history_mode_migration_that_was_applied_as_version_52() {
     .map(|row| {
         (
             row.get::<i64, _>("version"),
+            row.get::<String, _>("description"),
+            row.get::<bool, _>("success"),
             row.get::<Vec<u8>, _>("checksum"),
         )
     })
     .collect::<Vec<_>>();
-    let expected = runtime_state_migrator()
+    let expected = runtime_migrator
         .migrations
         .iter()
         .filter(|migration| migration.version >= 52)
-        .map(|migration| (migration.version, migration.checksum.to_vec()))
+        .map(|migration| {
+            (
+                migration.version,
+                migration.description.to_string(),
+                true,
+                migration.checksum.to_vec(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(applied, expected);
 
-    let project_recency_index_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_threads_project_recency'",
+    let thread = sqlx::query_as::<_, (String, Option<String>, i64, Option<String>)>(
+        "SELECT history_mode, originator, recency_at_ms, project_id FROM threads WHERE id = ?",
     )
-    .fetch_optional(&pool)
+    .bind(COLLISION_THREAD_ID)
+    .fetch_one(&pool)
     .await
-    .expect("project recency index lookup should succeed")
-    .is_some();
-    assert!(project_recency_index_exists);
+    .expect("collision test thread should load");
+    assert_eq!(
+        thread,
+        (
+            "paginated".to_string(),
+            Some(expected_originator.to_string()),
+            COLLISION_THREAD_RECENCY_AT_MS,
+            Some("project-53".to_string()),
+        )
+    );
+
+    let project_recency_index_sql = sqlx::query_scalar::<_, String>(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_threads_project_recency'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("project recency index should exist");
+    assert_eq!(
+        project_recency_index_sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        "CREATE INDEX idx_threads_project_recency ON threads(project_id, recency_at_ms DESC) WHERE archived = 0 AND project_id IS NOT NULL"
+    );
 
     pool.close().await;
+}
+
+#[tokio::test]
+async fn fresh_state_applies_collision_migrations_canonically() {
+    assert_collision_state_converges(CollisionStartingState::Fresh).await;
+}
+
+#[tokio::test]
+async fn upstream_state_preserves_versions_52_and_53() {
+    assert_collision_state_converges(CollisionStartingState::Upstream).await;
+}
+
+#[tokio::test]
+async fn old_fork_state_repairs_history_mode_from_version_52() {
+    assert_collision_state_converges(CollisionStartingState::OldFork).await;
+}
+
+#[tokio::test]
+async fn current_fork_state_repairs_history_mode_from_version_53() {
+    assert_collision_state_converges(CollisionStartingState::CurrentFork).await;
 }
 
 #[tokio::test]

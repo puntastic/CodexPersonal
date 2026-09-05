@@ -2,12 +2,12 @@
 
 use crate::command_canonicalization::canonicalize_command_for_approval;
 use crate::exec_policy::prompt_is_rejected_by_policy;
+use crate::guardian::GuardianApprovalOutcome;
 use crate::guardian::GuardianNetworkAccessTrigger;
 use crate::guardian::GuardianReviewContext;
 use crate::guardian::GuardianReviewOptions;
 use crate::guardian::guardian_timeout_message;
 use crate::guardian::new_guardian_review_id;
-use crate::guardian::review_approval_request;
 use crate::guardian::review_approval_request_with_cancel;
 use crate::guardian::routes_approval_policy_to_guardian;
 use crate::guardian::spawn_approval_request_review;
@@ -499,7 +499,7 @@ impl Session {
     ) -> Result<ReviewDecision, ToolError> {
         // Stdin that exceeds current permissions needs a fresh sandbox approval.
         // Strict review of ordinary input follows the same routing as ordinary exec.
-        let policy = ctx.review_context.turn().approval_policy();
+        let policy = ctx.review_context.approval_policy;
         if matches!(&action, ApprovalAction::WriteStdin { sandbox_permissions, .. }
             if sandbox_permissions.requests_sandbox_override())
             && !(ctx.strict_auto_review && matches!(policy, AskForApproval::Never))
@@ -564,7 +564,7 @@ impl Session {
                 _ => {}
             }
         }
-        resolution.into_tool_result(ctx.review_context.turn().model_info())
+        resolution.into_tool_result(ctx.review_context.model_info.as_ref())
     }
 
     async fn request_reviewer_approval(
@@ -588,13 +588,22 @@ impl Session {
             )
         };
 
-        let decision = match reviewer {
-            ApprovalReviewer::Guardian => self.request_guardian_approval(action, ctx).await,
-            ApprovalReviewer::User => self.request_user_approval(&action, ctx).await,
-        };
-        let source = match reviewer {
-            ApprovalReviewer::Guardian => ApprovalResolutionSource::Guardian,
-            ApprovalReviewer::User => ApprovalResolutionSource::User,
+        let (decision, source) = match reviewer {
+            ApprovalReviewer::Guardian => {
+                match self.request_guardian_approval(action.clone(), ctx).await {
+                    GuardianApprovalOutcome::Decision(decision) => {
+                        (decision, ApprovalResolutionSource::Guardian)
+                    }
+                    GuardianApprovalOutcome::AskUser => (
+                        self.request_user_approval(&action, ctx).await,
+                        ApprovalResolutionSource::User,
+                    ),
+                }
+            }
+            ApprovalReviewer::User => (
+                self.request_user_approval(&action, ctx).await,
+                ApprovalResolutionSource::User,
+            ),
         };
         ApprovalResolution { decision, source }
     }
@@ -603,7 +612,7 @@ impl Session {
         self: &Arc<Self>,
         action: ApprovalAction,
         ctx: &ApprovalContext,
-    ) -> ReviewDecision {
+    ) -> GuardianApprovalOutcome {
         // Guardian inherits only the current turn's ready environments. A retained
         // terminal handle may outlive its selection, but must not be reviewed in
         // a different environment that happens to have the same launch directory.
@@ -614,26 +623,37 @@ impl Session {
                 .turn_environments()
                 .any(|environment| environment.selection.environment_id == *environment_id)
         {
-            return ReviewDecision::denied(
+            return GuardianApprovalOutcome::Decision(ReviewDecision::denied(
                 "automatic approval review cannot access the terminal's environment; select it before retrying",
-            );
+            ));
         }
         let is_network_approval = matches!(&action, ApprovalAction::NetworkAccess { .. });
+        let require_guardian = ctx.strict_auto_review;
+        let mut review_context = ctx.review_context.clone();
+        if let ApprovalAction::McpToolCall {
+            approval_policy,
+            reviewer,
+            ..
+        } = &action
+        {
+            review_context.approval_policy = *approval_policy;
+            review_context.approvals_reviewer = *reviewer;
+        }
         let review_id = new_guardian_review_id();
         let action = match action.into_guardian_request() {
             Ok(action) => action,
             Err(err) => {
                 tracing::error!(%err, "failed to build automatic approval action");
-                return ReviewDecision::denied(
+                return GuardianApprovalOutcome::Decision(ReviewDecision::denied(
                     "automatic approval review could not prepare the action",
-                );
+                ));
             }
         };
 
         if let Some(cancellation_token) = &ctx.cancellation_token {
             let review = spawn_approval_request_review(
                 Arc::clone(self),
-                ctx.review_context.clone(),
+                review_context,
                 review_id,
                 action,
                 ApprovalRequestReasons {
@@ -644,17 +664,19 @@ impl Session {
                     plugin_attribution_override: None,
                     approval_request_source: GuardianApprovalRequestSource::MainTurn,
                     external_cancel: Some(cancellation_token.clone()),
+                    require_guardian,
                     require_synchronous_review: false,
                 },
             );
             review.await.unwrap_or_else(|_| {
-                ReviewDecision::denied("automatic approval review could not complete")
+                GuardianApprovalOutcome::Decision(ReviewDecision::denied(
+                    "automatic approval review could not complete",
+                ))
             })
         } else if is_network_approval {
             let review_cancel = CancellationToken::new();
             let review_cancel_guard = review_cancel.clone().drop_guard();
             let review_session = Arc::clone(self);
-            let review_context = ctx.review_context.clone();
             let retry_reason = ctx.retry_reason.clone();
             let review = tokio::spawn(async move {
                 review_approval_request_with_cancel(
@@ -667,6 +689,7 @@ impl Session {
                         plugin_attribution_override: None,
                         approval_request_source: GuardianApprovalRequestSource::MainTurn,
                         external_cancel: Some(review_cancel),
+                        require_guardian,
                         require_synchronous_review: false,
                     },
                 )
@@ -674,22 +697,36 @@ impl Session {
             });
             let decision = review.await.unwrap_or_else(|err| {
                 warn!("network Guardian review task failed: {err}");
-                ReviewDecision::denied("automatic approval review could not complete")
+                GuardianApprovalOutcome::Decision(ReviewDecision::denied(
+                    "automatic approval review could not complete",
+                ))
             });
             drop(review_cancel_guard.disarm());
             decision
         } else {
-            review_approval_request(
-                self,
-                ctx.review_context.clone(),
+            spawn_approval_request_review(
+                Arc::clone(self),
+                review_context,
                 review_id,
                 action,
                 ApprovalRequestReasons {
                     approval: ctx.approval_reason.clone(),
                     retry: ctx.retry_reason.clone(),
                 },
+                GuardianReviewOptions {
+                    plugin_attribution_override: None,
+                    approval_request_source: GuardianApprovalRequestSource::MainTurn,
+                    external_cancel: None,
+                    require_guardian,
+                    require_synchronous_review: false,
+                },
             )
             .await
+            .unwrap_or_else(|_| {
+                GuardianApprovalOutcome::Decision(ReviewDecision::denied(
+                    "automatic approval review could not complete",
+                ))
+            })
         }
     }
 
@@ -708,15 +745,6 @@ impl Session {
                 proposed_execpolicy_amendment,
                 ..
             } => {
-                let cwd = match guardian_cwd(environment_id, cwd.clone()) {
-                    Ok(cwd) => cwd,
-                    Err(err) => {
-                        tracing::error!(%err, "failed to resolve approval command cwd");
-                        return ReviewDecision::denied(format!(
-                            "failed to resolve approval command cwd: {err}"
-                        ));
-                    }
-                };
                 let tool_name = "unified_exec";
                 let reason = ctx
                     .retry_reason
@@ -743,7 +771,7 @@ impl Session {
                         /*approval_id*/ None,
                         Some(environment_id.clone()),
                         command.clone(),
-                        cwd.into(),
+                        cwd.clone(),
                         reason,
                         ctx.network_approval_context.clone(),
                         proposed_execpolicy_amendment.clone(),

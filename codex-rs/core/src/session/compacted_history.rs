@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use codex_history::CompactedHistoryEntry;
+use codex_history::GuardianHistoryCheckpoint;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RolloutItem;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 
 /// Storage representation for one complete compacted history.
@@ -84,6 +86,64 @@ pub(super) fn encode_replacement_history(
     }
 }
 
+/// Encodes a Guardian checkpoint against exact durable response-item sources.
+///
+/// Guardian history intentionally carries response items rather than harness metadata. V2
+/// references nevertheless bind the complete persisted source envelope, so a later metadata-only
+/// substitution still fails closed before its response item can be restored as review evidence.
+pub(super) fn encode_guardian_history(
+    checkpoint: GuardianHistoryCheckpoint,
+    persisted_items: &HashMap<String, ResponseItemEnvelope>,
+    history_mode: ThreadHistoryMode,
+) -> GuardianHistoryCheckpoint {
+    if !history_mode.supports_compacted_history_references() || checkpoint.is_reference_backed() {
+        return checkpoint;
+    }
+
+    let conflicting_item_ids = conflicting_response_item_ids(&checkpoint.0);
+    let mut has_reference = false;
+    let entries = checkpoint
+        .0
+        .iter()
+        .cloned()
+        .map(|item| {
+            let exact_source = item.id().and_then(|item_id| {
+                if conflicting_item_ids.contains(item_id.as_str()) {
+                    None
+                } else {
+                    persisted_items
+                        .get(item_id.as_str())
+                        .filter(|source| source.item == item)
+                        .map(|source| (item_id.as_str().to_string(), source))
+                }
+            });
+
+            if let Some((item_id, source)) = exact_source {
+                if history_mode.supports_compacted_history_integrity() {
+                    match CompactedHistoryEntry::reference_v2(item_id, source) {
+                        Ok(reference) => {
+                            has_reference = true;
+                            reference
+                        }
+                        Err(_) => CompactedHistoryEntry::from(ResponseItemEnvelope::new(item)),
+                    }
+                } else {
+                    has_reference = true;
+                    CompactedHistoryEntry::Reference { item_id }
+                }
+            } else {
+                CompactedHistoryEntry::from(ResponseItemEnvelope::new(item))
+            }
+        })
+        .collect();
+
+    if has_reference {
+        GuardianHistoryCheckpoint::from_entries(entries)
+    } else {
+        checkpoint
+    }
+}
+
 fn conflicting_history_item_ids(items: &[ResponseItemEnvelope]) -> HashSet<String> {
     let mut first_by_id = HashMap::new();
     let mut conflicting = HashSet::new();
@@ -107,6 +167,25 @@ fn conflicting_history_item_ids(items: &[ResponseItemEnvelope]) -> HashSet<Strin
     conflicting
 }
 
+fn conflicting_response_item_ids(items: &[ResponseItem]) -> HashSet<String> {
+    let mut first_by_id = HashMap::new();
+    let mut conflicting = HashSet::new();
+    for item in items {
+        if let Some(item_id) = item.id().map(codex_protocol::ResponseItemId::as_str) {
+            match first_by_id.entry(item_id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(item);
+                }
+                std::collections::hash_map::Entry::Occupied(entry) if entry.get() != &item => {
+                    conflicting.insert(item_id.to_string());
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {}
+            }
+        }
+    }
+    conflicting
+}
+
 pub(super) fn retained_checkpoint_reference_item_ids(
     items: &[RolloutItem],
     keep_start_index: usize,
@@ -120,7 +199,21 @@ pub(super) fn retained_checkpoint_reference_item_ids(
                 && selected_checkpoint_index.is_none_or(|base| *index >= base)
         })
         .filter_map(|(_, item)| match item {
-            RolloutItem::Compacted(compacted) => compacted.replacement_history_entries.as_deref(),
+            RolloutItem::Compacted(compacted) => Some(
+                compacted
+                    .replacement_history_entries
+                    .as_deref()
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        compacted
+                            .guardian_history
+                            .as_ref()
+                            .and_then(GuardianHistoryCheckpoint::entries)
+                            .into_iter()
+                            .flatten(),
+                    ),
+            ),
             _ => None,
         })
         .flatten()
@@ -154,13 +247,18 @@ pub(super) fn normalize_copied_fork_rollout(
 
     for (index, mut item) in items.into_iter().enumerate() {
         let keep_checkpoint = selected_checkpoint_index.is_none_or(|base| index >= base);
-        let resolved_parent_history =
+        let (resolved_parent_history, resolved_parent_guardian) =
             if keep_checkpoint && let RolloutItem::Compacted(compacted) = &item {
-                source_resolver
-                    .resolve_compacted_item(compacted)
-                    .map_err(copied_fork_reference_error)?
+                (
+                    source_resolver
+                        .resolve_compacted_item(compacted)
+                        .map_err(copied_fork_reference_error)?,
+                    source_resolver
+                        .resolve_guardian_history(compacted)
+                        .map_err(copied_fork_reference_error)?,
+                )
             } else {
-                None
+                (None, None)
             };
         source_resolver.index_explicit_sources_for_ids(&item, &requested_source_item_ids);
 
@@ -172,6 +270,9 @@ pub(super) fn normalize_copied_fork_rollout(
             if let Some(replacement_history) = resolved_parent_history {
                 compacted.replacement_history = Some(replacement_history);
                 compacted.replacement_history_entries = None;
+            }
+            if let Some(guardian_history) = resolved_parent_guardian {
+                compacted.guardian_history = Some(guardian_history);
             }
             if history_mode.supports_compacted_history_references() {
                 if history_mode.supports_compacted_history_integrity() {

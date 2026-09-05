@@ -45,6 +45,8 @@ pub use compacted_history::MaterializedCompactedHistories;
 pub use compacted_history::materialize_compacted_histories;
 pub use compacted_history::resolve_checkpoint_at;
 pub use compacted_history::resolve_checkpoint_at_detailed;
+pub use compacted_history::resolve_guardian_checkpoint_at;
+pub use compacted_history::resolve_guardian_checkpoint_at_detailed;
 
 /// A model-history item with room for history-only metadata.
 ///
@@ -67,6 +69,18 @@ pub struct CodexHarnessMetadata {
     /// Measured in tokens, with any tool-specific allowance already included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_token_limit_override: Option<usize>,
+
+    /// Whether a response configuration update was created by the Codex harness itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub harness_authored_configuration: bool,
+
+    /// Producer compatibility for an opaque compaction item, never the currently selected model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_model_hash: Option<String>,
+
+    /// Thread acceptance order, independent of when queued user input reaches model history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_input_order: Option<u64>,
 }
 
 const COMPACTED_HISTORY_DIGEST_PREFIX: &str = "sha256-response-item-envelope-v1:";
@@ -255,6 +269,7 @@ pub enum RolloutItem {
     TokenUsageRecord(TokenUsageRecord),
     WorldState(WorldStateItem),
     SecurityRiskScore(SecurityRiskScore),
+    RetainedContext(RetainedContextEvent),
     EventMsg(EventMsg),
     /// Sparse, model-invisible facts used to reconstruct realtime presentation.
     RealtimeItem(RealtimeItem),
@@ -292,6 +307,15 @@ impl JsonSchema for RolloutItem {
     }
 }
 
+mod guardian_history;
+mod retained_context;
+
+pub use retained_context::RetainedContext;
+pub use retained_context::RetainedContextEntry;
+pub use retained_context::RetainedContextEvent;
+pub use retained_context::RetainedUserMessage;
+pub use retained_context::VerifiedAnswer;
+pub use retained_context::VerifiedQuestionAnswer;
 mod rollout_payload;
 
 /// A replacement-history entry stored inline or resolved by a persisted item ID.
@@ -300,8 +324,9 @@ mod rollout_payload;
 pub enum CompactedHistoryEntry {
     Inline {
         item: Box<ResponseItem>,
+        // Keep the enum bounded as harness metadata grows. Box is transparent to serde.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        metadata: Option<CodexHarnessMetadata>,
+        metadata: Option<Box<CodexHarnessMetadata>>,
     },
     Reference {
         item_id: String,
@@ -319,7 +344,7 @@ impl CompactedHistoryEntry {
         match self {
             Self::Inline { item, metadata } => Some(ResponseItemEnvelope {
                 item: *item,
-                metadata,
+                metadata: metadata.map(|metadata| *metadata),
             }),
             Self::Reference { .. } | Self::ReferenceV2 { .. } => None,
         }
@@ -341,16 +366,19 @@ impl From<ResponseItemEnvelope> for CompactedHistoryEntry {
     fn from(envelope: ResponseItemEnvelope) -> Self {
         Self::Inline {
             item: Box::new(envelope.item),
-            metadata: envelope.metadata,
+            metadata: envelope.metadata.map(Box::new),
         }
     }
 }
+pub use guardian_history::GuardianHistoryCheckpoint;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactedItem {
     pub message: String,
     pub replacement_history: Option<Vec<ResponseItemEnvelope>>,
     pub replacement_history_entries: Option<Vec<CompactedHistoryEntry>>,
+    pub guardian_history: Option<GuardianHistoryCheckpoint>,
+    pub retained_context: Option<RetainedContext>,
     pub mcp_resource_origins: Option<McpResourceOriginCheckpoint>,
     pub window_number: Option<u64>,
     pub first_window_id: Option<String>,
@@ -413,7 +441,11 @@ impl From<CompactedItem> for ResponseItem {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, JsonSchema)]
+/// One persisted rollout JSONL record.
+///
+/// This intentionally does not implement Deserialize: JSONL readers must use
+/// codex_rollout's canonical parser so nested decimal values survive the flattened envelope.
+#[derive(Serialize, Clone, JsonSchema)]
 pub struct RolloutLine {
     pub timestamp: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -631,6 +663,7 @@ fn multi_agent_version_from_items(
             | RolloutItem::Compacted(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::EventMsg(_) => None,

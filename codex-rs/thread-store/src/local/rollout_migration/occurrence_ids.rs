@@ -168,6 +168,7 @@ impl MigrationOccurrenceIds {
             | RolloutItem::TurnContext(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::RealtimeItem(_) => Ok(OccurrencePreparation::unchanged()),

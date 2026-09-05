@@ -21,4 +21,9 @@ error: string | null,
 /**
  * Typed recovery reason for the current thread-runtime startup failure, when known.
  */
-failureReason: McpServerStartupFailureReason | null, pluginId: string | null, serverInfo: McpServerInfo | null, tools: { [key in string]?: Tool }, resources: Array<Resource>, resourceTemplates: Array<ResourceTemplate>, authStatus: McpAuthStatus, };
+failureReason: McpServerStartupFailureReason | null, pluginId: string | null, serverInfo: McpServerInfo | null, tools: { [key in string]?: Tool },
+/**
+ * Tool discovery failed and no catalog was returned.
+ * Null when a catalog is returned, including cached or empty catalogs.
+ */
+toolsError: string | null, resources: Array<Resource>, resourceTemplates: Array<ResourceTemplate>, authStatus: McpAuthStatus, };

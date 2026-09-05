@@ -21,7 +21,7 @@ source, staged, configured, and live state separately.
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small
 
 .EXAMPLE
-.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.153.0
+.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.153.0-alpha.5
 
 .EXAMPLE
 .\codex-dev.ps1 -Action Deploy -PackageDirectory .\codex-rs\target\desktop-dev\packages\example

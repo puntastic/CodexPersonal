@@ -5,6 +5,7 @@ use crate::analytics_utils::analytics_events_client_from_config;
 use crate::config_manager::ConfigManager;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingMessageSender;
+use crate::plugin_config_reload::PluginStartupConfig;
 use crate::transport::AppServerTransport;
 use crate::transport::ConnectionOrigin;
 use anyhow::Result;
@@ -271,7 +272,7 @@ async fn build_test_processor(
         code_mode_session_provider: None,
         rpc_transport: AppServerRpcTransport::Stdio,
         remote_control_handle: None,
-        plugin_startup_tasks: crate::PluginStartupTasks::Start,
+        plugin_startup_tasks: Some(PluginStartupConfig::Current),
     }));
     (processor, outgoing_rx)
 }

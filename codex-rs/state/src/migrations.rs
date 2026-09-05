@@ -16,6 +16,8 @@ pub(crate) static MEMORIES_MIGRATOR: Migrator = sqlx::migrate!("./memory_migrati
 pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx::migrate!("./queue_migrations");
 pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator = sqlx::migrate!("./thread_history_migrations");
 
+const HISTORY_MODE_MIGRATION_VERSION: i64 = 20_260_827_031_709;
+
 /// Allow an older Codex binary to open a database that has already been
 /// migrated by a newer binary running in parallel.
 ///
@@ -114,14 +116,24 @@ pub(crate) async fn repair_legacy_recency_migration_version(
     repair_legacy_migration_version(pool, migrator, 38, 39).await
 }
 
-/// The desktop repair branch shipped history-mode normalization as migration
-/// 52 before upstream assigned that version to project recency. Move only the
-/// exact legacy checksum to its canonical version so both migrations can run.
-pub(crate) async fn repair_legacy_history_mode_migration_version(
+/// Desktop repair branches shipped history-mode normalization as migrations
+/// 52 and 53 before upstream assigned those versions to project recency and
+/// thread originator. Move only the exact legacy checksum to its canonical
+/// version so all three migrations can run.
+pub(crate) async fn repair_legacy_history_mode_migration_versions(
     pool: &SqlitePool,
     migrator: &Migrator,
 ) -> anyhow::Result<()> {
-    repair_legacy_migration_version(pool, migrator, 52, 53).await
+    for legacy_version in [52, 53] {
+        repair_legacy_migration_version(
+            pool,
+            migrator,
+            legacy_version,
+            HISTORY_MODE_MIGRATION_VERSION,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn repair_legacy_migration_version(

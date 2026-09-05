@@ -1318,6 +1318,7 @@ async fn fill_missing_thread_item_metadata_from_state_db(
 
 fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadItem) {
     let ThreadItem {
+        originator,
         path: _state_path,
         thread_id: _state_thread_id,
         first_user_message,
@@ -1334,11 +1335,17 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
         agent_nickname,
         agent_role,
         model_provider,
+        model,
+        reasoning_effort,
         cli_version,
         created_at,
         updated_at,
         recency_at,
     } = state_item;
+
+    if item.originator.is_none() {
+        item.originator = originator;
+    }
 
     if item.first_user_message.is_none() {
         item.first_user_message = first_user_message;
@@ -1348,6 +1355,8 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
     }
     item.section = section;
     item.project_id = project_id;
+    item.model = model;
+    item.reasoning_effort = reasoning_effort;
     if item.cwd.is_none() {
         item.cwd = cwd;
     }
@@ -2184,6 +2193,7 @@ fn thread_item_from_state_metadata(
     parent_thread_id: Option<ThreadId>,
 ) -> ThreadItem {
     ThreadItem {
+        originator: item.originator,
         path: item.rollout_path,
         thread_id: Some(item.id),
         first_user_message: item.first_user_message,
@@ -2204,6 +2214,8 @@ fn thread_item_from_state_metadata(
         agent_nickname: item.agent_nickname,
         agent_role: item.agent_role,
         model_provider: Some(item.model_provider),
+        model: item.model,
+        reasoning_effort: item.reasoning_effort,
         cli_version: Some(item.cli_version),
         created_at: Some(item.created_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
         updated_at: Some(item.updated_at.to_rfc3339_opts(SecondsFormat::Millis, true)),
@@ -2257,6 +2269,7 @@ async fn resume_candidate_matches_cwd(
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::TokenUsageRecord(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => None,
         })

@@ -6,8 +6,11 @@ use codex_core::config::Config;
 use codex_core::config::TokenBudgetConfig;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
+use codex_login::CodexAuth;
+use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
+use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::items::TurnItem;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::protocol::CONTEXT_WINDOW_CLOSE_TAG;
@@ -60,6 +63,19 @@ use test_case::test_case;
 
 const CONFIGURED_CONTEXT_WINDOW: i64 = 128_000;
 const AUTO_COMPACT_FALLBACK_PROMPT: &str = "Save the important state before rollover.";
+
+#[derive(Clone, Copy)]
+enum ExperimentalContextAuth {
+    Chatgpt(&'static str),
+    ApiKey,
+}
+
+#[derive(Clone, Copy)]
+enum ExperimentalContextProviderCredential {
+    EnvKey,
+    CommandAuth,
+    Aws,
+}
 
 fn model_token_budget_config() -> ModelTokenBudgetConfig {
     ModelTokenBudgetConfig {
@@ -235,8 +251,13 @@ async fn token_budget_context_is_only_emitted_with_full_context() -> Result<()> 
     Ok(())
 }
 
+#[test_case("features.token_budget.enabled = true", false; "token_budget")]
+#[test_case("features.context_management.experimental_mode = true", true; "experimental_mode")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn token_budget_guidance_precedes_standalone_context_window() -> Result<()> {
+async fn token_budget_guidance_precedes_standalone_context_window(
+    activation: &'static str,
+    expected_history_ingest: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -249,18 +270,26 @@ async fn token_budget_guidance_precedes_standalone_context_window() -> Result<()
     )
     .await;
     let guidance_message = "Preserve important state before compaction.";
+    let backend_url = format!("{}/backend-api/codex", server.uri());
     let test = test_codex()
+        .with_auth(CodexAuth::from_external_chatgpt_tokens(
+            "header.e30.signature",
+            "account-123",
+            Some("plus"),
+        )?)
+        .with_pre_build_hook(move |home| {
+            std::fs::write(
+                home.join("config.toml"),
+                format!(
+                    "{activation}\nfeatures.token_budget.guidance_message = {guidance_message:?}\n"
+                ),
+            )
+            .expect("write token-budget guidance configuration");
+        })
         .with_config(move |config| {
+            config.model_provider.base_url = Some(backend_url);
             config.update_plan_enabled = true;
             config.model_context_window = Some(CONFIGURED_CONTEXT_WINDOW);
-            config.token_budget = Some(TokenBudgetConfig {
-                guidance_message: Some(guidance_message.to_string()),
-                ..TokenBudgetConfig::default()
-            });
-            config
-                .features
-                .enable(Feature::TokenBudget)
-                .expect("test config should allow token budget");
         })
         .build_with_auto_env(&server)
         .await?;
@@ -268,6 +297,15 @@ async fn token_budget_guidance_precedes_standalone_context_window() -> Result<()
     test.submit_turn("inspect context guidance").await?;
 
     let request = response.single_request();
+    let turn_metadata: Value = serde_json::from_str(
+        &request
+            .header("x-codex-turn-metadata")
+            .expect("turn metadata header"),
+    )?;
+    assert_eq!(
+        turn_metadata["history_ingest_requested"].as_bool(),
+        expected_history_ingest.then_some(true),
+    );
     assert!(request.has_content_kinds(&[
         "token_budget.context_window_guidance",
         "permissions.instructions",
@@ -287,6 +325,137 @@ async fn token_budget_guidance_precedes_standalone_context_window() -> Result<()
         })
         .expect("context-window guidance should be present");
     assert!(guidance_index < context_window_index);
+
+    Ok(())
+}
+
+#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/backend-api/codex", None, true; "plus")]
+#[test_case(ExperimentalContextAuth::Chatgpt("pro"), "OpenAI", "/backend-api/codex", None, true; "pro")]
+#[test_case(ExperimentalContextAuth::Chatgpt("prolite"), "OpenAI", "/backend-api/codex", None, true; "pro_lite")]
+#[test_case(ExperimentalContextAuth::Chatgpt("free"), "OpenAI", "/backend-api/codex", None, false; "free")]
+#[test_case(ExperimentalContextAuth::Chatgpt("enterprise"), "OpenAI", "/backend-api/codex", None, false; "enterprise")]
+#[test_case(ExperimentalContextAuth::ApiKey, "OpenAI", "/backend-api/codex", None, false; "api_key")]
+#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "Custom", "/backend-api/codex", None, false; "custom_provider")]
+#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/v1", None, false; "non_codex_endpoint")]
+#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/backend-api/codex", Some("test-provider-token"), false; "provider_credentials")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn experimental_context_requires_eligible_auth_and_provider(
+    auth: ExperimentalContextAuth,
+    provider_name: &'static str,
+    base_path: &'static str,
+    bearer_token: Option<&'static str>,
+    expected_enabled: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(&server, sse_completed("resp-1")).await;
+    let base_url = format!("{}{base_path}", server.uri());
+    let auth = match auth {
+        ExperimentalContextAuth::Chatgpt(plan_type) => CodexAuth::from_external_chatgpt_tokens(
+            "header.e30.signature",
+            "account-123",
+            Some(plan_type),
+        )?,
+        ExperimentalContextAuth::ApiKey => CodexAuth::from_api_key("test-api-key"),
+    };
+    let test = test_codex()
+        .with_auth(auth)
+        .with_config(move |config| {
+            config.model_provider.name = provider_name.to_string();
+            config.model_provider.base_url = Some(base_url);
+            config.model_provider.experimental_bearer_token = bearer_token.map(Into::into);
+            config.model_context_window = Some(CONFIGURED_CONTEXT_WINDOW);
+            config
+                .features
+                .enable(Feature::ContextManagement)
+                .expect("test config should allow experimental context");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_turn("inspect experimental context activation")
+        .await?;
+
+    let request = response.single_request();
+    let turn_metadata: Value = serde_json::from_str(
+        &request
+            .header("x-codex-turn-metadata")
+            .expect("turn metadata header"),
+    )?;
+    assert_eq!(
+        (
+            tool_names(&request)
+                .iter()
+                .any(|name| name == "new_context"),
+            !token_budget_contexts(&request).is_empty(),
+            turn_metadata["history_ingest_requested"].as_bool(),
+        ),
+        (
+            expected_enabled,
+            expected_enabled,
+            expected_enabled.then_some(true),
+        ),
+    );
+
+    Ok(())
+}
+
+#[test_case(ExperimentalContextProviderCredential::EnvKey; "environment key")]
+#[test_case(ExperimentalContextProviderCredential::CommandAuth; "command auth")]
+#[test_case(ExperimentalContextProviderCredential::Aws; "aws auth")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn experimental_context_rejects_provider_owned_credentials(
+    credential: ExperimentalContextProviderCredential,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let base_url = format!("{}/backend-api/codex", server.uri());
+    let auth = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.signature",
+        "account-123",
+        Some("plus"),
+    )?;
+    let test = test_codex()
+        .with_auth(auth)
+        .with_config(move |config| {
+            config.model_provider.name = "OpenAI".to_string();
+            config.model_provider.base_url = Some(base_url);
+            match credential {
+                ExperimentalContextProviderCredential::EnvKey => {
+                    config.model_provider.env_key = Some("UNUSED_TEST_PROVIDER_KEY".to_string());
+                }
+                ExperimentalContextProviderCredential::CommandAuth => {
+                    config.model_provider.auth = Some(
+                        serde_json::from_value::<ModelProviderAuthInfo>(json!({
+                            "command": "unused-test-provider-auth"
+                        }))
+                        .expect("command auth fixture should deserialize"),
+                    );
+                }
+                ExperimentalContextProviderCredential::Aws => {
+                    config.model_provider.aws = Some(ModelProviderAwsAuthInfo {
+                        profile: Some("unused-test-profile".to_string()),
+                        region: Some("us-east-1".to_string()),
+                        auth_refresh: None,
+                    });
+                }
+            }
+            config.model_context_window = Some(CONFIGURED_CONTEXT_WINDOW);
+            config
+                .features
+                .enable(Feature::ContextManagement)
+                .expect("test config should allow experimental context");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    let runtime_config = test.codex.config().await;
+    assert!(runtime_config.features.enabled(Feature::ContextManagement));
+    assert!(!runtime_config.features.enabled(Feature::TokenBudget));
+    assert_eq!(runtime_config.token_budget, None);
+    test.codex.shutdown_and_wait().await?;
 
     Ok(())
 }
@@ -380,8 +549,13 @@ async fn token_budget_explicit_default_template_overrides_model_defaults() -> Re
     Ok(())
 }
 
+#[test_case("features.token_budget.enabled = true", false; "token_budget")]
+#[test_case("features.context_management.experimental_mode = true", true; "experimental_mode")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn token_budget_defaults_follow_the_active_model() -> Result<()> {
+async fn token_budget_defaults_follow_the_active_model(
+    activation: &'static str,
+    expected_history_ingest: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -390,7 +564,17 @@ async fn token_budget_defaults_follow_the_active_model() -> Result<()> {
         vec![sse_completed("resp-1"), sse_completed("resp-2")],
     )
     .await;
+    let backend_url = format!("{}/backend-api/codex", server.uri());
     let test = test_codex()
+        .with_auth(CodexAuth::from_external_chatgpt_tokens(
+            "header.e30.signature",
+            "account-123",
+            Some("plus"),
+        )?)
+        .with_pre_build_hook(move |home| {
+            std::fs::write(home.join("config.toml"), format!("{activation}\n"))
+                .expect("write token-budget activation configuration");
+        })
         .with_model_info_override("gpt-5.2", |model_info| {
             let mut defaults = model_token_budget_config();
             defaults.guidance_message = "Use first-model context-window guidance.".to_string();
@@ -410,12 +594,9 @@ async fn token_budget_defaults_follow_the_active_model() -> Result<()> {
                 .token_budget = Some(defaults);
         })
         .with_model("gpt-5.2")
-        .with_config(|config| {
+        .with_config(move |config| {
+            config.model_provider.base_url = Some(backend_url);
             config.model_context_window = Some(CONFIGURED_CONTEXT_WINDOW);
-            config
-                .features
-                .enable(Feature::TokenBudget)
-                .expect("test config should allow token budget");
         })
         .build_with_auto_env(&server)
         .await?;
@@ -442,6 +623,19 @@ async fn token_budget_defaults_follow_the_active_model() -> Result<()> {
 
     let requests = responses.requests();
     assert_eq!(requests.len(), 2);
+    for request in &requests {
+        let turn_metadata: Value = serde_json::from_str(
+            &request
+                .header("x-codex-turn-metadata")
+                .expect("turn metadata header"),
+        )?;
+        assert_eq!(
+            turn_metadata["history_ingest_requested"].as_bool(),
+            expected_history_ingest.then_some(true),
+            "history-notes activation should remain fixed across model switches",
+        );
+        assert_eq!(token_budget_contexts(request).len(), 1);
+    }
     assert!(requests[0].body_contains_text("Use first-model context-window guidance."));
     assert!(
         requests[1].body_contains_text("Use first-model context-window guidance."),

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use crate::ResponseItemEnvelope;
 use crate::RolloutItem;
 use codex_history::CompactedHistoryEntry;
+use codex_history::GuardianHistoryCheckpoint;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -63,7 +64,10 @@ pub struct ModelContextScan {
     saw_compaction: bool,
     saw_completed_turn_context: bool,
     must_scan_to_start: bool,
+    /// Replacement-history references, which Guardian-only inline evidence cannot satisfy.
     unresolved_reference_ids: HashSet<String>,
+    /// Guardian review-history references, satisfied by normal or Guardian-only explicit sources.
+    unresolved_guardian_reference_ids: HashSet<String>,
     active_segment: ActiveTurnSegment,
 }
 
@@ -138,7 +142,20 @@ impl ModelContextScan {
 
         match item {
             RolloutItem::Compacted(compacted) => {
-                if compacted.window_number.is_none()
+                let guardian_only_source = compacted.replacement_history.is_none()
+                    && compacted.replacement_history_entries.is_none()
+                    && compacted.guardian_history.is_some();
+                if guardian_only_source {
+                    // A filtered source carrier has no model checkpoint semantics. It may supply
+                    // older Guardian references, but it must neither become the selected base nor
+                    // force legacy full replay merely because its model-history fields are empty.
+                    if self.saw_compaction
+                        && let Some(carrier) = self.explicit_source_carrier(item)
+                    {
+                        observation.explicit_source_carrier = Some(carrier);
+                        observation.is_explicit_source = true;
+                    }
+                } else if compacted.window_number.is_none()
                     || compacted.replacement_history.is_some()
                         == compacted.replacement_history_entries.is_some()
                 {
@@ -156,6 +173,20 @@ impl ModelContextScan {
                                 | CompactedHistoryEntry::ReferenceV2 { item_id, .. } = entry
                                 {
                                     self.unresolved_reference_ids.insert(item_id.clone());
+                                }
+                            }
+                        }
+                        if let Some(entries) = compacted
+                            .guardian_history
+                            .as_ref()
+                            .and_then(GuardianHistoryCheckpoint::entries)
+                        {
+                            for entry in entries {
+                                if let CompactedHistoryEntry::Reference { item_id }
+                                | CompactedHistoryEntry::ReferenceV2 { item_id, .. } = entry
+                                {
+                                    self.unresolved_guardian_reference_ids
+                                        .insert(item_id.clone());
                                 }
                             }
                         }
@@ -237,6 +268,7 @@ impl ModelContextScan {
             | RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::RealtimeItem(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_) => {}
         }
@@ -277,73 +309,127 @@ impl ModelContextScan {
         match item {
             RolloutItem::ResponseItem(envelope) => {
                 let item_id = envelope.item.id()?;
-                self.unresolved_reference_ids
-                    .remove(item_id.as_str())
-                    .then(|| item.clone())
+                let item_id = item_id.as_str();
+                let model_source = self.unresolved_reference_ids.remove(item_id);
+                let guardian_source = self.unresolved_guardian_reference_ids.remove(item_id);
+                (model_source || guardian_source).then(|| item.clone())
             }
             RolloutItem::Compacted(compacted) => {
-                if let Some(replacement_history) = &compacted.replacement_history {
-                    let mut found_ids = HashSet::new();
-                    let mut retained = replacement_history
-                        .iter()
-                        .rev()
-                        .filter_map(|envelope| {
-                            let item_id = envelope.item.id()?;
-                            let item_id = item_id.as_str();
-                            (self.unresolved_reference_ids.contains(item_id)
-                                && found_ids.insert(item_id.to_string()))
-                            .then(|| envelope.clone())
-                        })
-                        .collect::<Vec<_>>();
-                    if retained.is_empty() {
-                        return None;
-                    }
-                    retained.reverse();
-                    for item_id in found_ids {
-                        self.unresolved_reference_ids.remove(&item_id);
-                    }
-
-                    let mut carrier = compacted.clone();
-                    carrier.replacement_history = Some(retained);
-                    carrier.replacement_history_entries = None;
-                    Some(RolloutItem::Compacted(carrier))
-                } else if let Some(entries) = &compacted.replacement_history_entries {
-                    let mut found_ids = HashSet::new();
-                    let mut retained = entries
-                        .iter()
-                        .rev()
-                        .filter_map(|entry| {
-                            let CompactedHistoryEntry::Inline { item, .. } = entry else {
-                                return None;
-                            };
-                            let item_id = item.id()?;
-                            let item_id = item_id.as_str();
-                            (self.unresolved_reference_ids.contains(item_id)
-                                && found_ids.insert(item_id.to_string()))
-                            .then(|| entry.clone())
-                        })
-                        .collect::<Vec<_>>();
-                    if retained.is_empty() {
-                        return None;
-                    }
-                    retained.reverse();
-                    for item_id in found_ids {
-                        self.unresolved_reference_ids.remove(&item_id);
-                    }
-
-                    let mut carrier = compacted.clone();
-                    carrier.replacement_history = None;
-                    carrier.replacement_history_entries = Some(retained);
-                    Some(RolloutItem::Compacted(carrier))
-                } else {
-                    None
+                // Guardian is logically indexed after replacement history at a checkpoint. During
+                // the reverse scan, claim Guardian-only requests there first. These sources may
+                // never satisfy model replacement-history references.
+                let mut guardian_found_ids = HashSet::new();
+                let retained_guardian =
+                    compacted.guardian_history.as_ref().and_then(|checkpoint| {
+                        if let Some(entries) = checkpoint.entries() {
+                            let mut retained = entries
+                                .iter()
+                                .rev()
+                                .filter_map(|entry| {
+                                    let CompactedHistoryEntry::Inline { item, .. } = entry else {
+                                        return None;
+                                    };
+                                    let item_id = item.id()?;
+                                    let item_id = item_id.as_str();
+                                    (self.unresolved_guardian_reference_ids.contains(item_id)
+                                        && guardian_found_ids.insert(item_id.to_string()))
+                                    .then(|| entry.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            retained.reverse();
+                            (!retained.is_empty())
+                                .then(|| GuardianHistoryCheckpoint::from_entries(retained))
+                        } else {
+                            let mut retained = checkpoint
+                                .0
+                                .iter()
+                                .rev()
+                                .filter_map(|response_item| {
+                                    let item_id = response_item.id()?;
+                                    let item_id = item_id.as_str();
+                                    (self.unresolved_guardian_reference_ids.contains(item_id)
+                                        && guardian_found_ids.insert(item_id.to_string()))
+                                    .then(|| response_item.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            retained.reverse();
+                            (!retained.is_empty()).then(|| GuardianHistoryCheckpoint(retained))
+                        }
+                    });
+                for item_id in guardian_found_ids {
+                    self.unresolved_guardian_reference_ids.remove(&item_id);
                 }
+
+                // Replacement-history inline values are ordinary rollout sources and can satisfy
+                // either source window. Last occurrence wins within the stored sequence.
+                let mut replacement_found_ids = HashSet::new();
+                let retained_replacement_history =
+                    compacted
+                        .replacement_history
+                        .as_ref()
+                        .and_then(|replacement_history| {
+                            let mut retained = replacement_history
+                                .iter()
+                                .rev()
+                                .filter_map(|envelope| {
+                                    let item_id = envelope.item.id()?;
+                                    let item_id = item_id.as_str();
+                                    ((self.unresolved_reference_ids.contains(item_id)
+                                        || self
+                                            .unresolved_guardian_reference_ids
+                                            .contains(item_id))
+                                        && replacement_found_ids.insert(item_id.to_string()))
+                                    .then(|| envelope.clone())
+                                })
+                                .collect::<Vec<_>>();
+                            retained.reverse();
+                            (!retained.is_empty()).then_some(retained)
+                        });
+                let retained_replacement_entries = compacted
+                    .replacement_history_entries
+                    .as_ref()
+                    .and_then(|entries| {
+                        let mut retained = entries
+                            .iter()
+                            .rev()
+                            .filter_map(|entry| {
+                                let CompactedHistoryEntry::Inline { item, .. } = entry else {
+                                    return None;
+                                };
+                                let item_id = item.id()?;
+                                let item_id = item_id.as_str();
+                                ((self.unresolved_reference_ids.contains(item_id)
+                                    || self.unresolved_guardian_reference_ids.contains(item_id))
+                                    && replacement_found_ids.insert(item_id.to_string()))
+                                .then(|| entry.clone())
+                            })
+                            .collect::<Vec<_>>();
+                        retained.reverse();
+                        (!retained.is_empty()).then_some(retained)
+                    });
+                for item_id in replacement_found_ids {
+                    self.unresolved_reference_ids.remove(&item_id);
+                    self.unresolved_guardian_reference_ids.remove(&item_id);
+                }
+
+                if retained_guardian.is_none()
+                    && retained_replacement_history.is_none()
+                    && retained_replacement_entries.is_none()
+                {
+                    return None;
+                }
+                let mut carrier = compacted.clone();
+                carrier.replacement_history = retained_replacement_history;
+                carrier.replacement_history_entries = retained_replacement_entries;
+                carrier.guardian_history = retained_guardian;
+                Some(RolloutItem::Compacted(carrier))
             }
             RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_)
             | RolloutItem::RealtimeItem(_)
@@ -356,6 +442,7 @@ impl ModelContextScan {
             && self.saw_compaction
             && self.saw_completed_turn_context
             && self.unresolved_reference_ids.is_empty()
+            && self.unresolved_guardian_reference_ids.is_empty()
     }
 }
 
@@ -421,6 +508,7 @@ fn item_is_completed_turn_context_metadata(item: &RolloutItem) -> bool {
         RolloutItem::SessionMeta(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::RetainedContext(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_)
         | RolloutItem::RealtimeItem(_)
