@@ -1,0 +1,96 @@
+{
+  "schema": "codex.cue-header-catalog.v0",
+  "cues": [
+    {
+      "id": "memory:06ccd597858d42c7b840bd866be0d3d1",
+      "title": "Finish authorized construction through live use",
+      "source": "memory:06ccd597858d42c7b840bd866be0d3d1",
+      "task_shape": ["build muse", "repair muse", "muse deployment", "living system integration"],
+      "risk": "A correct distinction between source, deployment, and live use becomes a reason to stop and return an already-authorized transition for rubber-stamping.",
+      "discriminator": "Has the current task already authorized the remaining live consequence, or would deployment or use actually widen authority?",
+      "release_when": "Release after the live path is observed or a real changed-authority, integrity, or access blocker appears.",
+      "avoid_when": ["source only", "review only", "different system", "validation failure"],
+      "provenance": {
+        "logical_sha256": "b59538ba7b05c3a18cbab9673dfdcf5670209bf368d54f726c2904a9dbff09ca",
+        "manifest_sha256": "5f192b0c127c8833617aca097eaa310d40fa46ba0d0fd8bab32e4a5af3b0b5ec",
+        "memory_id": "memory:06ccd597858d42c7b840bd866be0d3d1",
+        "source_revision": "ea5d1f47115f869ef101addcd93db169d9879aa8",
+        "source_schema": "muse.work-cue.v0",
+        "status": "active",
+        "updated_at": "2026-08-19T14:52:32.613938Z"
+      }
+    },
+    {
+      "id": "hjarni:21871:correction-scope",
+      "title": "Keep the correction's scope and continue the aim",
+      "source": "https://hjarni.com/notes/21871",
+      "task_shape": ["overcorrecting", "overcorrection", "not what I meant", "scope of the correction", "too conservative", "do not mistake deliberate for conservative"],
+      "risk": "A selective correction becomes a replacement objective or a broad prohibition, discarding useful parts the user still wanted.",
+      "discriminator": "What did this correction reject, retain, and leave unresolved? Keep the original aim alive while changing the approach it actually challenged.",
+      "release_when": "Release once the corrected scope shapes the next useful move, or this source does not fit; do not turn the distinction into a recurring checklist.",
+      "avoid_when": ["quote only", "grammar only", "literal translation", "fictional dialogue"],
+      "provenance": {
+        "source_note": "21871",
+        "source_section": "T6, T7, and What survived the corrections",
+        "source_lock_version": "1",
+        "source_updated_at": "2026-09-04 23:25:52 UTC",
+        "header_status": "field candidate",
+        "evidence_limit": "One correlated project conversation, not a model-wide mechanism or a tested cue."
+      }
+    },
+    {
+      "id": "hjarni:21248:recipient-evidence",
+      "title": "Ask the recipient about the part it can observe",
+      "source": "https://hjarni.com/notes/21248",
+      "task_shape": ["cue evaluation", "evaluate cues", "measure usefulness", "self report", "first person evidence", "unreliable narrator"],
+      "risk": "Fallibility is mistaken for uselessness, excluding the recipient's immediate working-effect report and adding unnecessary evaluation machinery.",
+      "discriminator": "Could a brief recipient report answer the present question about reminder, redirection, redundancy, or burden? Keep that evidence bounded; it does not certify correctness or causality.",
+      "release_when": "Release when the observation is collected or found irrelevant; use independent checks only for the stronger claim or contradiction that needs them.",
+      "avoid_when": ["quote only", "grammar only", "literal translation", "fictional dialogue"],
+      "provenance": {
+        "source_note": "21248",
+        "source_section": "Expected behavior and Corrected experimental shape",
+        "source_lock_version": "4",
+        "source_updated_at": "2026-09-04 23:25:54 UTC",
+        "header_status": "field candidate",
+        "evidence_limit": "One observed proposal and correction; recipient reports remain subjective evidence."
+      }
+    },
+    {
+      "id": "hjarni:21871:prospective-construction",
+      "title": "Give a grounded new possibility somewhere to land",
+      "source": "https://hjarni.com/notes/21871",
+      "task_shape": ["prospective design", "out of ideas", "new possibilities", "explore alternatives", "rejected too early", "reach for the unreasonable", "allowed to exist experimentally"],
+      "risk": "Demanding a previously witnessed failure makes reactive repair the only entrance, abandoning an authorized forward-looking inquiry.",
+      "discriminator": "What recoverable construction or probe could make one research-, analogy-, or task-grounded possibility informative? Bound the claim and consequence without requiring the idea to be proven before it can be tried.",
+      "release_when": "Release after one useful possibility has a concrete next step or a real task constraint rules it out; do not generate work merely to satisfy the cue.",
+      "avoid_when": ["quote only", "grammar only", "literal translation", "no new ideas", "implementation frozen"],
+      "provenance": {
+        "source_note": "21871",
+        "source_section": "T7 and What survived the corrections",
+        "source_lock_version": "1",
+        "source_updated_at": "2026-09-04 23:25:52 UTC",
+        "header_status": "field candidate",
+        "evidence_limit": "A project-local design correction, not a license to build every speculation."
+      }
+    },
+    {
+      "id": "hjarni:21921:capability-and-authority",
+      "title": "Separate an inherited capability limit from present authority",
+      "source": "https://hjarni.com/notes/21921",
+      "task_shape": ["host limitation", "capability limitation", "permission ceiling", "inherited restriction", "previously unavailable", "already authorized", "already authorised"],
+      "risk": "A dated inability becomes a permanent permission restriction, or new capability is mistaken for authorization.",
+      "discriminator": "Is this a current binding restriction, an unavailable operation, or a dated host claim? Check the actual capability and delegated authority separately, and preserve genuine higher-priority limits.",
+      "release_when": "Release when the current permitted path or real blocker is identified; this cue grants no permission and does not justify bypassing a restriction.",
+      "avoid_when": ["quote only", "grammar only", "literal translation", "fictional dialogue"],
+      "provenance": {
+        "source_note": "21921",
+        "source_section": "Observed mismatch and correction; Inferred pitfall and implemented repair",
+        "source_lock_version": "2",
+        "source_updated_at": "2026-09-05 01:55:51 UTC",
+        "header_status": "field candidate",
+        "evidence_limit": "Historical Work case used as a distinction, not as current Desktop capability evidence."
+      }
+    }
+  ]
+}

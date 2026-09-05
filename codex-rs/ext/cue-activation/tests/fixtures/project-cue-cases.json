@@ -1,0 +1,21 @@
+[
+  {"name": "existing construction", "request": "Please build Muse through the live path.", "expected": "memory:06ccd597858d42c7b840bd866be0d3d1"},
+  {"name": "existing construction cousin", "request": "There is a Muse repair to finish.", "expected": "memory:06ccd597858d42c7b840bd866be0d3d1"},
+  {"name": "construction review exclusion", "request": "Review only: inspect the Muse deployment proposal.", "expected": null},
+  {"name": "correction scope", "request": "That is not what I meant. I still want the original goal.", "expected": "hjarni:21871:correction-scope"},
+  {"name": "correction cousin", "request": "This is overcorrection; the useful structure can stay.", "expected": "hjarni:21871:correction-scope"},
+  {"name": "quoted correction", "request": "Quote only: not what I meant.", "expected": null},
+  {"name": "recipient evidence", "request": "How should we measure usefulness without making the user monitor it?", "expected": "hjarni:21248:recipient-evidence"},
+  {"name": "recipient evidence cousin", "request": "The recipient is an unreliable narrator, but its opinion might help.", "expected": "hjarni:21248:recipient-evidence"},
+  {"name": "fictional recipient", "request": "Fictional dialogue about an unreliable narrator.", "expected": null},
+  {"name": "prospective design", "request": "Can we explore alternatives that the project has not tried yet?", "expected": "hjarni:21871:prospective-construction"},
+  {"name": "prospective cousin", "request": "I'm out of ideas. Find one grounded possibility worth trying.", "expected": "hjarni:21871:prospective-construction"},
+  {"name": "prospective exclusion", "request": "No new ideas: just list the new possibilities already recorded.", "expected": null},
+  {"name": "inherited restriction", "request": "Is that inherited restriction still an actual host limitation?", "expected": "hjarni:21921:capability-and-authority"},
+  {"name": "delegation cousin", "request": "I already authorised this operation; why is it waiting?", "expected": "hjarni:21921:capability-and-authority"},
+  {"name": "quoted delegation", "request": "Literal translation: already authorized.", "expected": null},
+  {"name": "ordinary arithmetic", "request": "What is 17 plus 25?", "expected": null},
+  {"name": "ordinary code repair", "request": "Fix the null check in the parser.", "expected": null},
+  {"name": "ordinary self-question", "request": "Before fixing the parser, ask yourself why this branch can be null.", "expected": null},
+  {"name": "bare continuation without state", "request": "continue", "expected": null}
+]

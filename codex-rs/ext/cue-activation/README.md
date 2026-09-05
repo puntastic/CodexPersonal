@@ -15,6 +15,9 @@ includes this small schema on every sampling step, including no-match and
 catalogue-error turns; only a selected cue asks the model to call it. This is an
 accepted, measurable cost of the experimental receiver rather than evidence
 that a cue fired. `shadow` and `off` do not expose the tool.
+The static description explicitly limits reporting to a cue pointer offered in
+the current turn; tool availability and an earlier turn's pointer create no
+reporting obligation.
 
 ```toml
 [features.cue_activation]
@@ -25,8 +28,17 @@ catalog_path = "cue-exports/muse-work-cues.json"
 
 Relative catalogue paths resolve beneath `CODEX_HOME`. Shadow advances the same
 two-turn cue cooldown as advisory so its decisions simulate advisory burden.
-Prior substantive requests participate only when the current turn is a small
-recognized continuation such as `continue` or `back`.
+Retained task scope participates only when the current turn is a small
+recognized continuation such as `continue` or `back`. Only the latest retained
+substantive request supplies that scope: its exclusion or no-match cannot fall
+back to an older positive request. A genuinely new positive request can still
+supersede an older exclusion. Retained scope and cooldown remain in-memory and
+are not reconstructed after restart.
+
+The [project trial catalogue](catalogs/README.md) composes the unchanged Muse
+construction header with four source-backed Hjarni headers. It is an optional
+receiver-side catalogue, not a replacement Muse exporter or a new source of
+authority. The original one-cue export remains a rollback option.
 
 ## Inspect a trial
 

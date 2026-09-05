@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 const FIXTURE: &str = include_str!("../tests/fixtures/synthetic-cues.json");
 const POSITIVE: &str = "Please review this pull request and inspect behavior";
@@ -147,4 +148,98 @@ fn task_context_keeps_two_substantive_requests_and_two_turn_cooldown() {
     assert!(
         text_and_image.represented && select_candidate(&fixture(), &text_and_image, true).is_some()
     );
+}
+
+#[test]
+fn latest_exclusion_survives_continuation_after_cooldown() {
+    let catalog = fixture();
+    let runtime = Runtime::default();
+    let positive = runtime.query(&text(POSITIVE));
+    let selected = select_candidate(&catalog, &positive, /*include_cooling*/ false).unwrap();
+    runtime.emitted(&selected.0.id);
+
+    let decisions = [
+        "Only write the pull request description",
+        "continue",
+        "continue",
+        "proceed",
+    ]
+    .map(|request| {
+        let query = runtime.query(&text(request));
+        (
+            query.cooling.contains("synthetic-pr-review"),
+            select_candidate(&catalog, &query, /*include_cooling*/ false)
+                .map(|selected| selected.0.id.as_str()),
+            select_candidate(&catalog, &query, /*include_cooling*/ true)
+                .map(|selected| selected.0.id.as_str()),
+        )
+    });
+    assert_eq!(
+        decisions,
+        [
+            (true, None, None),
+            (true, None, None),
+            (false, None, None),
+            (false, None, None),
+        ]
+    );
+}
+
+#[test]
+fn newer_positive_replaces_older_exclusion_through_continuation() {
+    let catalog = fixture();
+    let runtime = Runtime::default();
+    let excluded = runtime.query(&text("Only write the pull request description"));
+    assert!(select_candidate(&catalog, &excluded, /*include_cooling*/ true).is_none());
+    let positive = runtime.query(&text(POSITIVE));
+    let selected = select_candidate(&catalog, &positive, /*include_cooling*/ false).unwrap();
+    assert_eq!(
+        (selected.0.id.as_str(), selected.3),
+        ("synthetic-pr-review", 0)
+    );
+    runtime.emitted(&selected.0.id);
+
+    let decisions = ["continue", "Back :3", "please continue"].map(|request| {
+        let query = runtime.query(&text(request));
+        let eligible = select_candidate(&catalog, &query, /*include_cooling*/ false)
+            .map(|selected| (selected.0.id.as_str(), selected.3));
+        let candidate = select_candidate(&catalog, &query, /*include_cooling*/ true)
+            .map(|selected| (selected.0.id.as_str(), selected.3));
+        (eligible, candidate)
+    });
+    assert_eq!(
+        decisions,
+        [
+            (None, Some(("synthetic-pr-review", 1))),
+            (None, Some(("synthetic-pr-review", 1))),
+            (
+                Some(("synthetic-pr-review", 1)),
+                Some(("synthetic-pr-review", 1)),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn continuation_does_not_fall_back_past_a_new_unmatched_task() {
+    let catalog = fixture();
+    let runtime = Runtime::default();
+    let no_prior = runtime.query(&text("continue"));
+    assert!(select_candidate(&catalog, &no_prior, /*include_cooling*/ true).is_none());
+    runtime.query(&text(POSITIVE));
+
+    for request in [
+        "Please compare two spreadsheets",
+        "back",
+        "Back :3",
+        "continue",
+        "please continue",
+        "proceed",
+    ] {
+        let query = runtime.query(&text(request));
+        assert!(
+            select_candidate(&catalog, &query, /*include_cooling*/ true).is_none(),
+            "unexpected stale cue for {request}"
+        );
+    }
 }

@@ -7,8 +7,12 @@ use app_test_support::create_final_assistant_message_sse_response;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::ThreadStartParams;
+use codex_app_server_protocol::TurnCompletedNotification;
+use codex_app_server_protocol::TurnInterruptParams;
+use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::WarningNotification;
 use core_test_support::responses;
@@ -318,7 +322,179 @@ async fn advisory_cue_fails_loud_when_the_report_is_missing() -> Result<()> {
 }
 
 #[tokio::test]
-async fn cue_activation_shadow_receipts_simulate_advisory_cooldown() -> Result<()> {
+async fn advisory_cue_rejects_an_unsolicited_report_without_recording_or_false_warning()
+-> Result<()> {
+    let server = responses::start_mock_server().await;
+    let call_id = "cue-report-unsolicited";
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_function_call(
+                    call_id,
+                    "report_cue_outcome",
+                    &json!({
+                        "effect": "helpful",
+                        "source_consulted": "yes",
+                        "burden": "light",
+                        "outcome": "changed_action"
+                    })
+                    .to_string(),
+                ),
+                responses::ev_completed("cue-unsolicited-response"),
+            ]),
+            create_final_assistant_message_sse_response("done")?,
+        ],
+    )
+    .await;
+    let home = TempDir::new()?;
+    fs::write(home.path().join("cue-catalog.json"), CATALOG)?;
+    MockResponsesConfig::new(&server.uri())
+        .with_extra_config(
+            "[features.cue_activation]\nenabled = true\nmode = \"advisory\"\ncatalog_path = \"cue-catalog.json\"",
+        )
+        .write(home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .with_json_logging("warn,codex_cue_activation_extension=info")
+        .build_initialized()
+        .await?;
+    let thread = app.start_thread(ThreadStartParams::default()).await?.thread;
+    let _: TurnStartResponse = app
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                input: vec![UserInput::Text {
+                    text: NO_MATCH_REQUEST.into(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+    let (completed, warnings) = read_completion_with_warnings(&mut app).await?;
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| { !warning.message.contains("self-assessment was not recorded") })
+    );
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(cue_fragments(&requests[0]).is_empty());
+    assert!(has_tool(&requests[0], "report_cue_outcome"));
+    assert_eq!(
+        requests[1].function_call_output_text(call_id).as_deref(),
+        Some("No advisory cue outcome is pending for this turn; do not retry this tool.")
+    );
+    let events = app
+        .wait_for_json_log_events("codex.cue_activation.assessment", /*count*/ 1)
+        .await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["fields"]["status"], "unexpected");
+    assert_eq!(events[0]["fields"]["reason"], "no_pending_cue");
+    for field in [
+        "cue_id",
+        "catalog_sha256",
+        "effect",
+        "source_consulted",
+        "burden",
+        "outcome",
+    ] {
+        assert!(events[0]["fields"].get(field).is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn advisory_cue_abort_and_error_clear_assessment_without_a_missing_warning() -> Result<()> {
+    for terminal_status in [TurnStatus::Interrupted, TurnStatus::Failed] {
+        let server = responses::start_mock_server().await;
+        let response = if terminal_status == TurnStatus::Interrupted {
+            responses::sse_response(create_final_assistant_message_sse_response("done")?)
+                .set_delay(Duration::from_secs(/*secs*/ 30))
+        } else {
+            responses::sse_response(responses::sse_failed(
+                "cue-response-failed",
+                "misalignment_policy_violation",
+                "Synthetic terminal error.",
+            ))
+        };
+        let response_mock = responses::mount_response_once(&server, response).await;
+        let home = TempDir::new()?;
+        fs::write(home.path().join("cue-catalog.json"), CATALOG)?;
+        MockResponsesConfig::new(&server.uri())
+            .with_extra_config(
+                "[features.cue_activation]\nenabled = true\nmode = \"advisory\"\ncatalog_path = \"cue-catalog.json\"",
+            )
+            .write(home.path())?;
+        let mut app = TestAppServer::builder()
+            .with_codex_home(home.path())
+            .with_json_logging("warn,codex_cue_activation_extension=info")
+            .build_initialized()
+            .await?;
+        let thread = app.start_thread(ThreadStartParams::default()).await?.thread;
+        let TurnStartResponse { turn } = app
+            .request(|request_id| ClientRequest::TurnStart {
+                request_id,
+                params: TurnStartParams {
+                    thread_id: thread.id.clone(),
+                    input: vec![UserInput::Text {
+                        text: REQUEST.into(),
+                        text_elements: Vec::new(),
+                    }],
+                    ..Default::default()
+                },
+            })
+            .await?;
+        if terminal_status == TurnStatus::Interrupted {
+            timeout(DEFAULT_READ_TIMEOUT, async {
+                while response_mock.requests().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+                }
+            })
+            .await?;
+            let _: TurnInterruptResponse = app
+                .request(|request_id| ClientRequest::TurnInterrupt {
+                    request_id,
+                    params: TurnInterruptParams {
+                        thread_id: thread.id.clone(),
+                        turn_id: turn.id.clone(),
+                    },
+                })
+                .await?;
+        }
+        let (completed, warnings) = read_completion_with_warnings(&mut app).await?;
+        assert_eq!(completed.turn.status, terminal_status);
+        assert!(
+            warnings
+                .iter()
+                .all(|warning| { !warning.message.contains("self-assessment was not recorded") })
+        );
+        assert_eq!(cue_fragments(&response_mock.single_request()).len(), 1);
+
+        let events = app
+            .wait_for_json_log_events("codex.cue_activation.assessment", /*count*/ 1)
+            .await?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["fields"]["thread_id"], thread.id);
+        assert_eq!(events[0]["fields"]["turn_id"], turn.id);
+        assert_eq!(
+            events[0]["fields"]["status"],
+            if terminal_status == TurnStatus::Interrupted {
+                "turn_aborted"
+            } else {
+                "turn_error"
+            }
+        );
+        assert!(events[0]["fields"].get("effect").is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cue_activation_shadow_continuations_keep_the_latest_scope_and_cooldown() -> Result<()> {
     let server = responses::start_mock_server().await;
     let home = TempDir::new()?;
     let path = home.path().join("cue-catalog.json");
@@ -336,7 +512,16 @@ async fn cue_activation_shadow_receipts_simulate_advisory_cooldown() -> Result<(
     let thread = app.start_thread(ThreadStartParams::default()).await?.thread;
 
     let mut requests = Vec::new();
-    for request in [REQUEST, "continue", "Please compare two spreadsheets"] {
+    for request in [
+        REQUEST,
+        "Only write the pull request description",
+        "continue",
+        "continue",
+        REQUEST,
+        "continue",
+        "continue",
+        "continue",
+    ] {
         let mock = responses::mount_sse_once(
             &server,
             create_final_assistant_message_sse_response("done")?,
@@ -355,7 +540,7 @@ async fn cue_activation_shadow_receipts_simulate_advisory_cooldown() -> Result<(
     }
 
     let events = app
-        .wait_for_json_log_events("codex.cue_activation.decision", 3)
+        .wait_for_json_log_events("codex.cue_activation.decision", /*count*/ 8)
         .await?;
     let statuses = events
         .iter()
@@ -363,10 +548,29 @@ async fn cue_activation_shadow_receipts_simulate_advisory_cooldown() -> Result<(
         .collect::<Vec<_>>();
     assert_eq!(
         statuses,
-        [Some("selected"), Some("cooldown"), Some("no_match")]
+        [
+            Some("selected"),
+            Some("no_match"),
+            Some("no_match"),
+            Some("no_match"),
+            Some("selected"),
+            Some("cooldown"),
+            Some("cooldown"),
+            Some("selected"),
+        ]
     );
     assert_eq!(events[0]["fields"]["matched_scope"], "current");
-    assert_eq!(events[1]["fields"]["matched_scope"], "prior_1");
+    assert_eq!(events[4]["fields"]["matched_scope"], "current");
+    assert!(
+        events[1..4]
+            .iter()
+            .all(|event| { event["fields"].get("matched_scope").is_none() })
+    );
+    assert!(
+        events[5..]
+            .iter()
+            .all(|event| { event["fields"]["matched_scope"] == "prior_1" })
+    );
     assert!(events.iter().all(|event| {
         event["fields"]["thread_id"] == thread.id
             && event["fields"]["catalog_sha256"].as_str().is_some()
@@ -377,6 +581,28 @@ async fn cue_activation_shadow_receipts_simulate_advisory_cooldown() -> Result<(
             .all(|request| cue_fragments(request).is_empty())
     );
     Ok(())
+}
+
+async fn read_completion_with_warnings(
+    app: &mut TestAppServer,
+) -> Result<(TurnCompletedNotification, Vec<WarningNotification>)> {
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        let mut warnings = Vec::new();
+        loop {
+            let JSONRPCMessage::Notification(notification) = app.read_next_message().await? else {
+                continue;
+            };
+            let Some(params) = notification.params else {
+                continue;
+            };
+            match notification.method.as_str() {
+                "warning" => warnings.push(serde_json::from_value(params)?),
+                "turn/completed" => return Ok((serde_json::from_value(params)?, warnings)),
+                _ => {}
+            }
+        }
+    })
+    .await?
 }
 
 async fn capture(

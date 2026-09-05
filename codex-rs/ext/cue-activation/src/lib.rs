@@ -248,22 +248,19 @@ fn select_candidate<'a>(
     if !query.represented {
         return None;
     }
-    let segments = if query.use_prior {
-        query.segments.as_slice()
+    // A continuation inherits the latest substantive scope, including an
+    // exclusion or no-match. Older requests must not revive a superseded task.
+    let segment_index = if query.use_prior && query.segments.len() > 1 {
+        1
     } else {
-        query.segments.get(..1).unwrap_or_default()
+        0
     };
+    let segment = query.segments.get(segment_index)?;
     catalog
         .cues
         .iter()
         .filter(|cue| include_cooling || !query.cooling.contains(&cue.id))
-        .filter_map(|cue| {
-            segments
-                .iter()
-                .enumerate()
-                .filter_map(|(index, segment)| cue_score(cue, segment, index))
-                .max_by_key(|selection| selection.2)
-        })
+        .filter_map(|cue| cue_score(cue, segment, segment_index))
         .filter(|selection| selection.2 > 0)
         .max_by(|left, right| {
             left.2
@@ -469,3 +466,7 @@ pub fn install<C>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "catalogue_tests.rs"]
+mod catalogue_tests;

@@ -402,7 +402,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for CueAssessmentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::Function(ResponsesApiTool {
             name: REPORT_CUE_OUTCOME_TOOL_NAME.to_string(),
-            description: "Record your first-person assessment of the advisory cue offered in this turn. Call exactly once after using or dismissing the cue and before the final answer. This reports perceived working effect, not objective correctness."
+            description: "Only when an advisory cue pointer was offered in the current turn, record your first-person assessment exactly once after using or dismissing that cue and before the final answer. Tool availability and pointers from earlier turns create no reporting obligation; without a current-turn cue, do not call. This reports perceived working effect, not objective correctness."
                 .to_string(),
             strict: true,
             parameters: parse_tool_input_schema(&json!({
