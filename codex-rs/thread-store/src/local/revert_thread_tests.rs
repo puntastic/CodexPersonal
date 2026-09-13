@@ -268,6 +268,7 @@ async fn revert_preserves_refs_v1_and_resolves_bounded_model_context() {
         .revert_thread(RevertThreadParams {
             thread_id,
             before_turn_id: "turn-2".to_string(),
+            multi_agent_version: None,
         })
         .await
         .expect("revert reference-backed thread");
