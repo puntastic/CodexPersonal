@@ -3319,10 +3319,7 @@ async fn guardian_review_does_not_retry_missing_assessment_payload() -> anyhow::
     )
     .await;
 
-    assert!(matches!(
-        decision,
-        ReviewDecision::Denied { .. }
-    ));
+    assert!(matches!(decision, ReviewDecision::Denied { .. }));
     assert_eq!(request_log.requests().len(), 1);
     Ok(())
 }
@@ -3426,10 +3423,7 @@ async fn guardian_review_exhausts_three_failures_with_one_terminal_event() -> an
     )
     .await;
 
-    assert!(matches!(
-        decision,
-        ReviewDecision::Denied { .. }
-    ));
+    assert!(matches!(decision, ReviewDecision::Denied { .. }));
     assert_eq!(request_log.requests().len(), 3);
     let mut statuses = Vec::new();
     while let Ok(event) = rx.try_recv() {
@@ -3480,10 +3474,7 @@ async fn guardian_review_does_not_retry_valid_denial() -> anyhow::Result<()> {
     )
     .await;
 
-    assert!(matches!(
-        decision,
-        ReviewDecision::Denied { .. }
-    ));
+    assert!(matches!(decision, ReviewDecision::Denied { .. }));
     assert_eq!(request_log.requests().len(), 1);
     Ok(())
 }
@@ -3527,8 +3518,7 @@ async fn guardian_review_closes_lane_and_rejects_next_request_without_review() -
             ApprovalRequestReasons::default(),
         )
         .await;
-        let ReviewDecision::Denied { rejection } = decision
-        else {
+        let ReviewDecision::Denied { rejection } = decision else {
             panic!("Guardian should deny review {id}: {decision:?}");
         };
         denial_rejections.push(rejection);
@@ -3672,10 +3662,7 @@ async fn full_access_approves_with_closed_guardian_lane_without_mutating_breaker
         )
     };
 
-    assert_eq!(
-        decision,
-        ReviewDecision::Approved
-    );
+    assert_eq!(decision, ReviewDecision::Approved);
     assert_eq!(breaker_after, breaker_before);
 }
 
@@ -3887,10 +3874,7 @@ async fn required_guardian_without_cancellation_overrides_extension_ask_user(
     };
 
     let decision = session.request_guardian_approval(action, &context).await;
-    assert!(matches!(
-        decision,
-        Some(ReviewDecision::Denied { .. })
-    ));
+    assert!(matches!(decision, Some(ReviewDecision::Denied { .. })));
     assert_eq!(request_log.requests().len(), 1);
     assert_eq!(
         observed.lock().expect("observed approvals").as_slice(),
@@ -3966,10 +3950,7 @@ async fn escalated_retry_bypasses_extension_approval_and_runs_guardian() -> anyh
     )
     .await;
 
-    assert!(matches!(
-        decision,
-        ReviewDecision::Denied { .. }
-    ));
+    assert!(matches!(decision, ReviewDecision::Denied { .. }));
     assert!(
         request_log
             .single_request()

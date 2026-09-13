@@ -76,7 +76,7 @@ ordinary Rust recipes unsandboxed.
 ```powershell
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small
 .\codex-dev.ps1 -Action Build -CargoProfile release
-.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.153.0-alpha.5
+.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.154.0
 ```
 
 `dev-small` is the normal iteration profile. `release` is available when the
@@ -102,10 +102,22 @@ the version sent in a fresh remote-control enrollment and returned when the
 remote backend initializes. It leaves the CLI, package, local-client, and
 WebSocket protocol versions unchanged and records the selected value in
 `codex-dev-build.json`.
+Requalify that example value against the actual source and Desktop baseline;
+an old successful advertisement is not a perpetual compatibility identity.
 
 This override is a validated stopgap, not the intended version-provenance
 design. See [remote-control version compatibility](remote-control-version-compatibility.md)
 for the evidence, design constraints, and deferred acceptance criteria.
+
+When database migration compatibility is material, the Windows-only
+`probe_upgrade_startup.py` accepts explicit `--candidate` and `--previous`
+executable paths, `--source-db`, and a fresh `--output` directory. It opens the
+source read-only for an online SQLite backup, keeps that untouched backup,
+and starts both packages against a second, isolated copy. Remote control is
+disabled for the probes and credentials use a fresh file-only home. The probe
+does not select a Desktop package, modify the source database, run a model
+turn, or prove phone compatibility. Use it for a qualified migration question,
+not as a compulsory whole-profile preservation exercise on every update.
 
 ## Deploy, restart, verify
 

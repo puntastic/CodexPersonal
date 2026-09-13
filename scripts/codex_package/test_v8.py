@@ -163,7 +163,9 @@ class FetchCodexV8ArtifactsTest(unittest.TestCase):
 
             with (
                 patch("codex_package.v8.REPO_ROOT", cache_root),
-                patch("codex_package.v8.download_file", side_effect=OSError("offline")) as download,
+                patch(
+                    "codex_package.v8.download_file", side_effect=OSError("offline")
+                ) as download,
             ):
                 with self.assertRaisesRegex(OSError, "offline"):
                     fetch_codex_v8_artifacts(
@@ -194,7 +196,9 @@ class FetchCodexV8ArtifactsTest(unittest.TestCase):
 
             with (
                 patch("codex_package.v8.REPO_ROOT", cache_root),
-                patch("codex_package.v8.download_file", side_effect=OSError("offline")) as download,
+                patch(
+                    "codex_package.v8.download_file", side_effect=OSError("offline")
+                ) as download,
             ):
                 with self.assertRaisesRegex(OSError, "offline"):
                     fetch_codex_v8_artifacts(

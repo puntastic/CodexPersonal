@@ -129,7 +129,8 @@ impl RolloutReferenceIndex {
                 let Some(rollout_file) = RolloutFile::from_path(path) else {
                     continue;
                 };
-                let rollout_file_name = match RolloutFileName::parse(rollout_file.plain_file_name()) {
+                let rollout_file_name = match RolloutFileName::parse(rollout_file.plain_file_name())
+                {
                     Some(rollout_file_name) => rollout_file_name,
                     None if unreadable_metadata_policy.fail_closed() => {
                         return Err(io::Error::new(

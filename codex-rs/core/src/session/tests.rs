@@ -4219,7 +4219,7 @@ async fn assert_repeated_compactions_store_image_payload_once_and_resume_exactly
     let resumed_history = resumed_session.clone_history().await;
     assert_eq!(
         strip_metadata_from_items(&raw_history_items(&resumed_history)),
-        strip_metadata_from_items(&[later_model_envelope.item.clone()])
+        strip_metadata_from_items(std::slice::from_ref(&later_model_envelope.item))
     );
     assert_eq!(
         resumed_history

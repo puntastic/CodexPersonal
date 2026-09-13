@@ -593,7 +593,9 @@ impl ContextManager {
         if model_cut_idx.is_none() && review_cut_idx.is_none() {
             if self.guardian_context_mode == GuardianContextMode::ThreadOwned
                 && (has_compacted_history
-                    || snapshot.iter().any(|item| is_compaction_barrier_item(&item.item)))
+                    || snapshot
+                        .iter()
+                        .any(|item| is_compaction_barrier_item(&item.item)))
             {
                 self.replace_annotated(Vec::new());
                 self.reference_context_item = None;
@@ -634,10 +636,12 @@ impl ContextManager {
         .unwrap_or(RetainedInputSource::Local(None));
 
         if let Some(history) = &mut review_history {
-            if review_boundary_covers_request && let Some(index) = review_cut_idx {
+            if review_boundary_covers_request
+                && let (Some(snapshot), Some(index)) = (review_snapshot.as_ref(), review_cut_idx)
+            {
                 // Use the review window's own pre-truncation item. Provider-normalized
                 // compaction output may have regenerated IDs and no harness metadata.
-                history.truncate_before(&review_snapshot.as_ref().expect("review snapshot")[index]);
+                history.truncate_before(&snapshot[index]);
             } else {
                 // A model rollback boundary with no corresponding retained boundary is
                 // ambiguous (usually eviction). Do not leave potentially later grants alive.
@@ -677,10 +681,9 @@ impl ContextManager {
         let mut retained_context = Arc::clone(&self.retained_context);
         if self.guardian_context_mode == GuardianContextMode::ThreadOwned {
             let retained_context = Arc::make_mut(&mut retained_context);
-            if !retained_context.rollback_at_user_message_boundary(
-                first_removed_message_id.as_deref(),
-                source,
-            ) {
+            if !retained_context
+                .rollback_at_user_message_boundary(first_removed_message_id.as_deref(), source)
+            {
                 match removed_user_message_boundaries {
                     Some(0) => retain_answers_before_rollback_source(
                         retained_context,

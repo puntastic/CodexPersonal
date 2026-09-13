@@ -1630,13 +1630,16 @@ fn oversized_compaction_rollback_discards_ambiguous_retained_context(
         }),
     };
     history.replace_compacted(
-        checkpoint.into_iter().map(|item| ResponseItemEnvelope {
-            item,
-            metadata: Some(CodexHarnessMetadata {
-                compaction_model_hash: Some("provider-hash".to_owned()),
-                ..Default::default()
-            }),
-        }).collect(),
+        checkpoint
+            .into_iter()
+            .map(|item| ResponseItemEnvelope {
+                item,
+                metadata: Some(CodexHarnessMetadata {
+                    compaction_model_hash: Some("provider-hash".to_owned()),
+                    ..Default::default()
+                }),
+            })
+            .collect(),
     );
     history.set_reference_context_item(Some(reference_context_item()));
     assert_eq!(history.guardian_history_checkpoint(), None);
@@ -1769,7 +1772,7 @@ fn rollback_crossing_a_compaction_summary_discards_the_unreconstructable_model_w
         id: None,
         role: "user".to_owned(),
         content: vec![ContentItem::InputText {
-            text: stale_summary_text.clone(),
+            text: stale_summary_text,
         }],
         phase: None,
         internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {

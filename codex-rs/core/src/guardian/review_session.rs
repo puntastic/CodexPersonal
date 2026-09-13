@@ -453,9 +453,7 @@ impl GuardianReviewSessionManager {
             )
             .with_environments(parent_context.environments())
             .with_node_repl_policy_eligibility(
-                parent_context
-                    .model_info
-                    .computer_use_review_required(),
+                parent_context.model_info.computer_use_review_required(),
             )
             .with_node_repl_policy(&session_config.node_repl_policy);
             reuse_key.root_authorization_version = root_authorization_version;

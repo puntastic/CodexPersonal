@@ -2,6 +2,7 @@
 """Format repository sources or check that they are already formatted."""
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
@@ -41,11 +42,69 @@ def just_formatter_group(*, check: bool) -> FormatterGroup:
 
 
 def rust_formatter_group(*, check: bool) -> FormatterGroup:
-    args = ["cargo", "fmt", "--", "--config", "imports_granularity=Item"]
+    options = ["--", "--config", "imports_granularity=Item"]
     if check:
-        args.append("--check")
-    command = Command(tuple(args), REPO_ROOT / "codex-rs")
-    return FormatterGroup("Rust", (command,))
+        options.append("--check")
+    cwd = REPO_ROOT / "codex-rs"
+    if sys.platform != "win32":
+        return FormatterGroup("Rust", (Command(("cargo", "fmt", *options), cwd),))
+
+    metadata = json.loads(
+        subprocess.check_output(
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+            cwd=cwd,
+        )
+    )
+    commands = tuple(
+        Command(
+            (
+                "cargo",
+                "fmt",
+                *(arg for name in batch for arg in ("-p", name)),
+                *options,
+            ),
+            cwd,
+        )
+        for batch in windows_rust_package_batches(metadata)
+    )
+    return FormatterGroup("Rust", commands)
+
+
+def windows_rust_package_batches(
+    metadata: dict, budget: int = 16_000
+) -> list[list[str]]:
+    """Bound rustfmt's expanded file argv, not just the short cargo invocation.
+
+    CreateProcess limits the command line to 32K UTF-16 units. Leave substantial
+    room for cargo's additional flags and the executable path; one package stays
+    atomic so cargo retains ownership of target selection and formatting rules.
+    """
+    members = set(metadata["workspace_members"])
+    batches = []
+    batch = []
+    size = 0
+    for package in metadata["packages"]:
+        if package["id"] not in members:
+            continue
+        cost = sum(
+            len(target["src_path"].encode("utf-16-le")) // 2 + 3
+            for target in package["targets"]
+        )
+        if cost > budget:
+            raise RuntimeError(
+                f"Rustfmt targets for {package['name']} exceed Windows argv budget"
+            )
+        if batch and size + cost > budget:
+            batches.append(batch)
+            batch = []
+            size = 0
+        batch.append(package["name"])
+        size += cost
+    if batch:
+        batches.append(batch)
+    if not batches:
+        raise RuntimeError("Cargo metadata contained no workspace packages to format")
+    return batches
 
 
 def buildifier_formatter_group(*, check: bool) -> FormatterGroup:
