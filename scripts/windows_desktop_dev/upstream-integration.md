@@ -9,9 +9,12 @@ and only then select it for the next Desktop restart.
 
 ## Current update and last qualification
 
-The September13 candidate is on `codex/upstream-sync-20260913`, based on stable
+The September13 qualified update is on `codex/upstream-sync-20260913`, based on stable
 `rust-v0.154.0` (`6b9826e3aa83b1a5947db50f4332cb9c65f1b340`) and selected later
-fixes. Its evidence, exclusions and pending gates live in
+fixes. Runtime source `c196cb9040fbfba882e1ff5ae539736b7a8ab81b` is published to
+personal/main and packaged as0.154.0. The package is selected for the next
+restart; actual post-restart Desktop and phone use remain unobserved.
+Its evidence, exclusions and remaining gates live in
 [`updates/2026-09-13.md`](updates/2026-09-13.md). The live source verified at the
 start of this pass was `620e488dcbbb2613fa4e723a1d6633c10d8a1ad2`.
 

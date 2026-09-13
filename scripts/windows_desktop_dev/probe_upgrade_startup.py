@@ -2,6 +2,9 @@
 
 The source opens read-only. A new output directory keeps an untouched backup and
 an isolated trial home. Neither package is selected for Desktop by this probe.
+The schema assertions here target 0.154.0's migration 54/daybreak column; revise
+those assertions for a different migration question rather than treating them
+as a universal release gate.
 """
 
 import argparse
@@ -56,7 +59,14 @@ def startup(executable, home):
     messages = queue.Queue()
     errors = deque(maxlen=12)
     process = subprocess.Popen(
-        [str(executable), "-c", 'cli_auth_credentials_store="file"', "app-server"],
+        [
+            str(executable),
+            "-c",
+            'cli_auth_credentials_store="file"',
+            "-c",
+            f"sqlite_home={json.dumps(str(home))}",
+            "app-server",
+        ],
         cwd=home,
         env=env,
         stdin=subprocess.PIPE,
@@ -134,7 +144,7 @@ def startup(executable, home):
             thread.join(timeout=1)
 
 
-parser = argparse.ArgumentParser()
+parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--candidate", type=Path, required=True)
 parser.add_argument("--previous", type=Path, required=True)
 parser.add_argument("--source-db", type=Path, required=True)

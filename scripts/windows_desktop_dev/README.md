@@ -118,6 +118,8 @@ disabled for the probes and credentials use a fresh file-only home. The probe
 does not select a Desktop package, modify the source database, run a model
 turn, or prove phone compatibility. Use it for a qualified migration question,
 not as a compulsory whole-profile preservation exercise on every update.
+This revision explicitly asserts migration54/daybreak for the September13
+update; adapt those assertions to a different migration question.
 
 ## Deploy, restart, verify
 
