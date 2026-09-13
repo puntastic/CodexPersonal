@@ -1354,8 +1354,10 @@ fn drop_last_n_user_turns_preserves_prefix() {
 
     // A steered message shares its source turn, but rollback must keep the earlier
     // instruction and answer as complete evidence, including after the next compaction.
-    let mut history = ContextManager::default();
-    history.enable_user_message_retention();
+    let mut history = ContextManager::with_guardian_context_mode(
+        GuardianContextMode::ThreadOwned,
+        &codex_protocol::protocol::SessionSource::Exec,
+    );
     let mut expected = None;
     for (id, text) in [
         ("restriction", "Never publish publicly."),
@@ -1405,8 +1407,10 @@ fn drop_last_n_user_turns_preserves_prefix() {
 
 #[test]
 fn metadata_free_compaction_rollback_uses_retained_user_message_boundaries() {
-    let mut history = ContextManager::default();
-    history.enable_user_message_retention();
+    let mut history = ContextManager::with_guardian_context_mode(
+        GuardianContextMode::ThreadOwned,
+        &codex_protocol::protocol::SessionSource::Exec,
+    );
     let messages = ["First instruction.", "Second instruction."];
     let mut answers = Vec::new();
     for (index, text) in messages.into_iter().enumerate() {
@@ -1437,8 +1441,8 @@ fn metadata_free_compaction_rollback_uses_retained_user_message_boundaries() {
     }
 
     // Legacy remote compaction regenerates envelopes and can return no message IDs,
-    // turn metadata, or harness acceptance order. The original review window and
-    // retained ledger remain independent sources of rollback truth.
+    // turn metadata, or harness acceptance order. Thread-owned review has no legacy
+    // transcript backup, so the complete retained ledger supplies this explicit cutoff.
     history.replace_compacted(
         messages
             .into_iter()
@@ -1458,12 +1462,8 @@ fn metadata_free_compaction_rollback_uses_retained_user_message_boundaries() {
     );
     assert!(history.retained_context().verified_answers_complete());
     assert!(history.retained_context().user_messages_complete());
-    let review = history
-        .guardian_history_checkpoint()
-        .expect("review history");
-    let review_text = serde_json::to_string(&review).unwrap();
-    assert!(review_text.contains("First instruction."));
-    assert!(!review_text.contains("Second instruction."));
+    assert_eq!(raw_items(&history), vec![user_input_text_msg(messages[0])]);
+    assert_eq!(history.guardian_history_checkpoint(), None);
 
     let stale_summary_text = format!(
         "{}\nThe user said: First instruction.",
@@ -1484,8 +1484,9 @@ fn metadata_free_compaction_rollback_uses_retained_user_message_boundaries() {
     history.drop_last_n_user_turns(1);
     assert_eq!(history.retained_context().verified_answers().count(), 0);
     assert_eq!(history.retained_context().ordered_entries().count(), 0);
-    assert!(history.retained_context().verified_answers_complete());
-    assert!(history.retained_context().user_messages_complete());
+    assert!(!history.retained_context().verified_answers_complete());
+    assert!(!history.retained_context().user_messages_complete());
+    assert_eq!(history.guardian_history_checkpoint(), None);
     assert!(
         history.raw_items().all(|item| !serde_json::to_string(item)
             .unwrap()
@@ -1494,10 +1495,24 @@ fn metadata_free_compaction_rollback_uses_retained_user_message_boundaries() {
     );
 }
 
-#[test]
-fn oversized_compaction_rollback_discards_ambiguous_retained_context() {
-    let mut history = ContextManager::default();
-    history.enable_user_message_retention();
+enum RollbackCompactionFixture {
+    Provider,
+    Context,
+    Summary,
+    LegacySummary,
+}
+
+#[test_case(RollbackCompactionFixture::Provider; "provider_checkpoint")]
+#[test_case(RollbackCompactionFixture::Context; "context_checkpoint")]
+#[test_case(RollbackCompactionFixture::Summary; "annotated_summary")]
+#[test_case(RollbackCompactionFixture::LegacySummary; "legacy_summary")]
+fn oversized_compaction_rollback_discards_ambiguous_retained_context(
+    checkpoint: RollbackCompactionFixture,
+) {
+    let mut history = ContextManager::with_guardian_context_mode(
+        GuardianContextMode::ThreadOwned,
+        &codex_protocol::protocol::SessionSource::Exec,
+    );
     for (index, text) in ["First instruction.", "Second instruction."]
         .into_iter()
         .enumerate()
@@ -1529,17 +1544,56 @@ fn oversized_compaction_rollback_discards_ambiguous_retained_context() {
     // The provider window no longer exposes either user boundary. A complete user-message
     // ledger alone cannot prove how many inter-agent instruction boundaries were evicted,
     // so an oversized rollback must remove stale facts without claiming complete evidence.
-    history.replace_compacted(vec![ResponseItemEnvelope {
-        item: ResponseItem::Compaction {
+    let checkpoint = match checkpoint {
+        RollbackCompactionFixture::Provider => ResponseItem::Compaction {
             id: Some(ResponseItemId::from_server("cmp_repository".to_owned())),
             encrypted_content: "encrypted provider checkpoint".to_owned(),
             internal_chat_message_metadata_passthrough: None,
         },
+        RollbackCompactionFixture::Context => ResponseItem::ContextCompaction {
+            id: Some(ResponseItemId::from_server("ctx_repository".to_owned())),
+            encrypted_content: Some("encrypted context checkpoint".to_owned()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        RollbackCompactionFixture::Summary => ResponseItem::Message {
+            id: None,
+            role: "user".to_owned(),
+            content: vec![ContentItem::InputText {
+                text: "The prior instructions and answers were summarized.".to_owned(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![ContentItemKind(
+                        "compaction.summary".to_owned(),
+                    )]),
+                    ..Default::default()
+                },
+            ),
+        },
+        RollbackCompactionFixture::LegacySummary => ResponseItem::Message {
+            id: None,
+            role: "user".to_owned(),
+            content: vec![ContentItem::InputText {
+                text: format!(
+                    "{}\nThe prior instructions and answers were summarized.",
+                    crate::compact::SUMMARY_PREFIX
+                ),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    };
+    history.replace_compacted(vec![ResponseItemEnvelope {
+        item: checkpoint,
         metadata: Some(CodexHarnessMetadata {
             compaction_model_hash: Some("provider-hash".to_owned()),
             ..Default::default()
         }),
     }]);
+    history.set_reference_context_item(Some(reference_context_item()));
+    assert_eq!(history.guardian_history_checkpoint(), None);
+    assert!(user_message_positions(history.annotated_items()).is_empty());
     history.drop_last_n_user_turns(3);
 
     assert_eq!(history.raw_items().count(), 0);
@@ -1552,19 +1606,19 @@ fn oversized_compaction_rollback_discards_ambiguous_retained_context() {
             .latest_compaction_model_hash(),
         None
     );
-    assert_eq!(
-        history
-            .guardian_history_checkpoint()
-            .expect("review history remains available")
-            .0,
-        Vec::<ResponseItem>::new()
-    );
+    assert_eq!(history.guardian_history_checkpoint(), None);
+    assert!(history.reference_context_item().is_none());
 }
 
-#[test]
-fn metadata_free_inter_agent_rollback_does_not_consume_a_retained_user_boundary() {
-    let mut history = ContextManager::default();
-    history.enable_user_message_retention();
+#[test_case(true; "answer_source_survives")]
+#[test_case(false; "answer_source_compacted_away")]
+fn metadata_free_inter_agent_rollback_does_not_consume_a_retained_user_boundary(
+    preserve_answer_source: bool,
+) {
+    let mut history = ContextManager::with_guardian_context_mode(
+        GuardianContextMode::ThreadOwned,
+        &codex_protocol::protocol::SessionSource::Exec,
+    );
     let user = retained_user_message_for_rollback_test("Keep the repository private.");
     history.record_annotated_items(
         &[ResponseItemEnvelope {
@@ -1594,46 +1648,58 @@ fn metadata_free_inter_agent_rollback_does_not_consume_a_retained_user_boundary(
     history.record_items([&inter_agent], TruncationPolicy::Tokens(10_000));
 
     let normalized_user = user_input_text_msg("Keep the repository private.");
-    history.replace_compacted(vec![
-        ResponseItemEnvelope::new(normalized_user.clone()),
-        ResponseItemEnvelope {
-            item: inter_agent,
-            // Instruction turns can carry queue ordering too. That order must not be
-            // mistaken for a retained user-authorization boundary.
-            metadata: Some(CodexHarnessMetadata {
-                user_input_order: Some(0),
-                ..Default::default()
-            }),
-        },
-    ]);
+    let mut replacement = vec![ResponseItemEnvelope::new(normalized_user.clone())];
+    if preserve_answer_source {
+        replacement.push(ResponseItemEnvelope::new(source.clone()));
+    }
+    replacement.push(ResponseItemEnvelope {
+        item: inter_agent,
+        // Instruction turns can carry queue ordering too. That order must not be
+        // mistaken for a retained user-authorization boundary.
+        metadata: Some(CodexHarnessMetadata {
+            user_input_order: Some(0),
+            ..Default::default()
+        }),
+    });
+    history.replace_compacted(replacement);
     history.drop_last_n_user_turns(1);
 
-    assert_eq!(raw_items(&history), vec![normalized_user]);
+    let expected_items = if preserve_answer_source {
+        vec![normalized_user, source]
+    } else {
+        vec![normalized_user]
+    };
+    assert_eq!(raw_items(&history), expected_items);
     assert_eq!(
         history
             .retained_context()
             .verified_answers()
             .cloned()
             .collect::<Vec<_>>(),
-        vec![answer]
+        if preserve_answer_source {
+            vec![answer]
+        } else {
+            Vec::new()
+        }
     );
-    assert_eq!(history.retained_context().ordered_entries().count(), 2);
-    assert!(history.retained_context().verified_answers_complete());
+    assert_eq!(
+        history.retained_context().ordered_entries().count(),
+        if preserve_answer_source { 2 } else { 1 }
+    );
+    assert_eq!(
+        history.retained_context().verified_answers_complete(),
+        preserve_answer_source
+    );
     assert!(history.retained_context().user_messages_complete());
-    let review_text = serde_json::to_string(
-        &history
-            .guardian_history_checkpoint()
-            .expect("review history"),
-    )
-    .unwrap();
-    assert!(review_text.contains("Keep the repository private."));
-    assert!(!review_text.contains("Inspect the tests in a worker."));
+    assert_eq!(history.guardian_history_checkpoint(), None);
 }
 
 #[test]
 fn rollback_crossing_a_compaction_summary_discards_the_unreconstructable_model_window() {
-    let mut history = ContextManager::default();
-    history.enable_user_message_retention();
+    let mut history = ContextManager::with_guardian_context_mode(
+        GuardianContextMode::ThreadOwned,
+        &codex_protocol::protocol::SessionSource::Exec,
+    );
     history.set_reference_context_item(Some(reference_context_item()));
     let messages = ["Absorbed instruction.", "Explicit instruction."];
     for (index, text) in messages.into_iter().enumerate() {
@@ -1672,13 +1738,20 @@ fn rollback_crossing_a_compaction_summary_discards_the_unreconstructable_model_w
     let mut explicit_only = history.clone();
     explicit_only.drop_last_n_user_turns(1);
     assert_eq!(raw_items(&explicit_only), vec![summary]);
-    assert!(
+    assert_eq!(explicit_only.guardian_history_checkpoint(), None);
+    assert_eq!(
         explicit_only
-            .guardian_history_checkpoint()
-            .is_some_and(|review| serde_json::to_string(&review)
-                .unwrap()
-                .contains("Absorbed instruction.")),
-        "removing exactly the explicit suffix must preserve the earlier summarized turn"
+            .retained_context()
+            .ordered_entries()
+            .filter_map(|(_, entry)| match entry {
+                codex_history::RetainedContextEntry::UserMessage(message) => {
+                    Some(message.text.as_str())
+                }
+                codex_history::RetainedContextEntry::VerifiedAnswer(_) => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![messages[0]],
+        "removing exactly the explicit suffix must preserve the earlier retained instruction"
     );
 
     history.drop_last_n_user_turns(2);
@@ -1686,15 +1759,9 @@ fn rollback_crossing_a_compaction_summary_discards_the_unreconstructable_model_w
     assert_eq!(raw_items(&history), Vec::<ResponseItem>::new());
     assert!(history.reference_context_item().is_none());
     assert_eq!(history.retained_context().ordered_entries().count(), 0);
-    let review = history
-        .guardian_history_checkpoint()
-        .expect("review history");
-    assert!(
-        !serde_json::to_string(&review)
-            .unwrap()
-            .contains(&stale_summary_text),
-        "review and model windows must both exclude rolled-back summary content"
-    );
+    assert_eq!(history.guardian_history_checkpoint(), None);
+    assert!(!history.retained_context().verified_answers_complete());
+    assert!(!history.retained_context().user_messages_complete());
 }
 
 #[test]

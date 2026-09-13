@@ -272,6 +272,9 @@ async fn token_budget_guidance_precedes_standalone_context_window(
     let guidance_message = "Preserve important state before compaction.";
     let backend_url = format!("{}/backend-api/codex", server.uri());
     let test = test_codex()
+        .with_model_info_override("gpt-5.2", |model| {
+            model.supports_experimental_context = true;
+        })
         .with_auth(CodexAuth::from_external_chatgpt_tokens(
             "header.e30.signature",
             "account-123",
@@ -329,21 +332,23 @@ async fn token_budget_guidance_precedes_standalone_context_window(
     Ok(())
 }
 
-#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/backend-api/codex", None, true; "plus")]
-#[test_case(ExperimentalContextAuth::Chatgpt("pro"), "OpenAI", "/backend-api/codex", None, true; "pro")]
-#[test_case(ExperimentalContextAuth::Chatgpt("prolite"), "OpenAI", "/backend-api/codex", None, true; "pro_lite")]
-#[test_case(ExperimentalContextAuth::Chatgpt("free"), "OpenAI", "/backend-api/codex", None, false; "free")]
-#[test_case(ExperimentalContextAuth::Chatgpt("enterprise"), "OpenAI", "/backend-api/codex", None, false; "enterprise")]
-#[test_case(ExperimentalContextAuth::ApiKey, "OpenAI", "/backend-api/codex", None, false; "api_key")]
-#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "Custom", "/backend-api/codex", None, false; "custom_provider")]
-#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/v1", None, false; "non_codex_endpoint")]
-#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/backend-api/codex", Some("test-provider-token"), false; "provider_credentials")]
+#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/backend-api/codex", None, true, true; "plus")]
+#[test_case(ExperimentalContextAuth::Chatgpt("pro"), "OpenAI", "/backend-api/codex", None, true, true; "pro")]
+#[test_case(ExperimentalContextAuth::Chatgpt("prolite"), "OpenAI", "/backend-api/codex", None, true, true; "pro_lite")]
+#[test_case(ExperimentalContextAuth::Chatgpt("free"), "OpenAI", "/backend-api/codex", None, true, false; "free")]
+#[test_case(ExperimentalContextAuth::Chatgpt("enterprise"), "OpenAI", "/backend-api/codex", None, true, false; "enterprise")]
+#[test_case(ExperimentalContextAuth::ApiKey, "OpenAI", "/backend-api/codex", None, true, false; "api_key")]
+#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "Custom", "/backend-api/codex", None, true, false; "custom_provider")]
+#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/v1", None, true, false; "non_codex_endpoint")]
+#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/backend-api/codex", Some("test-provider-token"), true, false; "provider_credentials")]
+#[test_case(ExperimentalContextAuth::Chatgpt("plus"), "OpenAI", "/backend-api/codex", None, false, false; "unsupported_model")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn experimental_context_requires_eligible_auth_and_provider(
+async fn experimental_context_requires_capable_model_eligible_auth_and_provider(
     auth: ExperimentalContextAuth,
     provider_name: &'static str,
     base_path: &'static str,
     bearer_token: Option<&'static str>,
+    supports_context: bool,
     expected_enabled: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -360,6 +365,9 @@ async fn experimental_context_requires_eligible_auth_and_provider(
         ExperimentalContextAuth::ApiKey => CodexAuth::from_api_key("test-api-key"),
     };
     let test = test_codex()
+        .with_model_info_override("gpt-5.2", move |model| {
+            model.supports_experimental_context = supports_context;
+        })
         .with_auth(auth)
         .with_config(move |config| {
             config.model_provider.name = provider_name.to_string();
@@ -418,6 +426,9 @@ async fn experimental_context_rejects_provider_owned_credentials(
         Some("plus"),
     )?;
     let test = test_codex()
+        .with_model_info_override("gpt-5.2", |model| {
+            model.supports_experimental_context = true;
+        })
         .with_auth(auth)
         .with_config(move |config| {
             config.model_provider.name = "OpenAI".to_string();
@@ -576,6 +587,7 @@ async fn token_budget_defaults_follow_the_active_model(
                 .expect("write token-budget activation configuration");
         })
         .with_model_info_override("gpt-5.2", |model_info| {
+            model_info.supports_experimental_context = true;
             let mut defaults = model_token_budget_config();
             defaults.guidance_message = "Use first-model context-window guidance.".to_string();
             model_info
@@ -585,6 +597,7 @@ async fn token_budget_defaults_follow_the_active_model(
                 .token_budget = Some(defaults);
         })
         .with_model_info_override("gpt-5.4", |model_info| {
+            model_info.supports_experimental_context = false;
             let mut defaults = model_token_budget_config();
             defaults.guidance_message = "Use second-model context-window guidance.".to_string();
             model_info
@@ -636,6 +649,7 @@ async fn token_budget_defaults_follow_the_active_model(
         );
         assert_eq!(token_budget_contexts(request).len(), 1);
     }
+    assert_eq!(requests[1].body_json()["model"], "gpt-5.4");
     assert!(requests[0].body_contains_text("Use first-model context-window guidance."));
     assert!(
         requests[1].body_contains_text("Use first-model context-window guidance."),

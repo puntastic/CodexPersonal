@@ -26,6 +26,10 @@ def main() -> None:
         action="store_true",
         help="regenerate the precomputed experimental exports",
     )
+    parser.add_argument(
+        "--cargo-profile",
+        help="reuse the selected Cargo build profile for schema generation",
+    )
     args = parser.parse_args()
 
     workspace_root = Path(__file__).resolve().parents[2]
@@ -41,6 +45,7 @@ def main() -> None:
         [
             "cargo",
             "test",
+            *(["--profile", args.cargo_profile] if args.cargo_profile else []),
             "-p",
             "codex-app-server-protocol",
             "--lib",

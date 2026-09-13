@@ -7,6 +7,7 @@ use super::step_settings::StepSettingsUpdate;
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::config::ConstraintError;
+use crate::context::GuardianContextMode;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::hook_mcp_executor::CoreHookMcpExecutor;
@@ -54,6 +55,7 @@ pub(crate) struct Session {
     /// The set of enabled features should be invariant for the lifetime of the
     /// session.
     pub(super) features: ManagedFeatures,
+    pub(crate) guardian_context_mode: GuardianContextMode,
     pub(crate) windows_sandbox_proxy_settings_mode:
         codex_sandboxing::WindowsSandboxProxySettingsMode,
     pub(super) multi_agent_version: OnceLock<MultiAgentVersion>,
@@ -619,7 +621,6 @@ impl Session {
             request_kind,
         );
         CodexResponsesMetadata {
-            guardian_ticket: turn_context.guardian_ticket.clone(),
             window_number: Some(window_number),
             context_window_id: Some(context_window_id),
             history_ingest_requested: turn_context
@@ -845,9 +846,10 @@ impl Session {
             thread_id.to_string(),
             thread_extension_init,
         );
-        // Select the answer path once, before extensions or tool handlers observe the thread.
-        thread_extension_data.insert(crate::context::GuardianReviewEvidence::from_features(
-            &config.features,
+        // Resolve once for live history, replay, and all reviewer consumers.
+        let guardian_context_mode = GuardianContextMode::from_features(&config.features);
+        thread_extension_data.insert(crate::context::GuardianReviewEvidence::new(
+            guardian_context_mode,
         ));
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
@@ -1269,10 +1271,11 @@ impl Session {
             let mut state = SessionState::new_with_auto_compact_window_ids(
                 session_configuration.clone(),
                 initial_auto_compact_window_ids,
+                ContextManager::with_guardian_context_mode(
+                    guardian_context_mode,
+                    &session_configuration.session_source,
+                ),
             );
-            if config.features.enabled(Feature::GuardianThreadContext) {
-                state.history.enable_user_message_retention();
-            }
             state.base_instructions_provenance = base_instructions_provenance.clone();
             let managed_network_requirements_configured = config
                 .config_layer_stack
@@ -1510,6 +1513,7 @@ impl Session {
                 thread_settings_persistence: Semaphore::new(/*permits*/ 1),
                 managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
                 features: config.features.clone(),
+                guardian_context_mode,
                 windows_sandbox_proxy_settings_mode,
                 multi_agent_version,
                 mcp_refresh: McpRefresh::new(),

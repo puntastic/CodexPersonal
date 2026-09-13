@@ -174,6 +174,7 @@ mod requirements;
 mod resolved_permission_profile;
 #[cfg(test)]
 mod schema;
+mod token_budget_startup;
 pub use auth_keyring::bootstrap_auth_config;
 pub use auth_keyring::resolve_bootstrap_auth_keyring_backend_kind;
 pub use codex_agent_roles::AgentRoleConfig;
@@ -199,6 +200,7 @@ pub use permissions::compile_permission_profile;
 pub(crate) use permissions::is_builtin_permission_profile_name;
 pub use permissions::resolve_permission_profile;
 pub(crate) use resolved_permission_profile::PermissionProfileState;
+pub use token_budget_startup::TokenBudgetStartupConfig;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
@@ -742,6 +744,9 @@ pub struct Config {
     /// Enable ASCII animations and shimmer effects in the TUI.
     pub animations: bool,
 
+    /// Enable decorative TUI effects such as Astra composer stars.
+    pub tui_whimsy: bool,
+
     /// Show startup tooltips in the TUI welcome screen.
     pub show_tooltips: bool,
 
@@ -753,6 +758,7 @@ pub struct Config {
 
     /// Start the composer in Vim mode (`Normal`) by default.
     pub tui_vim_mode_default: bool,
+    pub tui_question_esc_back: bool,
 
     /// Start the TUI in raw scrollback mode for copy-friendly transcript output.
     pub tui_raw_output_mode: bool,
@@ -1051,6 +1057,8 @@ pub struct Config {
 
     /// Context-window token budget configuration, when enabled.
     pub token_budget: Option<TokenBudgetConfig>,
+    /// Runtime snapshot of configured token-budget preferences before startup activation.
+    pub token_budget_startup_config: Option<TokenBudgetStartupConfig>,
     /// Shared token budget for the root thread and its sub-agents.
     pub rollout_budget: Option<RolloutBudgetConfig>,
     /// Current-time reminder and clock tool configuration, when enabled.
@@ -4358,6 +4366,7 @@ impl Config {
             ghost_snapshot,
             multi_agent_v2,
             token_budget,
+            token_budget_startup_config: None,
             rollout_budget,
             current_time_reminder,
             cue_activation,
@@ -4388,6 +4397,7 @@ impl Config {
                 .map(|t| t.notification_settings.clone())
                 .unwrap_or_default(),
             animations: cfg.tui.as_ref().map(|t| t.animations).unwrap_or(true),
+            tui_whimsy: cfg.tui.as_ref().map(|t| t.whimsy).unwrap_or(true),
             show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),
             tui_auto_recap: cfg.tui.as_ref().map(|t| t.auto_recap).unwrap_or(/*default*/ true),
             model_availability_nux: cfg
@@ -4395,6 +4405,7 @@ impl Config {
                 .as_ref()
                 .map(|t| t.model_availability_nux.clone())
                 .unwrap_or_default(),
+            tui_question_esc_back: cfg.tui.as_ref().map(|t| t.question_esc_back).unwrap_or(true),
             tui_vim_mode_default: cfg
                 .tui
                 .as_ref()

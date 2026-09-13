@@ -6,6 +6,7 @@ use crate::config::PermissionProfileSnapshot;
 use crate::context::ContextualUserFragment;
 use crate::context::CurrentTimeReminder;
 use crate::context::DeveloperInstructions;
+use crate::context::GuardianContextMode;
 use crate::context::ManagedDeveloperInstructions;
 use crate::context::MultiAgentModeInstructions;
 use crate::context::MultiAgentRoleInstructions;
@@ -15,7 +16,7 @@ use crate::tools::handlers::multi_agents_common::build_agent_resume_config;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ExtensionDataInit;
-use codex_features::Feature;
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::intersect_effective_permission_profiles;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_utils_path_uri::PathUri;
@@ -136,7 +137,7 @@ pub(super) fn retained_checkpoint_reference_item_ids(
 fn retain_forked_developer_message(
     item: &mut ResponseItem,
     usage_hint_texts: &[String],
-    features: &crate::config::ManagedFeatures,
+    context_mode: GuardianContextMode,
 ) -> bool {
     if !matches!(item, ResponseItem::Message { role, .. } if role == "developer") {
         return true;
@@ -146,7 +147,7 @@ fn retain_forked_developer_message(
         return false;
     };
     content.retain(|content_item| {
-        if features.enabled(Feature::GuardianThreadContext)
+        if context_mode == GuardianContextMode::ThreadOwned
             && content_item.kind().0 == "guardian.approved_action"
         {
             return false;
@@ -156,7 +157,7 @@ fn retain_forked_developer_message(
         };
 
         !(MultiAgentRoleInstructions::matches_text(text)
-            || (features.enabled(Feature::GuardianThreadContext)
+            || (context_mode == GuardianContextMode::ThreadOwned
                 && text.starts_with(
                     crate::guardian::AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
                 ))
@@ -976,18 +977,31 @@ impl AgentControl {
                 }
             }
         }
+        let context_mode = GuardianContextMode::from_features(&config.features);
         let mut replaced_parent_developer_instructions = false;
         // Scrub inherited hints and replace only the parent's developer-instruction fragment.
         // Compaction stores response items separately, so sanitize both top-level messages and
         // compacted replacement histories with the same policy.
-        let retain_forked_item = |response_item: &mut ResponseItem, replaced: &mut bool| {
+        let retain_forked_item = |envelope: &mut ResponseItemEnvelope, replaced: &mut bool| {
+            if context_mode == GuardianContextMode::ThreadOwned
+                && multi_agent_version == MultiAgentVersion::V2
+                && matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "user")
+            {
+                // Persist the scope of every inherited user message, including the suffix
+                // after a checkpoint. Resume must not recapture it as local authorization.
+                envelope
+                    .metadata
+                    .get_or_insert_default()
+                    .inherited_user_message = true;
+            }
+            let response_item = &mut envelope.item;
             if matches!(response_item, ResponseItem::AgentMessage { .. }) {
                 return false;
             }
             if !retain_forked_developer_message(
                 response_item,
                 &multi_agent_v2_usage_hint_texts_to_filter,
-                &config.features,
+                context_mode,
             ) {
                 return false;
             }
@@ -1101,7 +1115,11 @@ impl AgentControl {
                     // Parent-local review evidence must not become the child's authorization.
                     // Root user authorization is collected separately by the host.
                     compacted.guardian_history = None;
-                    compacted.retained_context = None;
+                    // Only V2 fetches root authorization live. Its local scope starts known-empty;
+                    // V1 must remain incomplete when inherited authorization has been stripped.
+                    compacted.retained_context = (context_mode == GuardianContextMode::ThreadOwned
+                        && multi_agent_version == MultiAgentVersion::V2)
+                        .then(codex_history::RetainedContext::default);
                     if let Some(mut replacement_history) = resolved_parent_history {
                         // Matches before this checkpoint cannot survive its replacement history.
                         replaced_parent_developer_instructions = false;

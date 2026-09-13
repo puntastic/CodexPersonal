@@ -138,6 +138,8 @@ impl PidBackend {
             }
 
             let pid = record.pid;
+            let started_at = tokio::time::Instant::now();
+            let deadline = started_at + STOP_TIMEOUT;
             #[cfg(unix)]
             self.terminate_process(pid)?;
             #[cfg(windows)]
@@ -148,13 +150,29 @@ impl PidBackend {
                 if process.start_time()? != record.process_start_time {
                     continue;
                 }
-                fs::write(self.pid_file.with_extension("shutdown"), pid.to_string())
-                    .await
-                    .context("failed to request daemon shutdown")?;
+                match self.command_kind {
+                    PidCommandKind::AppServer { .. } => {
+                        let codex_home = self
+                            .pid_file
+                            .parent()
+                            .and_then(Path::parent)
+                            .context("daemon pid path has no Codex home")?;
+                        let socket_path =
+                            codex_app_server_transport::app_server_control_socket_path(codex_home)?;
+                        if let Err(err) =
+                            crate::client::request_shutdown(socket_path.as_path(), pid).await
+                        {
+                            tracing::warn!(%pid, %err, "managed app-server shutdown request failed; waiting for force deadline");
+                        }
+                    }
+                    PidCommandKind::UpdateLoop => {
+                        fs::write(self.pid_file.with_extension("shutdown"), pid.to_string())
+                            .await
+                            .context("failed to request updater shutdown")?;
+                    }
+                }
                 process
             };
-            let started_at = tokio::time::Instant::now();
-            let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
             let mut forced = false;
             loop {
                 #[cfg(unix)]
@@ -485,8 +503,21 @@ async fn process_matches_record(record: &PidRecord) -> Result<bool> {
         return Ok(false);
     }
 
-    match read_process_start_time(record.pid).await {
-        Ok(start_time) => Ok(start_time == record.process_start_time),
+    match read_process_details(record.pid).await {
+        Ok((state, start_time)) => {
+            // An unreaped zombie still passes kill(pid, 0) and retains its start
+            // time, but it can no longer run the app-server or updater.
+            if state.starts_with('Z') {
+                if start_time == record.process_start_time
+                    && let Ok(raw_pid) = libc::pid_t::try_from(record.pid)
+                {
+                    // Re-exec can lose the Child handle without changing parenthood.
+                    unsafe { libc::waitpid(raw_pid, std::ptr::null_mut(), libc::WNOHANG) };
+                }
+                return Ok(false);
+            }
+            Ok(start_time == record.process_start_time)
+        }
         Err(_err) if !process_exists(record.pid) => Ok(false),
         Err(err) => Err(err),
     }
@@ -605,8 +636,13 @@ async fn inspect_empty_pid_reservation(
 
 #[cfg(unix)]
 async fn read_process_start_time(pid: u32) -> Result<String> {
+    Ok(read_process_details(pid).await?.1)
+}
+
+#[cfg(unix)]
+async fn read_process_details(pid: u32) -> Result<(String, String)> {
     let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .args(["-p", &pid.to_string(), "-o", "stat=", "-o", "lstart="])
         .output()
         .await
         .context("failed to invoke ps for pid-managed app server")?;
@@ -614,13 +650,16 @@ async fn read_process_start_time(pid: u32) -> Result<String> {
         bail!("failed to read start time for pid-managed app server {pid}");
     }
 
-    let start_time = String::from_utf8(output.stdout)
-        .context("pid-managed app server start time was not utf-8")?;
+    let details = String::from_utf8(output.stdout)
+        .context("pid-managed app server process details were not utf-8")?;
+    let Some((state, start_time)) = details.trim().split_once(char::is_whitespace) else {
+        bail!("pid-managed app server {pid} has no recorded start time");
+    };
     let start_time = start_time.trim();
     if start_time.is_empty() {
         bail!("pid-managed app server {pid} has no recorded start time");
     }
-    Ok(start_time.to_string())
+    Ok((state.to_string(), start_time.to_string()))
 }
 
 #[cfg(all(test, any(unix, windows)))]

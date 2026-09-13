@@ -134,20 +134,16 @@ impl TimeProvider for RecordingTimeProvider {
 #[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "OpenAI", "/backend-api/codex", true, "/backend-api/codex/guardian", true; "chatgpt_uses_guardian_when_enabled")]
 #[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "OpenAI", "/v1", true, "/v1/responses", true; "custom_openai_url_uses_responses")]
 #[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "Custom", "/backend-api/codex", true, "/backend-api/codex/responses", true; "custom_provider_uses_responses")]
-#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "OpenAI", "/backend-api/codex", true, "/backend-api/codex/guardian", false; "server_without_tickets")]
+#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "OpenAI", "/backend-api/codex", true, "/backend-api/codex/guardian", false; "server_without_response_id")]
 async fn guardian_session_inherits_parent_http_fallback(
     auth: CodexAuth,
     provider_name: &str,
     base_path: &str,
     free_guardian: bool,
     expected_guardian_path: &str,
-    ticket_issued: bool,
+    response_id_present: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
-    skip_if_wine_exec!(
-        Ok(()),
-        "Guardian approval actions require host-native paths"
-    );
 
     let server = start_mock_server().await;
     let websocket_fallback = Mock::given(method("GET"))
@@ -157,16 +153,16 @@ async fn guardian_session_inherits_parent_http_fallback(
         .mount_as_scoped(&server)
         .await;
 
-    let parent_ticket = "p".repeat(43);
+    let parent_response_id = "parent-tool";
     let responses = mount_sse_sequence(
         &server,
         vec![
-            // A failed sampling attempt must not lend its receipt to the retried action.
+            // A failed sampling attempt must not supply the retried action's parent ID.
             sse(vec![json!({"type": "response.created", "response": {
-                "id": "failed-parent", "headers": {"x-codex-guardian-ticket": "f".repeat(43)}
+                "id": "failed-parent"
             }})]),
             sse(vec![
-                json!({"type": "response.created", "response": {"id": "parent-tool", "headers": ticket_issued.then(|| json!({"x-codex-guardian-ticket": parent_ticket}))}}),
+                json!({"type": "response.created", "response": {"id": response_id_present.then_some(parent_response_id)}}),
                 ev_function_call(
                     "call",
                     "exec_command",
@@ -244,43 +240,57 @@ async fn guardian_session_inherits_parent_http_fallback(
         })
         .expect("Guardian reviewer inference request");
     assert_eq!(guardian_request.path(), expected_guardian_path);
-    let tickets_enabled = expected_guardian_path.ends_with("/guardian");
+    let credits_enabled = expected_guardian_path.ends_with("/guardian");
     let body = guardian_request.body_json();
     assert_eq!(
         (
-            body["client_metadata"].get("guardian_ticket").cloned(),
-            body["client_metadata"].get("guardian_ticket_requested"),
+            body["client_metadata"].get("parent_response_id").cloned(),
+            body["client_metadata"].get("guardian_credits_requested"),
         ),
         (
-            (tickets_enabled && ticket_issued).then(|| json!(parent_ticket)),
+            (credits_enabled && response_id_present).then(|| json!(parent_response_id)),
             None
         )
     );
-    assert!(!body["input"].to_string().contains(&parent_ticket));
+    assert!(!body["input"].to_string().contains(parent_response_id));
     for request in responses.requests() {
         let body = request.body_json();
         if body["client_metadata"]["x-openai-subagent"] != "guardian" {
             assert_eq!(
                 (
                     body["client_metadata"]
-                        .get("guardian_ticket_requested")
+                        .get("guardian_credits_requested")
                         .cloned(),
-                    body["client_metadata"].get("guardian_ticket"),
+                    body["client_metadata"].get("parent_response_id"),
                 ),
-                (tickets_enabled.then(|| json!("true")), None)
+                (credits_enabled.then(|| json!("true")), None)
             );
         }
     }
+    let guardian_context = guardian_request.message_input_texts("user").join("\n");
+    let executor_cwd = test
+        .executor_environment()
+        .selection()
+        .cwd
+        .inferred_native_path_string();
+    assert!(
+        guardian_context.contains(&format!(
+            "\"cwd\": \"{}\"",
+            executor_cwd.replace('\\', r"\\")
+        )),
+        "Guardian omitted the executor-native cwd from its planned action: {guardian_context}"
+    );
     test.codex.shutdown_and_wait().await?;
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[test_case(60_000; "reviewer_window_is_already_exhausted")]
-#[test_case(49_990; "followup_reminder_exhausts_reviewer_window")]
+#[test_case(60_000, false; "legacy_reviewer_window_is_already_exhausted")]
+#[test_case(49_990, true; "retained_followup_reminder_exhausts_reviewer_window")]
 async fn guardian_review_resends_full_transcript_after_reviewer_context_rollover(
     first_review_total_tokens: i64,
+    thread_owned: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(
@@ -293,7 +303,11 @@ async fn guardian_review_resends_full_transcript_after_reviewer_context_rollover
         .with_model_info_override("gpt-5.5", |model| {
             model.auto_review_model_override = Some(model.slug.clone());
         })
-        .with_config(|config| {
+        .with_config(move |config| {
+            config
+                .features
+                .set_enabled(Feature::GuardianThreadContext, thread_owned)
+                .expect("configure Guardian context mode");
             config.model_context_window = Some(100_000);
             config.model_auto_compact_token_limit = Some(50_000);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
@@ -399,7 +413,7 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
     skip_if_no_network!(Ok(()));
 
     let uses_codex_backend = auth.uses_codex_backend();
-    let tickets_enabled = free_guardian && uses_codex_backend;
+    let credits_enabled = free_guardian && uses_codex_backend;
     let bundled_models = codex_models_manager::bundled_models_response()?.models;
     let catalog_auto_review = bundled_models
         .iter()
@@ -432,12 +446,12 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
         "justification": "Exercise Guardian approval routing.",
     })
     .to_string();
-    let parent_ticket = "w".repeat(43);
+    let parent_response_id = "approval-request";
     let server = start_websocket_server(vec![
         vec![vec![ev_response_created("warm-1"), ev_completed("warm-1")]],
         vec![vec![ev_response_created("warm-2"), ev_completed("warm-2")]],
         vec![vec![
-            json!({"type": "response.created", "response": {"id": "approval-request", "headers": {"x-codex-guardian-ticket": parent_ticket}}}),
+            ev_response_created(parent_response_id),
             ev_function_call("approval-call", "exec_command", &tool_args),
             ev_completed("approval-request"),
         ]],
@@ -593,30 +607,30 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
     assert_eq!(
         (
             guardian_review["client_metadata"]
-                .get("guardian_ticket")
+                .get("parent_response_id")
                 .cloned(),
-            guardian_review["client_metadata"].get("guardian_ticket_requested"),
+            guardian_review["client_metadata"].get("guardian_credits_requested"),
             parent_request["client_metadata"]
-                .get("guardian_ticket_requested")
+                .get("guardian_credits_requested")
                 .cloned(),
-            parent_request["client_metadata"].get("guardian_ticket"),
+            parent_request["client_metadata"].get("parent_response_id"),
         ),
         (
-            tickets_enabled.then(|| json!(parent_ticket)),
+            credits_enabled.then(|| json!(parent_response_id)),
             None,
-            tickets_enabled.then(|| json!("true")),
+            credits_enabled.then(|| json!("true")),
             None,
         )
     );
     assert!(
         guardian_prewarm["client_metadata"]
-            .get("guardian_ticket")
+            .get("parent_response_id")
             .is_none()
     );
     assert!(
         !guardian_review["input"]
             .to_string()
-            .contains(&parent_ticket)
+            .contains(parent_response_id)
     );
     for request in [&parent_request, &guardian_review] {
         assert_root_turn(request, Some(parent_turn_id))?;
@@ -700,7 +714,7 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review(
     assert_eq!(guardian_context_windows, vec![Some(258_400)]);
     for handshake in server.handshakes() {
         let is_guardian = handshake.header("x-openai-subagent").as_deref() == Some("guardian");
-        let uses_guardian_endpoint = tickets_enabled && is_guardian;
+        let uses_guardian_endpoint = credits_enabled && is_guardian;
         assert_eq!(
             handshake.uri(),
             if uses_guardian_endpoint {
@@ -1551,14 +1565,16 @@ async fn guardian_timeout_rejects_tool_call_with_acting_model_instructions(
     struct TimedOutReviewContributor;
 
     impl codex_extension_api::ApprovalReviewContributor for TimedOutReviewContributor {
-        fn fast_decision<'a>(
+        fn decide<'a>(
             &'a self,
-            _session_store: &'a codex_extension_api::ExtensionData,
-            _thread_store: &'a codex_extension_api::ExtensionData,
-            _prompt: &'a str,
-            _extension_metrics: Option<Arc<dyn codex_extension_api::ExtensionMetrics>>,
-        ) -> codex_extension_api::ExtensionFuture<'a, Option<ReviewDecision>> {
-            Box::pin(async { Some(ReviewDecision::TimedOut) })
+            _input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
+        ) -> codex_extension_api::ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>>
+        {
+            Box::pin(async {
+                Some(codex_extension_api::ApprovalDecision::Reviewed(
+                    ReviewDecision::TimedOut,
+                ))
+            })
         }
     }
 

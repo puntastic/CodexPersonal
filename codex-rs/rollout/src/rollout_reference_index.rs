@@ -14,6 +14,7 @@ use codex_protocol::protocol::HistoryPosition;
 use crate::ARCHIVED_SESSIONS_SUBDIR;
 use crate::SESSIONS_SUBDIR;
 use crate::compression::RolloutFile;
+use crate::rollout_file_name::RolloutFileName;
 
 /// Direct history-base edges discovered from local rollout metadata.
 ///
@@ -40,6 +41,7 @@ impl RolloutReferenceIndex {
                 codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
                 codex_home.join(SESSIONS_SUBDIR),
             ],
+            /*thread_ids*/ None,
             UnreadableMetadataPolicy::Ignore,
         )
         .await
@@ -60,6 +62,7 @@ impl RolloutReferenceIndex {
                 codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
                 codex_home.join(SESSIONS_SUBDIR),
             ],
+            /*thread_ids*/ None,
             UnreadableMetadataPolicy::FailClosedForDeletion {
                 targeted_thread_ids,
             },
@@ -74,6 +77,25 @@ impl RolloutReferenceIndex {
     pub async fn scan_unarchived(codex_home: &Path) -> io::Result<Self> {
         Self::scan_paths(
             vec![codex_home.join(SESSIONS_SUBDIR)],
+            /*thread_ids*/ None,
+            UnreadableMetadataPolicy::Ignore,
+        )
+        .await
+    }
+
+    /// Scans unarchived files whose canonical filenames belong to the requested threads.
+    ///
+    /// Skips unrelated rollout contents, including compressed files. Metadata still determines
+    /// ownership among the candidates. Reference counts are partial and must not be used to
+    /// decide whether a rollout can be deleted or compressed.
+    pub async fn scan_unarchived_threads(
+        codex_home: &Path,
+        thread_ids: &[ThreadId],
+    ) -> io::Result<Self> {
+        let thread_ids = thread_ids.iter().copied().collect();
+        Self::scan_paths(
+            vec![codex_home.join(SESSIONS_SUBDIR)],
+            Some(&thread_ids),
             UnreadableMetadataPolicy::Ignore,
         )
         .await
@@ -81,6 +103,7 @@ impl RolloutReferenceIndex {
 
     async fn scan_paths(
         mut stack: Vec<PathBuf>,
+        thread_ids: Option<&HashSet<ThreadId>>,
         unreadable_metadata_policy: UnreadableMetadataPolicy<'_>,
     ) -> io::Result<Self> {
         let mut rollouts_by_id = HashMap::new();
@@ -106,9 +129,7 @@ impl RolloutReferenceIndex {
                 let Some(rollout_file) = RolloutFile::from_path(path) else {
                     continue;
                 };
-                let rollout_file_name = match crate::rollout_file_name::RolloutFileName::parse(
-                    rollout_file.plain_file_name(),
-                ) {
+                let rollout_file_name = match RolloutFileName::parse(rollout_file.plain_file_name()) {
                     Some(rollout_file_name) => rollout_file_name,
                     None if unreadable_metadata_policy.fail_closed() => {
                         return Err(io::Error::new(
@@ -121,6 +142,9 @@ impl RolloutReferenceIndex {
                     }
                     None => continue,
                 };
+                if thread_ids.is_some_and(|ids| !ids.contains(&rollout_file_name.thread_id())) {
+                    continue;
+                }
                 let rollout_id = rollout_file_name.rollout_id();
                 let (thread_id, history_base) =
                     match crate::read_session_meta_line(rollout_file.path()).await {

@@ -36,6 +36,7 @@ pub(super) struct FeedbackThreadEvent {
 pub(super) enum ThreadEventAttachment {
     Live,
     ReplayOnly,
+    ExternalWriter,
 }
 
 #[derive(Debug)]
@@ -56,7 +57,19 @@ pub(super) struct ThreadEventStore {
 }
 
 impl ThreadEventStore {
-    pub(super) fn event_survives_session_refresh(event: &ThreadBufferedEvent) -> bool {
+    pub(super) fn event_survives_session_refresh(event: &mut ThreadBufferedEvent) -> bool {
+        if let ThreadBufferedEvent::Notification(notification) = event
+            && let ServerNotification::ItemCompleted(notification) = notification.as_mut()
+            && let ThreadItem::AgentMessage {
+                questions: Some(_),
+                text,
+                ..
+            } = &mut notification.item
+        {
+            // Refreshed turns contain the text; retain only the live question state.
+            text.clear();
+            return true;
+        }
         match event {
             ThreadBufferedEvent::Request(_) | ThreadBufferedEvent::FeedbackSubmission(_) => true,
             ThreadBufferedEvent::Notification(notification) => matches!(
@@ -104,7 +117,7 @@ impl ThreadEventStore {
     }
 
     pub(super) fn rebase_buffer_after_session_refresh(&mut self) {
-        self.buffer.retain(Self::event_survives_session_refresh);
+        self.buffer.retain_mut(Self::event_survives_session_refresh);
         self.buffered_agent_message_delta_bytes = 0;
     }
 
@@ -372,6 +385,10 @@ impl ThreadEventChannel {
 
     pub(super) fn mark_replay_only(&mut self) {
         self.attachment = ThreadEventAttachment::ReplayOnly;
+    }
+
+    pub(super) fn mark_external_writer(&mut self) {
+        self.attachment = ThreadEventAttachment::ExternalWriter;
     }
 
     pub(super) fn attachment(&self) -> ThreadEventAttachment {
@@ -719,6 +736,28 @@ mod tests {
         let snapshot = store.snapshot();
         assert!(snapshot.events.is_empty());
         assert_eq!(store.has_pending_thread_approvals(), false);
+    }
+
+    #[test]
+    fn refresh_retains_live_questions_without_replaying_their_text() {
+        let mut expected = serde_json::json!({
+            "method": "item/completed", "params": {
+                "threadId": "thread", "turnId": "turn", "completedAtMs": 0,
+                "item": {
+                    "type": "agentMessage", "id": "question", "text": "already in the snapshot",
+                    "phase": null, "memoryCitation": null, "delivery": null,
+                    "questions": [{"title": "Which way?", "options": null}]
+                }
+            }
+        });
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_notification(serde_json::from_value(expected.clone()).unwrap());
+        store.rebase_buffer_after_session_refresh();
+        expected["params"]["item"]["text"] = serde_json::json!("");
+        let ThreadBufferedEvent::Notification(actual) = &store.snapshot().events[0] else {
+            panic!("missing live question");
+        };
+        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
     }
 
     #[test]

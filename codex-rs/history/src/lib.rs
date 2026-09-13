@@ -81,6 +81,10 @@ pub struct CodexHarnessMetadata {
     /// Thread acceptance order, independent of when queued user input reaches model history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input_order: Option<u64>,
+
+    /// Copied parent context stays model-visible but must not become child-local authorization.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inherited_user_message: bool,
 }
 
 const COMPACTED_HISTORY_DIGEST_PREFIX: &str = "sha256-response-item-envelope-v1:";
@@ -308,11 +312,15 @@ impl JsonSchema for RolloutItem {
 }
 
 mod guardian_history;
+mod reconciled_retained_context;
 mod retained_context;
 
+pub use reconciled_retained_context::ReconciledRetainedContext;
 pub use retained_context::RetainedContext;
 pub use retained_context::RetainedContextEntry;
 pub use retained_context::RetainedContextEvent;
+pub use retained_context::RetainedContextOrder;
+pub use retained_context::RetainedInputSource;
 pub use retained_context::RetainedUserMessage;
 pub use retained_context::VerifiedAnswer;
 pub use retained_context::VerifiedQuestionAnswer;

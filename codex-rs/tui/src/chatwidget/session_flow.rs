@@ -43,6 +43,7 @@ impl ChatWidget {
         self.current_rollout_path = session.rollout_path.clone();
         self.current_cwd = Some(session.cwd.to_path_buf());
         self.config.cwd = session.cwd.clone();
+        self.config.model_provider_id = session.model_provider_id.clone();
         if connector_scope_changed {
             self.invalidate_connector_scope();
         }
@@ -132,6 +133,7 @@ impl ChatWidget {
         }
         self.sync_service_tier_commands();
         self.sync_personality_command_enabled();
+        self.sync_worktrees_enabled();
         self.sync_plugins_command_enabled();
         self.sync_goal_command_enabled();
         self.refresh_plugin_mentions();

@@ -19,10 +19,13 @@ compatibility with hosted Desktop services, keep the fork reasonably close to
   cliff, far enough to reject regressions and resolve local collisions
   deliberately.
 
-The adopted decision is Hjarni note 21699. The changing evidence and watch
-cursor live in Hjarni note 15672. Git remains authoritative for exact source,
-history, and deployed artifacts; neither note proves current repository or
-runtime state.
+The adopted decision is Ath177 (historical Hjarni21699). The September13
+UI/Remote investigation is Ath1328; Hjarni15672 is an older watch cursor, not a
+current-state receipt. Git remains authoritative for exact source, history and
+deployed artifacts. Follow `scripts/windows_desktop_dev/upstream-integration.md`
+and the dated entries in its sibling `updates/` directory for maintenance.
+Preserve the project's current authority/autonomy balance; compatibility alone
+does not authorize additional supervision or tighter approval defaults.
 
 # Rust/codex-rs
 
@@ -289,7 +292,6 @@ These guidelines apply to app-server protocol work in `codex-rs`, especially:
 
 - `app-server-protocol/src/protocol/common.rs`
 - `app-server-protocol/src/protocol/v2.rs`
-- `app-server/README.md`
 
 ### Core Rules
 
@@ -323,7 +325,6 @@ These guidelines apply to app-server protocol work in `codex-rs`, especially:
 
 ### Development Workflow
 
-- Update app-server docs/examples when API behavior changes (at minimum `app-server/README.md`).
 - Regenerate schema fixtures when API shapes change:
   `just write-app-server-schema`
   (and `just write-app-server-schema --experimental` when experimental API fixtures are affected).

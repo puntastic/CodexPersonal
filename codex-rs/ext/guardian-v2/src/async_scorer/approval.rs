@@ -5,13 +5,13 @@ use super::authorization::ScoreAuthorization;
 use super::config::GuardianV2Config;
 use super::coverage::GuardianPolicy;
 use super::extension::GuardianV2ScoreProgress;
-use super::extension::StrictReviewReason;
-use super::extension::requires_sync_for_compaction;
 use super::metrics::TOOL_CALL_LAG_METRIC;
 use super::metrics::record_fast_decision;
+use super::parent_compaction::select_parent_compaction;
 use super::sampler::LunaSampler;
 use codex_core::CodexThread;
 use codex_core::ThreadManager;
+use codex_core::context::GuardianContextMode;
 use codex_core::context::GuardianReviewEvidence;
 use codex_extension_api::ApprovalDecision;
 use codex_extension_api::ApprovalDecisionInput;
@@ -58,6 +58,7 @@ impl GuardianApprovalReviewer {
             return ApprovalDecision::Allow;
         }
         if !input.require_guardian
+            && !input.require_fresh_review
             && (input.approvals_reviewer == ApprovalsReviewer::User
                 || !matches!(
                     input.approval_policy,
@@ -116,29 +117,7 @@ impl GuardianApprovalReviewer {
             ?reason,
             "reviewing approval"
         );
-        if let Some(reason) = strict_review_notification_reason(reason) {
-            input.thread_store.insert(reason);
-        }
         ApprovalDecision::Reviewed(input.synchronous_reviewer.review(reason).await)
-    }
-}
-
-fn strict_review_notification_reason(reason: GuardianReviewReason) -> Option<StrictReviewReason> {
-    match reason {
-        GuardianReviewReason::ElevatedRisk | GuardianReviewReason::ScoringFailure => {
-            Some(StrictReviewReason::ElevatedRisk)
-        }
-        GuardianReviewReason::StaleScore | GuardianReviewReason::AuthorizationChanged => {
-            Some(StrictReviewReason::StaleScore)
-        }
-        GuardianReviewReason::IncompatibleCompaction => {
-            Some(StrictReviewReason::IncompatibleCompaction)
-        }
-        GuardianReviewReason::Policy
-        | GuardianReviewReason::FreshRequired
-        | GuardianReviewReason::MissingScore
-        | GuardianReviewReason::InvalidScore
-        | GuardianReviewReason::Unknown => None,
     }
 }
 
@@ -154,15 +133,23 @@ async fn cached_evidence(
         record_fast_decision(metrics, "deferred", "missing_score");
         return Err(GuardianReviewReason::MissingScore);
     };
-    if store
+    let context_mode = store
         .get_or_init(GuardianReviewEvidence::default)
-        .uses_thread_owned_context()
-    {
+        .context_mode();
+    if context_mode == GuardianContextMode::ThreadOwned {
         let sampler = store
             .get::<LunaSampler>()
             .ok_or(GuardianReviewReason::MissingScore)?;
         let history = thread.conversation_history_snapshot().await;
-        if requires_sync_for_compaction(config, history.as_ref(), &sampler) {
+        if select_parent_compaction(
+            context_mode,
+            config,
+            history.as_ref(),
+            &sampler,
+            /*legacy_model_hash*/ None,
+        )
+        .is_err()
+        {
             record_fast_decision(metrics, "deferred", "incompatible_compaction");
             return Err(GuardianReviewReason::IncompatibleCompaction);
         }
@@ -248,44 +235,4 @@ async fn cached_evidence(
     );
     record_fast_decision(metrics, "deferred", label);
     Err(reason)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strict_review_notification_reason_preserves_legacy_marker_mapping() {
-        let cases = [
-            (
-                GuardianReviewReason::ElevatedRisk,
-                Some(StrictReviewReason::ElevatedRisk),
-            ),
-            (
-                GuardianReviewReason::ScoringFailure,
-                Some(StrictReviewReason::ElevatedRisk),
-            ),
-            (
-                GuardianReviewReason::StaleScore,
-                Some(StrictReviewReason::StaleScore),
-            ),
-            (
-                GuardianReviewReason::AuthorizationChanged,
-                Some(StrictReviewReason::StaleScore),
-            ),
-            (
-                GuardianReviewReason::IncompatibleCompaction,
-                Some(StrictReviewReason::IncompatibleCompaction),
-            ),
-            (GuardianReviewReason::Policy, None),
-            (GuardianReviewReason::FreshRequired, None),
-            (GuardianReviewReason::MissingScore, None),
-            (GuardianReviewReason::InvalidScore, None),
-            (GuardianReviewReason::Unknown, None),
-        ];
-
-        for (reason, expected) in cases {
-            assert_eq!(strict_review_notification_reason(reason), expected);
-        }
-    }
 }

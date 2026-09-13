@@ -140,7 +140,7 @@ pub enum GuardianAssessmentAction {
     Command {
         source: GuardianCommandSource,
         command: String,
-        cwd: AbsolutePathBuf,
+        cwd: LegacyAppPathString,
     },
     Execve {
         source: GuardianCommandSource,
@@ -157,8 +157,8 @@ pub enum GuardianAssessmentAction {
         cwd: PathUri,
     },
     ApplyPatch {
-        cwd: AbsolutePathBuf,
-        files: Vec<AbsolutePathBuf>,
+        cwd: LegacyAppPathString,
+        files: Vec<LegacyAppPathString>,
     },
     NetworkAccess {
         target: String,
@@ -204,6 +204,10 @@ pub enum GuardianReviewReason {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct GuardianAssessmentEvent {
+    /// Request-scoped trigger; absent in events recorded by older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub review_reason: Option<GuardianReviewReason>,
     /// Stable identifier for this guardian review lifecycle.
     pub id: String,
     /// Thread item being reviewed, when the review maps to a concrete item.
@@ -390,6 +394,13 @@ impl ExecApprovalRequestEvent {
 #[serde(tag = "mode", rename_all = "snake_case")]
 #[ts(tag = "mode")]
 pub enum ElicitationRequest {
+    #[serde(rename = "openai/userVerification")]
+    #[ts(rename = "openai/userVerification")]
+    UserVerification {
+        title: String,
+        description: String,
+        challenge: String,
+    },
     Form {
         #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, rename = "_meta")]
@@ -486,7 +497,7 @@ mod tests {
             GuardianAssessmentAction::Command {
                 source: GuardianCommandSource::Shell,
                 command: "rm -rf /tmp/guardian".to_string(),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
             }
         );
     }

@@ -36,6 +36,7 @@ pub use codex_history::ResumedHistory;
 pub use codex_history::RetainedContext;
 pub use codex_history::RetainedContextEntry;
 pub use codex_history::RetainedContextEvent;
+pub use codex_history::RetainedInputSource;
 pub use codex_history::RolloutItem;
 pub use codex_history::RolloutLine;
 pub(crate) use codex_protocol::protocol;

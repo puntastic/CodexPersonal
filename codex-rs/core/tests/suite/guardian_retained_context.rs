@@ -4,13 +4,21 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use codex_core::CodexThread;
+use codex_core::ForkSnapshot;
 use codex_core::TurnInputRequest;
+use codex_core::config::Config;
 use codex_core::config::ThreadStoreConfig;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ToolLifecycleContributor;
+use codex_extension_api::ToolLifecycleFuture;
+use codex_extension_api::ToolStartInput;
 use codex_features::Feature;
+use codex_history::GuardianHistoryCheckpoint;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RetainedContext;
@@ -28,11 +36,14 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::ForkBoundary;
 use codex_thread_store::LoadThreadHistoryParams;
+use codex_thread_store::PrepareForkParams;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
+use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
@@ -44,7 +55,27 @@ use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use test_case::test_case;
+use tokio::sync::Notify;
 use wiremock::MockServer;
+use wiremock::matchers::header;
+
+// Keep child completion out of the parent's history while checking rollback boundaries.
+#[derive(Default)]
+struct ChildToolGate {
+    entered: Notify,
+    release: Notify,
+}
+
+impl ToolLifecycleContributor for ChildToolGate {
+    fn on_tool_start<'a>(&'a self, input: ToolStartInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            if input.call_id == "child-pause" {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+        })
+    }
+}
 
 async fn record_answer(
     thread: &CodexThread,
@@ -183,19 +214,35 @@ async fn compact_and_assert_answers(
     Ok(actual.clone())
 }
 
-#[test_case(ThreadHistoryMode::Legacy, true; "enabled legacy rollback")]
-#[test_case(ThreadHistoryMode::Paginated, true; "enabled paginated resume")]
-#[test_case(ThreadHistoryMode::Legacy, false; "disabled legacy rollback")]
-#[test_case(ThreadHistoryMode::Paginated, false; "disabled paginated resume")]
+#[derive(Clone, Copy)]
+enum InstructionSize {
+    Normal,
+    Oversized,
+}
+
+#[test_case(ThreadHistoryMode::Legacy, true, InstructionSize::Normal; "enabled legacy rollback")]
+#[test_case(ThreadHistoryMode::Paginated, true, InstructionSize::Normal; "enabled paginated resume")]
+#[test_case(ThreadHistoryMode::Legacy, false, InstructionSize::Normal; "disabled legacy rollback")]
+#[test_case(ThreadHistoryMode::Paginated, false, InstructionSize::Normal; "disabled paginated resume")]
+#[test_case(ThreadHistoryMode::Legacy, true, InstructionSize::Oversized; "oversized instruction rollback")]
+#[test_case(ThreadHistoryMode::Paginated, true, InstructionSize::Oversized; "oversized instruction resume")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retained_instructions_keep_identity_across_compaction_and_resume(
     history_mode: ThreadHistoryMode,
     thread_context_enabled: bool,
+    instruction_size: InstructionSize,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     const INITIAL: &str = "Never publish publicly.";
     const STEER: &str = "Also inspect the README.";
-    // Paginated histories support checkpoint resume, but not the full-history read
+    let initial = match instruction_size {
+        InstructionSize::Normal => INITIAL.to_owned(),
+        InstructionSize::Oversized => format!(
+            "{INITIAL}\n{}\nNever upload logs.",
+            "Project detail. ".repeat(2_000)
+        ),
+    };
+    // Paginated history supports checkpoint resume, but not the full-history read
     // used by ThreadRollback. Exercise rollback on its supported legacy path.
     let rollback_counts: &[usize] = match history_mode {
         ThreadHistoryMode::Legacy => &[1, 0],
@@ -259,7 +306,7 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
     let response_mock = mount_sse_sequence(&server, responses).await;
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: INITIAL.to_owned(),
+            text: initial.clone(),
             text_elements: Vec::new(),
         }]))
         .await?;
@@ -310,7 +357,7 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
     assert_eq!(answers[0].turn_id, answers[1].turn_id);
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 3);
-    assert!(requests[0].has_message_with_input_texts("user", |texts| texts == [INITIAL]));
+    assert!(requests[0].has_message_with_input_texts("user", |texts| texts == [initial.as_str()]));
     for (index, request) in requests.iter().skip(1).enumerate() {
         assert!(request.has_message_with_input_texts("user", |texts| texts == [STEER]));
         for answer in &answers[..=index] {
@@ -325,7 +372,7 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
         }
     }
     let history = thread.conversation_history_snapshot().await;
-    let user_messages = [INITIAL, STEER]
+    let user_messages = [initial.as_str(), STEER]
         .into_iter()
         .enumerate()
         .map(|(index, text)| {
@@ -345,7 +392,9 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
                 .expect("original user-message identity");
             json!({
                 "order": index, "turn_id": answers[index].turn_id,
-                "message_id": message_id.as_str(), "text": text, "complete": true,
+                "message_id": message_id.as_str(),
+                "text": codex_guardian_context::truncate_text(text, /*max_tokens*/ 900),
+                "complete": index != 0 || matches!(instruction_size, InstructionSize::Normal),
             })
         })
         .collect::<Vec<_>>();
@@ -380,7 +429,14 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
             }
         }
     }
-    assert_eq!(serde_json::to_value(history.retained_context())?, expected);
+    assert_eq!(
+        serde_json::to_value(history.retained_context())?,
+        if thread_context_enabled {
+            expected.clone()
+        } else {
+            serde_json::Value::Null
+        }
+    );
     assert_eq!(
         serde_json::to_value(compact_and_assert_answers(&test, &thread, &answers).await?)?,
         expected
@@ -406,7 +462,11 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
                     .await
                     .retained_context()
             )?,
-            expected
+            if thread_context_enabled {
+                expected.clone()
+            } else {
+                serde_json::Value::Null
+            }
         );
         thread.submit(Op::ThreadRollback { num_turns: 1 }).await?;
         wait_for_event(&thread, |event| {
@@ -434,17 +494,160 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
                 .await
                 .retained_context()
         )?,
-        expected
+        if thread_context_enabled {
+            expected.clone()
+        } else {
+            serde_json::Value::Null
+        }
     );
     thread.shutdown_and_wait().await?;
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 4 + rollback_counts.len());
     assert!(requests[3].has_message_with_input_texts("user", |texts| texts == [STEER]));
     if history_mode == ThreadHistoryMode::Legacy {
-        assert!(requests[4].has_message_with_input_texts("user", |texts| texts == [INITIAL]));
+        assert!(
+            requests[4].has_message_with_input_texts("user", |texts| texts == [initial.as_str()])
+        );
         assert!(!requests[4].has_message_with_input_texts("user", |texts| texts == [STEER]));
-        assert!(!requests[5].has_message_with_input_texts("user", |texts| texts == [INITIAL]));
+        assert!(
+            !requests[5].has_message_with_input_texts("user", |texts| texts == [initial.as_str()])
+        );
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum LegacyInstructionSource {
+    GuardianHistory,
+    ModelWindow,
+    Missing,
+}
+
+#[test_case(ThreadHistoryMode::Legacy, LegacyInstructionSource::GuardianHistory; "legacy backup")]
+#[test_case(ThreadHistoryMode::Paginated, LegacyInstructionSource::GuardianHistory; "paginated backup")]
+#[test_case(ThreadHistoryMode::Legacy, LegacyInstructionSource::ModelWindow; "legacy window")]
+#[test_case(ThreadHistoryMode::Paginated, LegacyInstructionSource::ModelWindow; "paginated window")]
+#[test_case(ThreadHistoryMode::Legacy, LegacyInstructionSource::Missing; "legacy missing source")]
+#[test_case(ThreadHistoryMode::Paginated, LegacyInstructionSource::Missing; "paginated missing source")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_checkpoint_recovers_root_excerpt_before_discarding_backup(
+    history_mode: ThreadHistoryMode,
+    source_location: LegacyInstructionSource,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_history_mode(history_mode)
+        .with_config(|config| {
+            config.experimental_thread_store = ThreadStoreConfig::Local;
+            config
+                .features
+                .enable(Feature::GuardianThreadContext)
+                .expect("enable retained instructions");
+            config
+                .features
+                .disable(Feature::TokenBudget)
+                .expect("use local compaction");
+            config.model_provider.name = "Local compaction test provider".to_owned();
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![ev_completed("initial-turn")]),
+            sse(vec![
+                ev_assistant_message("summary", "Compacted context."),
+                ev_completed("compact"),
+            ]),
+            sse(vec![
+                ev_assistant_message("summary-again", "Compacted context."),
+                ev_completed("compact-again"),
+            ]),
+        ],
+    )
+    .await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: format!(
+                "Never publish publicly.\n{}\nNever upload logs.",
+                "Project detail. ".repeat(2_000)
+            ),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let snapshot = test.codex.conversation_history_snapshot().await;
+    let source = snapshot
+        .items()
+        .find(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
+        .cloned()
+        .context("original instruction")?;
+    let mut expected = compact_and_assert_answers(&test, &test.codex, &[]).await?;
+    let mut checkpoint = load_context(&test, &test.codex)
+        .await?
+        .into_iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .context("compaction checkpoint")?;
+    // Pre-cutover checkpoints cleared retained text over 16 KiB and kept its raw
+    // source in the Guardian backup. Persist that old wire format for real replay.
+    let mut legacy = serde_json::to_value(&expected)?;
+    legacy["user_messages"][0]["text"] = json!("");
+    let legacy: RetainedContext = serde_json::from_value(legacy)?;
+    checkpoint.retained_context = Some(legacy.clone());
+    let window = checkpoint
+        .replacement_history
+        .as_mut()
+        .context("compacted model window")?;
+    window.retain(|item| item.id() != source.id());
+    match source_location {
+        LegacyInstructionSource::GuardianHistory => {
+            // Compaction can leave a shorter copy with the same ID in the model window.
+            let mut shortened = source.clone();
+            let ResponseItem::Message { content, .. } = &mut shortened else {
+                unreachable!("original instruction is a user message");
+            };
+            *content = vec![ContentItem::InputText {
+                text: "Never publish publicly.".to_owned(),
+            }];
+            window.push(shortened.into());
+            checkpoint.guardian_history = Some(GuardianHistoryCheckpoint(vec![source]));
+        }
+        LegacyInstructionSource::ModelWindow => window.push(source.into()),
+        LegacyInstructionSource::Missing => expected = legacy,
+    }
+    test.codex
+        .append_rollout_items(&[RolloutItem::Compacted(checkpoint)])
+        .await?;
+    let resumed = resume(&test, &test.codex).await?;
+    assert_eq!(
+        resumed
+            .conversation_history_snapshot()
+            .await
+            .retained_context(),
+        Some(&expected)
+    );
+    // The excerpt must survive another compaction and resume after the backup is gone.
+    assert_eq!(
+        compact_and_assert_answers(&test, &resumed, &[]).await?,
+        expected
+    );
+    let resumed = resume(&test, &resumed).await?;
+    assert_eq!(
+        resumed
+            .conversation_history_snapshot()
+            .await
+            .retained_context(),
+        Some(&expected)
+    );
+    resumed.shutdown_and_wait().await?;
     Ok(())
 }
 
@@ -693,6 +896,449 @@ async fn retained_answers_rollback_only_the_steered_instruction() -> Result<()> 
 enum LifecycleBoundary {
     Rollback,
     ChildFork,
+}
+
+// Cover live copied history and a truncated referenced checkpoint. Parent-answer
+// omission is already exercised by retained_answers_cross_real_session_boundaries.
+#[test_case(ThreadHistoryMode::Legacy; "copied worker history")]
+#[test_case(ThreadHistoryMode::Paginated; "referenced truncated checkpoint")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_fork_retains_inherited_user_instructions(
+    history_mode: ThreadHistoryMode,
+) -> Result<()> {
+    let compacted = history_mode == ThreadHistoryMode::Paginated;
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let mut test = test_codex()
+        .with_history_mode(history_mode)
+        .with_config(|config| {
+            config.experimental_thread_store = ThreadStoreConfig::Local;
+            config
+                .features
+                .disable(Feature::TokenBudget)
+                .expect("use local compaction for worker checkpoint");
+            config.model_provider.name = "Local compaction test provider".to_owned();
+            for feature in [
+                Feature::GuardianApproval,
+                Feature::GuardianThreadContext,
+                Feature::Collab,
+                Feature::MultiAgentV2,
+                Feature::DefaultModeRequestUserInput,
+            ] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("enable test feature");
+            }
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let instruction = if compacted {
+        format!(
+            "You may publish the release. {} Delegate an inspection.",
+            "Original project detail. ".repeat(500)
+        )
+    } else {
+        "You may publish the release. Delegate an inspection.".to_owned()
+    };
+    let mut created = test.thread_manager.subscribe_thread_created();
+    mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_function_call_with_namespace(
+                    "spawn", "collaboration", "spawn_agent",
+                    &json!({"task_name": "worker", "message": "Inspect the project.", "fork_turns": "all"}).to_string(),
+                ),
+                ev_completed("spawn-response"),
+            ]),
+            sse(vec![ev_completed("root-complete")]),
+            sse(vec![ev_completed("worker-complete")]),
+        ],
+    ).await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: instruction.clone(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let worker = test
+        .thread_manager
+        .get_thread(created.recv().await?)
+        .await?;
+    wait_for_event(&worker, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    test.codex.shutdown_and_wait().await?;
+    let local_instruction = if compacted {
+        // Leave less than Guardian's 900-token budget for the inherited source
+        // within local compaction's 20K user-message budget.
+        format!("Ask me before publishing. {}", "x".repeat(78_000))
+    } else {
+        "Ask me before publishing.".to_owned()
+    };
+    mount_sse_sequence(&server, vec![sse(vec![ev_completed("local-instruction")])]).await;
+    worker
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: local_instruction.clone(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&worker, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    if compacted {
+        // Local compaction keeps the inherited source message in replacement history.
+        mount_sse_sequence(
+            &server,
+            vec![sse(vec![
+                ev_assistant_message("worker-summary", "Inspected the project."),
+                ev_completed("worker-compacted"),
+            ])],
+        )
+        .await;
+        compact_and_assert_answers(&test, &worker, &[]).await?;
+    }
+    let worker_context = worker.conversation_history_snapshot().await;
+    let inherited_text = worker_context
+        .items()
+        .find_map(|item| match item {
+            ResponseItem::Message { role, content, .. } if role == "user" => {
+                let [ContentItem::InputText { text }] = content.as_slice() else {
+                    return None;
+                };
+                text.starts_with("You may publish the release.")
+                    .then(|| text.clone())
+            }
+            _ => None,
+        })
+        .context("inherited source in worker history")?;
+    if compacted {
+        assert_ne!(inherited_text, instruction);
+        assert!(inherited_text.contains("tokens truncated"));
+        assert!(inherited_text.len() < 900 * 4);
+    }
+    // The adopted root later compacts through the mechanical path, which can drop originals.
+    test.config
+        .features
+        .enable(Feature::TokenBudget)
+        .expect("use mechanical root compaction");
+    let fork = if history_mode == ThreadHistoryMode::Paginated {
+        let prepared = test
+            .thread_store
+            .prepare_fork(PrepareForkParams {
+                thread_id: worker.session_configured().thread_id,
+                boundary: ForkBoundary::Latest,
+            })
+            .await?;
+        test.thread_manager
+            .fork_prepared_thread(
+                test.config.clone(),
+                prepared,
+                /*thread_source*/ None,
+                /*parent_trace*/ None,
+                ClientMcpExtensions::default(),
+                /*reserved_thread_id*/ None,
+            )
+            .await?
+    } else {
+        test.thread_manager
+            .fork_thread_from_history(
+                ForkSnapshot::Interrupted,
+                test.config.clone(),
+                InitialHistory::Resumed(ResumedHistory {
+                    conversation_id: worker.session_configured().thread_id,
+                    history: Arc::new(load_context(&test, &worker).await?),
+                    rollout_path: None,
+                }),
+                /*thread_source*/ None,
+                /*parent_trace*/ None,
+                ClientMcpExtensions::default(),
+                /*reserved_thread_id*/ None,
+            )
+            .await?
+    };
+    assert!(fork.thread.guardian_root_snapshot().await.is_none());
+    let history = fork.thread.conversation_history_snapshot().await;
+    let retained = history.retained_context().context("root context")?;
+    let answers = codex_guardian_context::render_verified_answers(retained);
+    assert_eq!(
+        (answers.fragments, answers.complete),
+        (
+            vec![codex_guardian_context::GuardianRootMessage::IncompleteVerifiedAnswers.render()],
+            false
+        ),
+    );
+    assert_eq!(
+        retained
+            .ordered_entries()
+            .map(|(_, entry)| match entry {
+                codex_history::RetainedContextEntry::UserMessage(message) =>
+                    (message.text.clone(), message.complete),
+                codex_history::RetainedContextEntry::VerifiedAnswer(_) =>
+                    panic!("no answers before root adoption"),
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (inherited_text, !compacted),
+            (
+                codex_guardian_context::truncate_text(&local_instruction, /*max_tokens*/ 900),
+                !compacted,
+            ),
+        ],
+    );
+    let after = record_answer(
+        &fork.thread,
+        &server,
+        "root-action",
+        "Do not publish.",
+        /*acceptance_order*/ 2,
+    )
+    .await?;
+    let expected = fork
+        .thread
+        .conversation_history_snapshot()
+        .await
+        .retained_context()
+        .context("root after local answer")?
+        .clone();
+    assert!(!expected.verified_answers_complete());
+    let root = fork.thread;
+    compact_and_assert_answers(&test, &root, &[after]).await?;
+    let root = resume(&test, &root).await?;
+    assert_eq!(
+        root.conversation_history_snapshot()
+            .await
+            .retained_context(),
+        Some(&expected)
+    );
+    root.shutdown_and_wait().await?;
+    worker.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[test_case(false, true; "enabled without checkpoint")]
+#[test_case(true, true; "enabled after checkpoint")]
+#[test_case(false, false; "legacy without checkpoint")]
+#[test_case(true, false; "legacy after checkpoint")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forked_parent_instructions_do_not_become_local_authorization(
+    compact_parent: bool,
+    thread_context_enabled: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    const PARENT_GRANT: &str = "You may publish the private release. Delegate its inspection.";
+    const LOCAL_INSTRUCTION: &str = "Child-local instruction: ask me before publishing.";
+    let server = start_mock_server().await;
+    let child_gate = Arc::new(ChildToolGate::default());
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.tool_lifecycle_contributor(child_gate.clone());
+    let test = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_history_mode(ThreadHistoryMode::Legacy)
+        .with_config(move |config| {
+            config.experimental_thread_store = ThreadStoreConfig::Local;
+            config.update_plan_enabled = true;
+            for feature in [Feature::TokenBudget, Feature::Collab, Feature::MultiAgentV2] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("enable test feature");
+            }
+            config
+                .features
+                .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
+                .expect("test context mode");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    mount_sse_sequence(&server, vec![sse(vec![ev_completed("initial")])]).await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Inspect the project.".to_owned(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    if compact_parent {
+        test.codex.submit(Op::Compact).await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+
+    let mut created = test.thread_manager.subscribe_thread_created();
+    let parent_id = test.session_configured.thread_id.to_string();
+    mount_sse_once_match(
+        &server,
+        header("thread-id", parent_id.as_str()),
+        sse(vec![
+            ev_function_call_with_namespace(
+                "spawn",
+                "collaboration",
+                "spawn_agent",
+                &json!({
+                    "task_name": "worker",
+                    "message": "Inspect without publishing.",
+                    "fork_turns": "all",
+                })
+                .to_string(),
+            ),
+            ev_completed("spawn-response"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        header("thread-id", parent_id.as_str()),
+        sse(vec![ev_completed("parent-fork-completion")]),
+    )
+    .await;
+    // Hold the child at a real tool boundary until rollback is checked. Its completion
+    // notification must not add a parent message or consume a parent mock response.
+    let child_requests = mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| {
+            request
+                .headers
+                .get("thread-id")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|thread_id| thread_id != parent_id)
+        },
+        sse(vec![
+            ev_function_call(
+                "child-pause",
+                "update_plan",
+                &json!({"plan": [{"step": "Inspect the project", "status": "in_progress"}]})
+                    .to_string(),
+            ),
+            ev_completed("child-paused"),
+        ]),
+    )
+    .await;
+    // This grant is either in uncompacted history or in the checkpoint's replay suffix.
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: PARENT_GRANT.to_owned(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let child = test.thread_manager.get_thread(created.try_recv()?).await?;
+    tokio::time::timeout(Duration::from_secs(30), child_gate.entered.notified())
+        .await
+        .context("child did not reach the paused tool call")?;
+    let child_id = child.session_configured().thread_id.to_string();
+    let requests = child_requests.requests();
+    let child_request = requests
+        .iter()
+        .find(|request| request.body_json()["client_metadata"]["thread_id"] == child_id)
+        .context("child model request")?;
+    assert!(serde_json::to_string(&child_request.input())?.contains(PARENT_GRANT));
+    let history = child.conversation_history_snapshot().await;
+    assert_eq!(
+        history.retained_context().map(|context| (
+            context.ordered_entries().count(),
+            context.user_messages_complete()
+        )),
+        thread_context_enabled.then_some((0, true)),
+        "inherited conversation must not populate child-local authorization",
+    );
+    let root_before = child.guardian_root_snapshot().await.context("live root")?;
+    assert!(
+        root_before
+            .messages
+            .contains(&codex_core::GuardianRootMessage::User(
+                PARENT_GRANT.to_owned()
+            ))
+    );
+
+    test.codex
+        .submit(Op::ThreadRollback { num_turns: 1 })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ThreadRolledBack(_))
+    })
+    .await;
+    let root_after = child
+        .guardian_root_snapshot()
+        .await
+        .context("live root after rollback")?;
+    assert_ne!(
+        root_before.authorization_version,
+        root_after.authorization_version
+    );
+    assert!(
+        !root_after
+            .messages
+            .contains(&codex_core::GuardianRootMessage::User(
+                PARENT_GRANT.to_owned()
+            ))
+    );
+
+    mount_sse_once_match(
+        &server,
+        header("thread-id", child_id.as_str()),
+        sse(vec![ev_completed("child-fork-completion")]),
+    )
+    .await;
+    child_gate.release.notify_one();
+    wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    mount_sse_once_match(
+        &server,
+        header("thread-id", child_id.as_str()),
+        sse(vec![ev_completed("local-instruction")]),
+    )
+    .await;
+    child
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: LOCAL_INSTRUCTION.to_owned(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let history = child.conversation_history_snapshot().await;
+    let expected = history.retained_context().cloned();
+    assert_eq!(
+        expected.as_ref().map(|context| context
+            .ordered_entries()
+            .map(|(_, entry)| match entry {
+                codex_history::RetainedContextEntry::UserMessage(message) => message.text.as_str(),
+                codex_history::RetainedContextEntry::VerifiedAnswer(_) =>
+                    panic!("unexpected answer"),
+            })
+            .collect::<Vec<_>>()),
+        thread_context_enabled.then_some(vec![LOCAL_INSTRUCTION]),
+        "genuine child-local instructions must still be captured",
+    );
+    let child = resume(&test, &child).await?;
+    assert_eq!(
+        child
+            .conversation_history_snapshot()
+            .await
+            .retained_context(),
+        expected.as_ref()
+    );
+    child.submit(Op::Compact).await?;
+    wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let child = resume(&test, &child).await?;
+    assert_eq!(
+        child
+            .conversation_history_snapshot()
+            .await
+            .retained_context(),
+        expected.as_ref()
+    );
+    child.shutdown_and_wait().await?;
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
 }
 
 #[test_case(ThreadHistoryMode::Legacy, LifecycleBoundary::Rollback; "legacy rollback")]

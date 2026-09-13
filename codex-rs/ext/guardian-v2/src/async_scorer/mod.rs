@@ -5,6 +5,7 @@ mod config;
 mod coverage;
 mod extension;
 mod metrics;
+mod parent_compaction;
 mod review_evidence;
 mod sampler;
 mod transcript;
@@ -14,7 +15,6 @@ mod trusted_tools;
 
 pub(crate) use config::DEFAULT_MODEL_CONTEXT_ITEM_TOKENS;
 pub(crate) use config::GuardianV2Config;
-pub use extension::StrictReviewReason;
 pub(crate) use extension::install;
 pub(crate) use transcript::MAX_TOOL_ENTRY_TOKENS;
 pub(crate) use transcript::RenderedContext;
