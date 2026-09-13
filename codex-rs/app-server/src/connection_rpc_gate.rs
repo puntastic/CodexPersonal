@@ -44,6 +44,10 @@ impl ConnectionRpcGate {
         self.tasks.close();
     }
 
+    pub(crate) fn is_closed(&self) -> bool {
+        self.tasks.is_closed()
+    }
+
     pub(crate) async fn shutdown(&self) {
         self.close().await;
         self.tasks.wait().await;
