@@ -1629,6 +1629,7 @@ impl Session {
     ) -> CodexResult<Option<PreviousTurnSettings>> {
         let rollout_reconstruction::RolloutReconstruction {
             mut history,
+            has_compacted_history,
             retained_context,
             guardian_history,
             previous_turn_settings,
@@ -1701,6 +1702,7 @@ impl Session {
                 reference_context_item,
                 HistoryReplacement::Reset,
             );
+            state.history.has_compacted_history = has_compacted_history;
             state
                 .history
                 .restore_review_context(Some(&retained_context), guardian_history.as_ref());

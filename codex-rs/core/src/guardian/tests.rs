@@ -69,8 +69,6 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::GuardianAssessmentStatus;
-use codex_protocol::protocol::GuardianRiskLevel;
-use codex_protocol::protocol::GuardianUserAuthorization;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_tools::ToolName;
@@ -403,8 +401,8 @@ fn guardian_requests_map_to_exact_model_policy_scopes() {
         (
             GuardianApprovalRequest::ApplyPatch {
                 id: "patch".to_string(),
-                cwd: cwd.clone(),
-                files: vec![cwd.join("README.md")],
+                cwd: cwd.clone().into(),
+                files: vec![cwd.join("README.md").into()],
                 patch: "*** Begin Patch\n*** End Patch".to_string(),
             },
             GuardianScope::FileChanges,
@@ -2875,7 +2873,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
     ));
     assert!(matches!(
         fourth_metadata.guardian_session_kind,
-        Some(codex_analytics::GuardianReviewSessionKind::TrunkReused)
+        Some(codex_analytics::GuardianReviewSessionKind::TrunkNew)
     ));
     ThreadId::from_string(
         first_metadata
@@ -2901,7 +2899,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
     assert_eq!(first_metadata.had_prior_review_context, Some(false));
     assert_eq!(second_metadata.had_prior_review_context, Some(true));
     assert_eq!(third_metadata.had_prior_review_context, Some(false));
-    assert_eq!(fourth_metadata.had_prior_review_context, Some(true));
+    assert_eq!(fourth_metadata.had_prior_review_context, Some(false));
     assert_eq!(
         first_metadata.guardian_thread_id,
         second_metadata.guardian_thread_id
@@ -2910,7 +2908,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         second_metadata.guardian_thread_id,
         third_metadata.guardian_thread_id
     );
-    assert_eq!(
+    assert_ne!(
         third_metadata.guardian_thread_id,
         fourth_metadata.guardian_thread_id
     );
@@ -2942,7 +2940,10 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         third_body["prompt_cache_key"],
         fourth_body["prompt_cache_key"]
     );
-    assert!(fourth_body.to_string().contains("third guardian rationale"));
+    assert!(
+        !fourth_body.to_string().contains("third guardian rationale"),
+        "a summary-free reset changed review evidence and must not reuse prior rationales"
+    );
     assert!(
         second_body.to_string().contains(concat!(
             "Use prior reviews as context, not binding precedent. ",
@@ -3676,6 +3677,67 @@ async fn full_access_approves_with_closed_guardian_lane_without_mutating_breaker
         ReviewDecision::Approved
     );
     assert_eq!(breaker_after, breaker_before);
+}
+
+#[test_case::test_case(AskForApproval::OnRequest; "on_request")]
+#[test_case::test_case(AskForApproval::UnlessTrusted; "unless_trusted")]
+#[tokio::test]
+async fn captured_user_reviewer_bypasses_guardian_extensions_for_fresh_requests(
+    approval_policy: AskForApproval,
+) {
+    let (mut session, mut turn) =
+        guardian_test_session_and_turn_with_base_url("http://localhost").await;
+    Arc::make_mut(
+        &mut Arc::get_mut(&mut turn)
+            .expect("turn should be uniquely owned")
+            .config,
+    )
+    .approvals_reviewer = ApprovalsReviewer::AutoReview;
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::<Config>::new();
+    extensions.approval_review_contributor(Arc::new(AskUserReviewContributor {
+        observed: Arc::clone(&observed),
+        expected_model: None,
+    }));
+    Arc::get_mut(&mut session)
+        .expect("session should be uniquely owned")
+        .services
+        .extensions = Arc::new(extensions.build());
+
+    let mut issuing_settings = turn.initial_settings.as_ref().clone();
+    update_selected_settings_for_test(&mut issuing_settings, |selected| {
+        selected
+            .approval_policy
+            .set(approval_policy)
+            .expect("captured approval policy");
+        selected.approvals_reviewer = ApprovalsReviewer::User;
+    });
+    let context = GuardianReviewContext::from_resolved_settings(turn, &issuing_settings);
+    let decision = tokio::time::timeout(
+        Duration::from_secs(1),
+        super::decide_approval(
+            session,
+            context,
+            "captured-user-fresh-review".to_string(),
+            guardian_exec_command_request("captured-user-action"),
+            ApprovalRequestReasons {
+                approval: None,
+                retry: Some("retry requires a fresh approval".to_string()),
+            },
+            GuardianReviewOptions {
+                require_guardian: false,
+                plugin_attribution_override: None,
+                approval_request_source: GuardianApprovalRequestSource::MainTurn,
+                external_cancel: None,
+                require_synchronous_review: true,
+            },
+        ),
+    )
+    .await
+    .expect("captured User selection must not start a Guardian review");
+
+    assert_eq!(decision, None);
+    assert!(observed.lock().expect("observed approvals").is_empty());
 }
 
 #[tokio::test]

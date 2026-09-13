@@ -70,6 +70,9 @@ pub(crate) struct ContextManager {
     /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
     /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
     items: Arc<Vec<ResponseItemEnvelope>>,
+    /// Current window came from compaction, even if its replacement contains no marker or items.
+    /// Replay carries this fact explicitly rather than inferring it from retained grants.
+    pub(crate) has_compacted_history: bool,
     /// Legacy-only history, started at first compaction. Thread-owned mode reads parent context.
     review_history: Option<TranscriptHistory>,
     /// Host facts independent of the model window; snapshots share immutable state.
@@ -172,6 +175,7 @@ impl ContextManager {
     pub(crate) fn new() -> Self {
         Self {
             items: Arc::new(Vec::new()),
+            has_compacted_history: false,
             review_history: None,
             retained_context: Arc::default(),
             guardian_context_mode: GuardianContextMode::Legacy,
@@ -490,6 +494,7 @@ impl ContextManager {
     }
 
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
+        self.has_compacted_history = false;
         self.retained_context = Arc::default();
         self.user_message_revision = self.user_message_revision.saturating_add(1);
         if let Some(review_history) = &mut self.review_history {
@@ -505,6 +510,7 @@ impl ContextManager {
 
     /// Compaction changes the model's history without changing the user's authorization.
     pub(crate) fn replace_compacted(&mut self, items: Vec<ResponseItemEnvelope>) {
+        self.has_compacted_history = true;
         if self.guardian_context_mode == GuardianContextMode::Legacy
             && self.review_history.is_none()
         {
@@ -544,6 +550,7 @@ impl ContextManager {
         }
 
         let snapshot = self.items.clone();
+        let has_compacted_history = self.has_compacted_history;
         let n_from_end = usize::try_from(num_turns).unwrap_or(usize::MAX);
         let user_positions = user_message_positions(&snapshot);
         let model_cut_idx = rollback_cut_position(&user_positions, n_from_end);
@@ -572,9 +579,10 @@ impl ContextManager {
         let review_cannot_disprove_crossing =
             n_from_end > user_positions.len() && review_positions.len() <= user_positions.len();
         let crosses_compaction_barrier = model_cut_idx.is_some_and(|cut_idx| {
-            snapshot[..cut_idx]
-                .iter()
-                .any(|item| is_compaction_barrier_item(&item.item))
+            has_compacted_history
+                || snapshot[..cut_idx]
+                    .iter()
+                    .any(|item| is_compaction_barrier_item(&item.item))
         }) && (crosses_known_compacted_turn
             || review_cannot_disprove_crossing);
 
@@ -584,7 +592,8 @@ impl ContextManager {
         // Without a compaction barrier, no observed boundary remains the documented no-op.
         if model_cut_idx.is_none() && review_cut_idx.is_none() {
             if self.guardian_context_mode == GuardianContextMode::ThreadOwned
-                && snapshot.iter().any(|item| is_compaction_barrier_item(&item.item))
+                && (has_compacted_history
+                    || snapshot.iter().any(|item| is_compaction_barrier_item(&item.item)))
             {
                 self.replace_annotated(Vec::new());
                 self.reference_context_item = None;
@@ -731,6 +740,7 @@ impl ContextManager {
                 });
             }
             self.replace_annotated(retained_items);
+            self.has_compacted_history = has_compacted_history;
             self.retained_context = retained_context;
             self.review_history = review_history;
         } else {

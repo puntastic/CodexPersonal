@@ -11,6 +11,7 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub(super) struct RolloutReconstruction {
     pub(super) history: Vec<ResponseItemEnvelope>,
+    pub(super) has_compacted_history: bool,
     pub(super) retained_context: codex_history::RetainedContext,
     pub(super) guardian_history: Option<codex_history::GuardianHistoryCheckpoint>,
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
@@ -506,7 +507,7 @@ impl Session {
                     ))
                 })?;
             let guardian_history = resolve_guardian_checkpoint(rollout_items, checkpoint_index)?;
-            history.replace_annotated(replacement_history);
+            history.replace_compacted(replacement_history);
             history.restore_review_context(
                 checkpoint.compacted.retained_context.as_ref(),
                 guardian_history.as_ref(),
@@ -652,6 +653,7 @@ impl Session {
             id: None,
         });
         Ok(RolloutReconstruction {
+            has_compacted_history: history.has_compacted_history,
             retained_context: history.retained_context().clone(),
             guardian_history: history.guardian_history_checkpoint(),
             history: history.into_annotated_items(),

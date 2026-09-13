@@ -719,14 +719,23 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                             "rolled-back restriction remains in {consumer} review at step {index}: {text}"
                         );
                     }
-                    if index == 4 && requires_sync {
-                        assert!(
-                            text.contains(">>> TRUSTED USER ANSWERS START"),
-                            "missing fail-closed answer section in {consumer} review at step {index}: {text}"
-                        );
-                        assert!(
-                            text.contains("some verified user answers are unavailable"),
-                            "missing incomplete-evidence notice in {consumer} review at step {index}: {text}"
+                    if index == 4 && matches!(context_path, ContextPath::ThreadOwned) {
+                        // This rollback crosses the checkpoint without a legacy review-window
+                        // backup. Checkpoint compatibility does not establish an exact cutoff:
+                        // ambiguous answers are discarded, but their incomplete-evidence notice stays.
+                        let answers = text
+                            .split_once(">>> TRUSTED USER ANSWERS START\n")
+                            .unwrap_or_else(|| {
+                                panic!("missing fail-closed answer section in {consumer} review at step {index}: {text}")
+                            })
+                            .1
+                            .split_once(">>> TRUSTED USER ANSWERS END")
+                            .expect("trusted answer section end")
+                            .0;
+                        assert_eq!(
+                            answers.trim(),
+                            "Host notice: some verified user answers are unavailable within the evidence budget. Do not treat the remaining answers as complete authorization for an action.",
+                            "only the incomplete-evidence notice may survive in {consumer} review at step {index}"
                         );
                         assert!(
                             !text.contains("assistant: Can I keep using the browser?"),

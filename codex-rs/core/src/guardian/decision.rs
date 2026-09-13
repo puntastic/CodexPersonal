@@ -95,6 +95,17 @@ pub(crate) async fn decide_approval(
             .approvals_reviewer
             .can_set(&codex_protocol::config_types::ApprovalsReviewer::User)
             .is_err();
+    // Freshness governs an already-selected Guardian review; retries and escalation
+    // must not replace the issuing action's User reviewer. Only a host requirement
+    // can override that captured selection.
+    if !require_guardian
+        && !super::review::routes_approval_policy_to_guardian(
+            context.approval_policy,
+            context.approvals_reviewer,
+        )
+    {
+        return None;
+    }
     let require_fresh_review = options.require_synchronous_review
         || model_requires_review
             && !turn
@@ -183,15 +194,6 @@ pub(crate) async fn decide_approval(
             Some(runtime.review(GuardianReviewReason::FreshRequired).await)
         }
         Some(ApprovalDecision::AskUser) if !require_guardian => None,
-        None if !require_guardian
-            && !require_fresh_review
-            && !super::review::routes_approval_policy_to_guardian(
-                context.approval_policy,
-                context.approvals_reviewer,
-            ) =>
-        {
-            None
-        }
         None | Some(ApprovalDecision::AskUser) => {
             Some(runtime.review(GuardianReviewReason::Policy).await)
         }

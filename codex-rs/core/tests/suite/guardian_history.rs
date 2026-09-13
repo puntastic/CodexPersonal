@@ -268,7 +268,7 @@ async fn guardian_history_uses_deltas_between_eviction_batches() -> Result<()> {
             ),
             ev_completed(&format!("action-{index}")),
         ]));
-        // Three consecutive denials would interrupt the parent turn before its final response.
+        // Avoid closing the review lane: this fixture exercises transcript reuse, not the breaker.
         let decision = if index == 2 {
             r#"{"risk_level":"low","user_authorization":"high","outcome":"allow"}"#
         } else {

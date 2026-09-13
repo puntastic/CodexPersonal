@@ -11969,7 +11969,7 @@ impl SessionTask for GuardianDeniedApprovalTask {
         let action = GuardianAssessmentAction::Command {
             source: GuardianCommandSource::UnifiedExec,
             command: "git push".to_string(),
-            cwd: test_path_buf("/repo").abs(),
+            cwd: test_path_buf("/repo").abs().into(),
         };
         for denial_index in 0..3 {
             let closed = crate::guardian::record_guardian_denial_for_test(
@@ -12349,7 +12349,7 @@ async fn guardian_helper_review_closes_lane_without_aborting_active_turn() {
     let action = GuardianAssessmentAction::Command {
         source: GuardianCommandSource::UnifiedExec,
         command: "git push".to_string(),
-        cwd: test_path_buf("/repo").abs(),
+        cwd: test_path_buf("/repo").abs().into(),
     };
     let review_thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()

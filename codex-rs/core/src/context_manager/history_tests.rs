@@ -1495,13 +1495,57 @@ fn metadata_free_compaction_rollback_uses_retained_user_message_boundaries() {
     );
 }
 
+#[test]
+fn thread_owned_rollback_without_compaction_or_boundaries_remains_a_noop() {
+    let mut history = ContextManager::with_guardian_context_mode(
+        GuardianContextMode::ThreadOwned,
+        &codex_protocol::protocol::SessionSource::Exec,
+    );
+    history.record_retained_context(&codex_history::RetainedContextEvent::VerifiedAnswer {
+        answer: codex_history::VerifiedAnswer {
+            turn_id: "other-window".to_owned(),
+            call_id: "ask-before-window".to_owned(),
+            questions: vec![codex_history::VerifiedQuestionAnswer {
+                question: "Upload?".to_owned(),
+                answer: "Only privately.".to_owned(),
+            }],
+        },
+        acceptance_order: None,
+    });
+    let retained = history.retained_context().clone();
+    history.drop_last_n_user_turns(1);
+    assert_eq!(history.retained_context(), &retained);
+}
+
+#[test]
+fn known_marker_free_compaction_distinguishes_suffix_rollback_from_crossing() {
+    let mut history = ContextManager::with_guardian_context_mode(
+        GuardianContextMode::ThreadOwned,
+        &codex_protocol::protocol::SessionSource::Exec,
+    );
+    let summary = assistant_msg("Earlier intent preserved as unmarked summary prose.");
+    history.replace_compacted(vec![ResponseItemEnvelope::new(summary.clone())]);
+    let suffix = user_msg("A new instruction after compaction.");
+    history.record_items([&suffix], TruncationPolicy::Tokens(10_000));
+
+    let mut within_suffix = history.clone();
+    within_suffix.drop_last_n_user_turns(/*num_turns*/ 1);
+    assert_eq!(raw_items(&within_suffix), vec![summary]);
+
+    history.drop_last_n_user_turns(/*num_turns*/ 2);
+    assert!(raw_items(&history).is_empty());
+    assert!(!history.retained_context().verified_answers_complete());
+}
+
 enum RollbackCompactionFixture {
+    Empty,
     Provider,
     Context,
     Summary,
     LegacySummary,
 }
 
+#[test_case(RollbackCompactionFixture::Empty; "empty_checkpoint")]
 #[test_case(RollbackCompactionFixture::Provider; "provider_checkpoint")]
 #[test_case(RollbackCompactionFixture::Context; "context_checkpoint")]
 #[test_case(RollbackCompactionFixture::Summary; "annotated_summary")]
@@ -1545,17 +1589,18 @@ fn oversized_compaction_rollback_discards_ambiguous_retained_context(
     // ledger alone cannot prove how many inter-agent instruction boundaries were evicted,
     // so an oversized rollback must remove stale facts without claiming complete evidence.
     let checkpoint = match checkpoint {
-        RollbackCompactionFixture::Provider => ResponseItem::Compaction {
+        RollbackCompactionFixture::Empty => None,
+        RollbackCompactionFixture::Provider => Some(ResponseItem::Compaction {
             id: Some(ResponseItemId::from_server("cmp_repository".to_owned())),
             encrypted_content: "encrypted provider checkpoint".to_owned(),
             internal_chat_message_metadata_passthrough: None,
-        },
-        RollbackCompactionFixture::Context => ResponseItem::ContextCompaction {
+        }),
+        RollbackCompactionFixture::Context => Some(ResponseItem::ContextCompaction {
             id: Some(ResponseItemId::from_server("ctx_repository".to_owned())),
             encrypted_content: Some("encrypted context checkpoint".to_owned()),
             internal_chat_message_metadata_passthrough: None,
-        },
-        RollbackCompactionFixture::Summary => ResponseItem::Message {
+        }),
+        RollbackCompactionFixture::Summary => Some(ResponseItem::Message {
             id: None,
             role: "user".to_owned(),
             content: vec![ContentItem::InputText {
@@ -1570,8 +1615,8 @@ fn oversized_compaction_rollback_discards_ambiguous_retained_context(
                     ..Default::default()
                 },
             ),
-        },
-        RollbackCompactionFixture::LegacySummary => ResponseItem::Message {
+        }),
+        RollbackCompactionFixture::LegacySummary => Some(ResponseItem::Message {
             id: None,
             role: "user".to_owned(),
             content: vec![ContentItem::InputText {
@@ -1582,15 +1627,17 @@ fn oversized_compaction_rollback_discards_ambiguous_retained_context(
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
-        },
-    };
-    history.replace_compacted(vec![ResponseItemEnvelope {
-        item: checkpoint,
-        metadata: Some(CodexHarnessMetadata {
-            compaction_model_hash: Some("provider-hash".to_owned()),
-            ..Default::default()
         }),
-    }]);
+    };
+    history.replace_compacted(
+        checkpoint.into_iter().map(|item| ResponseItemEnvelope {
+            item,
+            metadata: Some(CodexHarnessMetadata {
+                compaction_model_hash: Some("provider-hash".to_owned()),
+                ..Default::default()
+            }),
+        }).collect(),
+    );
     history.set_reference_context_item(Some(reference_context_item()));
     assert_eq!(history.guardian_history_checkpoint(), None);
     assert!(user_message_positions(history.annotated_items()).is_empty());

@@ -7,7 +7,16 @@ isolated branch and worktree, preserve the personal fork's intentional seams,
 regenerate derived artifacts, run focused tests, build a reversible package,
 and only then select it for the next Desktop restart.
 
-## Current integration baseline
+## Current update and last qualification
+
+The September13 candidate is on `codex/upstream-sync-20260913`, based on stable
+`rust-v0.154.0` (`6b9826e3aa83b1a5947db50f4332cb9c65f1b340`) and selected later
+fixes. Its evidence, exclusions and pending gates live in
+[`updates/2026-09-13.md`](updates/2026-09-13.md). The live source verified at the
+start of this pass was `620e488dcbbb2613fa4e723a1d6633c10d8a1ad2`.
+
+The following block records the prior September5 source qualification; its
+then-pending deployment state is historical, not a current deployment receipt.
 
 - Personal-fork base: `54382846b5461d7c851dd6f72cc31e3beac3a978`
 - Upstream candidate: `83b62a02fab5c0fc797cbc9896c332148f1fd9d0`
@@ -96,6 +105,13 @@ repair and qualification before project adoption.
 
 ### Guardian and delegated authority
 
+The project is not adopting Guardian as an active supervisor through an upstream
+update. Preserve the user's existing authority and autonomy balance. Peer review
+contributes evidence; it does not automatically acquire permission authority.
+Compatibility alone does not justify changing approval defaults or adding a
+reviewer. The following contracts preserve behavior where the review path exists;
+they do not instruct an operator to activate it.
+
 Model-specific Guardian policy controls ordinary review coverage, not project
 authority. An absent model policy preserves legacy coverage; a supplied policy
 map is complete, so omitted scopes are disabled and ordinary requests continue
@@ -143,12 +159,15 @@ canonical ledger.
 
 ### Phone Remote version
 
-The source workspace version remains `0.0.0`. Until a typed compatibility
-identity replaces the stopgap, pass the exact tested Desktop baseline through
-`-RemoteControlAppServerVersion`. It may affect only remote enrollment and the
-initialize user agent for an actual `ConnectionOrigin::RemoteControl`. Do not
-change Cargo/package identity, local or daemon user agents, model-discovery
-versioning, or WebSocket protocol version.
+Development main has historically used workspace version `0.0.0`; release tags
+may stamp a real version (the September13 stable candidate declares `0.154.0`).
+Preserve that source identity rather than changing it to bypass a compatibility
+check. Until a typed compatibility identity replaces the stopgap, record any
+explicit `-RemoteControlAppServerVersion` and its source. It may affect only
+remote enrollment and the initialize user agent for an actual
+`ConnectionOrigin::RemoteControl`, never local/daemon identities or WebSocket
+protocol version. A source-release version is evidence for choosing the value,
+not proof of successful phone use.
 
 Recheck the advertised value against the installed official Desktop build when
 upstream changes the minimum client version or Remote rejects the environment.

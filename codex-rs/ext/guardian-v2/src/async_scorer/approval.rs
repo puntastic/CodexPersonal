@@ -58,7 +58,6 @@ impl GuardianApprovalReviewer {
             return ApprovalDecision::Allow;
         }
         if !input.require_guardian
-            && !input.require_fresh_review
             && (input.approvals_reviewer == ApprovalsReviewer::User
                 || !matches!(
                     input.approval_policy,
