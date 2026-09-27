@@ -273,6 +273,7 @@ fn guardian_requests_map_to_exact_model_policy_scopes() {
             GuardianApprovalRequest::NetworkAccess {
                 id: "network".to_string(),
                 turn_id: "turn".to_string(),
+                environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                 target: "https://example.com".to_string(),
                 host: "example.com".to_string(),
                 protocol: NetworkApprovalProtocol::Https,

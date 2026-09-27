@@ -35,7 +35,7 @@ fn exact_persisted_items_are_referenced_and_new_items_stay_inline() {
     let mut inline = message("new", "new compaction output");
     inline.metadata = Some(CodexHarnessMetadata {
         client_authored: true,
-        fallback_token_limit_override: None,
+        history_truncation_token_limit: None,
         ..Default::default()
     });
     let persisted_items = HashMap::from([(
@@ -71,7 +71,7 @@ fn v2_mode_emits_complete_envelope_digest_without_changing_v1_shape() {
     let mut persisted = message("persisted-v2", "digest-bound source");
     persisted.metadata = Some(CodexHarnessMetadata {
         client_authored: true,
-        fallback_token_limit_override: None,
+        history_truncation_token_limit: None,
         ..Default::default()
     });
     let item_id = persisted.item.id().expect("item id").as_str().to_string();
@@ -193,6 +193,7 @@ fn copied_fork_source_demand_excludes_superseded_checkpoint_references() {
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            resume_metadata: None,
         })
     };
     let items = vec![
@@ -240,6 +241,7 @@ fn copied_fork_inlines_writer_filtered_source_at_durable_checkpoint() {
                     window_id: None,
                     compaction_response_id: None,
                     latest_token_usage_record: None,
+                    resume_metadata: None,
                 }),
             ],
             history_mode,
@@ -276,6 +278,7 @@ fn copied_fork_reencodes_exact_sources_only_in_gated_mode() {
                 window_id: None,
                 compaction_response_id: None,
                 latest_token_usage_record: None,
+                resume_metadata: None,
             }),
         ],
         ThreadHistoryMode::PaginatedRefsV1,
@@ -312,6 +315,7 @@ fn copied_fork_ignores_unrelated_dangling_reference_in_superseded_checkpoint() {
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            resume_metadata: None,
         })
     };
     let normalized = normalize_copied_fork_rollout(

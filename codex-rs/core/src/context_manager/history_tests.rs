@@ -1808,9 +1808,7 @@ fn oversized_compaction_rollback_discards_ambiguous_retained_context(
     assert!(!history.retained_context().verified_answers_complete());
     assert!(!history.retained_context().user_messages_complete());
     assert_eq!(
-        history
-            .conversation_history_snapshot()
-            .latest_compaction_model_hash(),
+        history.conversation_history_snapshot().latest_compaction(),
         None
     );
     assert_eq!(history.guardian_history_checkpoint(), None);
@@ -2039,7 +2037,8 @@ fn cumulative_rollback_across_provider_compaction_discards_checkpoint_and_review
     assert_eq!(
         history
             .conversation_history_snapshot()
-            .latest_compaction_model_hash(),
+            .latest_compaction()
+            .and_then(|checkpoint| checkpoint.model_hash),
         Some("provider-hash")
     );
     assert_eq!(
@@ -2068,9 +2067,7 @@ fn cumulative_rollback_across_provider_compaction_discards_checkpoint_and_review
 
     assert_eq!(raw_items(&history), vec![unrelated.clone()]);
     assert_eq!(
-        history
-            .conversation_history_snapshot()
-            .latest_compaction_model_hash(),
+        history.conversation_history_snapshot().latest_compaction(),
         None
     );
     assert_eq!(

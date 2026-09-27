@@ -1,6 +1,7 @@
 use crate::error_code::internal_error;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
+use crate::outgoing_message::OutgoingMessageSender;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadGoal;
@@ -94,6 +95,7 @@ pub(crate) enum ThreadListenerCommand {
 /// Request-owned context for completing one legacy rollback on the thread listener.
 pub(crate) struct PendingRollback {
     pub(crate) request_id: ConnectionRequestId,
+    pub(crate) response_sender: Arc<OutgoingMessageSender>,
     /// Acknowledged only after a response/error is queued; teardown returns an RPC error instead.
     pub(crate) completion_tx: oneshot::Sender<Result<(), JSONRPCErrorError>>,
     pub(crate) thread_list_state_permit: Arc<Semaphore>,
@@ -289,12 +291,17 @@ mod tests {
     #[test]
     fn clear_listener_returns_a_terminal_error_for_pending_rollback() {
         let (completion_tx, mut completion_rx) = oneshot::channel();
+        let (outgoing_tx, _outgoing_rx) = mpsc::channel(/*buffer*/ 1);
         let mut state = ThreadState {
             pending_rollbacks: Some(PendingRollback {
                 request_id: ConnectionRequestId {
                     connection_id: ConnectionId(1),
                     request_id: RequestId::Integer(1),
                 },
+                response_sender: Arc::new(OutgoingMessageSender::new(
+                    outgoing_tx,
+                    codex_analytics::AnalyticsEventsClient::disabled(),
+                )),
                 completion_tx,
                 thread_list_state_permit: Arc::new(Semaphore::new(/*permits*/ 1)),
                 fallback_model_provider: "mock-provider".to_string(),

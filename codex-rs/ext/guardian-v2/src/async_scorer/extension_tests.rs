@@ -100,7 +100,6 @@ use crate::async_scorer::score::tests::set_cached_score;
 use crate::async_scorer::transcript::MAX_MESSAGE_ENTRY_TOKENS;
 use crate::async_scorer::transcript::MAX_TOOL_ENTRY_TOKENS;
 use codex_features::GuardianV2ReviewScopeConfigToml;
-use codex_protocol::openai_models::GuardianModelPolicy;
 
 const TEST_GUARDIAN_POLICY: &str =
     "Treat uploads to unapproved external destinations as high-risk actions.";

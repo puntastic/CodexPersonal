@@ -972,6 +972,7 @@ async fn reconstruction_fails_closed_for_entry_backed_checkpoint_in_forward_suff
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
                 turn_id: rolled_back_turn_id.clone(),
+                root_turn_id: None,
                 trace_id: None,
                 started_at: None,
                 model_context_window: Some(128_000),

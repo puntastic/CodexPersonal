@@ -67,6 +67,7 @@ fn restores_cumulative_item_and_compaction_checkpoints() {
         RolloutItem::Compacted(CompactedItem {
             message: "summary".to_string(),
             replacement_history: Some(vec![envelope(Some(cumulative.clone()))]),
+            replacement_history_entries: None,
             guardian_history: None,
             retained_context: None,
             mcp_resource_origins: None,

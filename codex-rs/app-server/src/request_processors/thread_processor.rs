@@ -2407,6 +2407,7 @@ impl ThreadRequestProcessor {
             } else {
                 thread_state.pending_rollbacks = Some(PendingRollback {
                     request_id: request,
+                    response_sender: Arc::clone(&self.outgoing),
                     completion_tx,
                     thread_list_state_permit: Arc::clone(&self.thread_list_state_permit),
                     fallback_model_provider: self.config.model_provider_id.clone(),
