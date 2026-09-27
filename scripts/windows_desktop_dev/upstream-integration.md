@@ -12,8 +12,11 @@ and only then select it for the next Desktop restart.
 The September27 source-qualified update is on `codex/upstream-sync-20260927`,
 based on stable `rust-v0.157.1`
 (`36650394c5b38c2990ccf2a3457165ca3e9d9726`) and two narrowly selected later fixes.
-Its package qualification and next-start selection are pending. Decisions,
-tests, exclusions and recovery gates live in
+Compiled source `1dcf0e4461ff08b111cca74c667449bda1033689` produced package
+fingerprintd29db7aca…; it passed copied-database new→old→new startup and is
+selected for the next launch. Verify reports consistent selection and
+restart_required; actual Desktop/phone use after restart is still unobserved.
+Decisions, tests, exclusions and recovery gates live in
 [`updates/2026-09-27.md`](updates/2026-09-27.md).
 
 The running package verified at intake is0.154.0, compiled from
@@ -22,8 +25,9 @@ config mirror and actual process path agree. Personal/main started at
 `d222195d9fb3383772600c60c954de653aec918a`. The
 [`September13 receipt`](updates/2026-09-13.md) describes that prior build;
 its selection-time restart limitation was later resolved by actual restart
-observation in Ath1331. It remains the live backend until the new selection and
-a separate user restart.
+observation in Ath1331. It still ran at the new package's selection; a separate
+user restart is required. No permission/window/dormant-feature change was made
+in the live configuration.
 
 The following block records the prior September5 source qualification; its
 then-pending deployment state is historical, not a current deployment receipt.
