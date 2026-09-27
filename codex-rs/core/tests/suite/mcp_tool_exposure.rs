@@ -59,16 +59,45 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
+use tracing::Subscriber;
+use tracing::span::Attributes;
+use tracing::span::Id;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context as LayerContext;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use wiremock::Mock;
 use wiremock::Request;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_partial_json;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
+
+#[derive(Clone, Default)]
+struct McpCacheCounters {
+    binding_captures: Arc<AtomicUsize>,
+    search_index_builds: Arc<AtomicUsize>,
+}
+
+impl<S: Subscriber> Layer<S> for McpCacheCounters {
+    fn on_new_span(&self, attributes: &Attributes<'_>, _id: &Id, _context: LayerContext<'_, S>) {
+        let metadata = attributes.metadata();
+        match (metadata.target(), metadata.name()) {
+            ("codex_mcp::connection_manager::tool_catalog", "capture_binding_with_metadata") => {
+                self.binding_captures.fetch_add(1, Ordering::SeqCst);
+            }
+            ("codex_core::tools::handlers::tool_search", "new") => {
+                self.search_index_builds.fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+    }
+}
 
 struct McpResourceClientCapture {
     client: Arc<Mutex<Option<McpResourceClient>>>,
@@ -1080,10 +1109,18 @@ async fn deferred_tool_world_state_is_disabled_by_default() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// Keep spawned tasks on the thread with the scoped tracing subscriber.
+#[tokio::test(flavor = "current_thread")]
 async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespaces() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
+    let counters = McpCacheCounters::default();
+    // Keep concurrent tests without a subscriber from caching these callsites as disabled.
+    let _interest_cache_guard =
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _tracing = tracing_subscriber::registry()
+        .with(counters.clone())
+        .set_default();
     let server = responses::start_mock_server().await;
     let apps_server = AppsTestServer::mount_searchable(&server).await?;
     let response = mount_sse_sequence(&server, completed_response_sequence(/*count*/ 3)).await;
@@ -1094,7 +1131,23 @@ async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespac
 
     test.submit_turn("inspect initially available deferred tools")
         .await?;
+    let initial_captures = counters.binding_captures.load(Ordering::SeqCst);
+    let initial_index_builds = counters.search_index_builds.load(Ordering::SeqCst);
+    assert!(initial_captures > 0, "the initial turn must capture an MCP binding");
+    assert!(initial_index_builds > 0, "the initial turn must build the search index");
+
+    // Publish a new catalog revision with the same metadata from the ready client.
+    test.codex.refresh_codex_apps_tools().await?;
     test.submit_turn("inspect unchanged deferred tools").await?;
+    assert!(
+        counters.binding_captures.load(Ordering::SeqCst) > initial_captures,
+        "the follow-up must capture a new binding after the refresh"
+    );
+    assert_eq!(
+        counters.search_index_builds.load(Ordering::SeqCst),
+        initial_index_builds,
+        "equivalent bindings must preserve MCP handlers and reuse the search index"
+    );
 
     let mut refresh_config = test.config.clone();
     let user_config_path = refresh_config.codex_home.join("config.toml");
@@ -1113,6 +1166,14 @@ enabled = false
 
     let requests = response.requests();
     assert_eq!(requests.len(), 3);
+    assert!(
+        requests[2].body_json()["tools"]
+            .as_array()
+            .expect("model request tools")
+            .iter()
+            .all(|tool| tool["type"] != "tool_search"),
+        "removing all deferred tools must stop advertising the cached search tool"
+    );
     let tools_states = requests
         .iter()
         .map(tools_state_sections)
@@ -1133,6 +1194,7 @@ enabled = false
         )
     );
 
+    test.codex.shutdown_and_wait().await?;
     Ok(())
 }
 
@@ -1170,6 +1232,93 @@ async fn initially_empty_deferred_tool_world_state_is_not_rendered_or_persisted(
             .all(|state| state.get("tools").is_none())
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refreshed_mcp_handlers_follow_changed_metadata_and_removed_tools() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let tools = Arc::new(Mutex::new(vec![json!({
+        "name": "calendar_create_event",
+        "description": "Initial cached tool description.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "title": { "type": "string" } },
+            "required": ["title"],
+            "additionalProperties": false
+        },
+        "_meta": {
+            "connector_id": "calendar",
+            "link_id": "link_calendar",
+            "connector_name": "Calendar",
+            "connector_description": "Plan events and manage your calendar."
+        }
+    })]));
+    let apps_server = AppsTestServer::mount_with_tools(&server, Arc::clone(&tools)).await?;
+    let response = mount_sse_sequence(&server, completed_response_sequence(/*count*/ 3)).await;
+    let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url)
+        .with_config(|config| {
+            config.features.enable(Feature::CodeModeOnly).unwrap();
+            config.code_mode.direct_only_tool_namespaces =
+                vec![SEARCH_CALENDAR_NAMESPACE.to_owned()];
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    wait_for_mcp_server(&test.codex, CODEX_APPS_MCP_SERVER_NAME).await?;
+    test.submit_turn("inspect the original MCP tool").await?;
+
+    {
+        let mut tools = tools.lock().expect("MCP test tools lock");
+        tools[0]["description"] = json!("Updated cached tool description.");
+        tools[0]["inputSchema"] = json!({
+            "type": "object",
+            "properties": { "location": { "type": "string" } },
+            "required": ["location"],
+            "additionalProperties": false
+        });
+    }
+    test.codex.refresh_codex_apps_tools().await?;
+    test.submit_turn("inspect the changed MCP tool").await?;
+
+    tools.lock().expect("MCP test tools lock").clear();
+    test.codex.refresh_codex_apps_tools().await?;
+    test.submit_turn("inspect the removed MCP tool").await?;
+
+    let requests = response.requests();
+    assert_eq!(requests.len(), 3);
+    for (request, expected_description, expected_properties) in [
+        (
+            &requests[0],
+            "Initial cached tool description.",
+            json!({ "title": { "type": "string" } }),
+        ),
+        (
+            &requests[1],
+            "Updated cached tool description.",
+            json!({ "location": { "type": "string" } }),
+        ),
+    ] {
+        let body = request.body_json();
+        let tool = namespace_child_tool(
+            &body,
+            SEARCH_CALENDAR_NAMESPACE,
+            SEARCH_CALENDAR_CREATE_TOOL,
+        )
+        .expect("current tool metadata must remain directly exposed");
+        assert_eq!(tool["description"], expected_description);
+        assert_eq!(tool["parameters"]["properties"], expected_properties);
+    }
+    assert!(
+        namespace_child_tool(
+            &requests[2].body_json(),
+            SEARCH_CALENDAR_NAMESPACE,
+            SEARCH_CALENDAR_CREATE_TOOL,
+        )
+        .is_none(),
+        "a removed catalog tool must not survive through the handler cache",
+    );
+    test.codex.shutdown_and_wait().await?;
     Ok(())
 }
 
