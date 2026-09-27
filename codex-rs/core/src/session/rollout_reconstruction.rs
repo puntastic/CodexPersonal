@@ -75,11 +75,13 @@ fn select_input_compaction(
             RolloutItem::Compacted(compacted) => Some((index, compacted)),
             _ => None,
         })?;
-    // Paginated histories always honor this boundary. Other histories only do so when resume
-    // metadata identifies a compaction written under the newer resume contract.
+    // Native paginated histories always honor this boundary. The fork's older reference-backed
+    // checkpoints relied on preceding completed-turn metadata; preserve that contract until
+    // resume_metadata explicitly owns the boundary, even when its fields are absent.
     if (compacted.replacement_history.is_none() && compacted.replacement_history_entries.is_none())
         || compacted.window_number.is_none()
-        || (compacted.resume_metadata.is_none() && !history_mode.is_paginated())
+        || (compacted.resume_metadata.is_none()
+            && !matches!(history_mode, ThreadHistoryMode::Paginated))
         || selected_surviving_complete_checkpoint_index(rollout_items) != Some(index)
     {
         return None;

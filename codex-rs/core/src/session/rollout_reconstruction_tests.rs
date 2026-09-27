@@ -96,7 +96,8 @@ async fn recorded_questions_share_queued_input_order_across_resume() {
             history: Arc::new(saved),
             rollout_path: None,
         }))
-        .await;
+        .await
+        .expect("saved history should replay before checking attribution");
     let history = session.clone_history().await;
     assert_eq!(
         history
@@ -2217,6 +2218,109 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions(
     assert_eq!(bounded, full);
 }
 
+#[test_case(ThreadHistoryMode::PaginatedRefsV1; "references_v1")]
+#[test_case(ThreadHistoryMode::PaginatedRefsV2; "references_v2")]
+#[tokio::test]
+async fn reference_checkpoint_resume_metadata_preserves_historical_or_explicit_absent_state(
+    history_mode: ThreadHistoryMode,
+) {
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.history_mode = history_mode;
+    let session_meta = SessionMetaLine {
+        meta: SessionMeta {
+            history_mode,
+            ..Default::default()
+        },
+        git: None,
+    };
+    let mut prior_context = turn_context.to_turn_context_item();
+    prior_context.turn_id = Some("historical-reference-turn".to_string());
+    prior_context.model = "historical-reference-model".to_string();
+    prior_context.comp_hash = Some("historical-reference-hash".to_string());
+    prior_context.realtime_active = Some(true);
+    let expected_prior_settings = PreviousTurnSettings {
+        model: prior_context.model.clone(),
+        comp_hash: prior_context.comp_hash.clone(),
+        realtime_active: prior_context.realtime_active,
+    };
+    let mut source = ResponseItemEnvelope::new(user_message("retained reference source"));
+    source
+        .item
+        .set_id(Some(codex_protocol::ResponseItemId::from_server(
+            "historical-reference-source".to_string(),
+        )));
+    let source_id = source.item.id().expect("source ID").as_str().to_string();
+
+    for explicit_resume_metadata in [false, true] {
+        let entry = if history_mode.supports_compacted_history_integrity() {
+            CompactedHistoryEntry::reference_v2(source_id.clone(), &source)
+                .expect("historical source digest")
+        } else {
+            CompactedHistoryEntry::Reference {
+                item_id: source_id.clone(),
+            }
+        };
+        let mut checkpoint: CompactedItem = object!({
+            "message": "reference checkpoint",
+            "window_number": 1
+        });
+        checkpoint.replacement_history_entries = Some(vec![entry]);
+        checkpoint.resume_metadata =
+            explicit_resume_metadata.then_some(codex_history::CompactionResumeMetadata {
+                multi_agent_version: None,
+                last_started_turn_id: None,
+                previous_turn_settings: None,
+            });
+        let mut rollout_items = vec![
+            RolloutItem::SessionMeta(session_meta.clone()),
+            RolloutItem::ResponseItem(assistant_message("unrelated older payload").into()),
+        ];
+        rollout_items.extend(completed_user_turn_rollout(
+            prior_context.clone(),
+            vec![
+                RolloutItem::ResponseItem(source.clone()),
+                RolloutItem::Compacted(checkpoint),
+            ],
+        ));
+        let expected_cutoff = rollout_items.iter().position(|item| {
+            if explicit_resume_metadata {
+                matches!(item, RolloutItem::ResponseItem(envelope)
+                    if envelope.item.id() == source.item.id())
+            } else {
+                matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(_)))
+            }
+        });
+        let mut scan = ModelContextScan::for_history_mode(history_mode);
+        let cutoff = rollout_items
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, item)| {
+                (scan.push(item.clone()) == ModelContextScanProgress::Complete).then_some(index)
+            });
+        assert_eq!(cutoff, expected_cutoff);
+        let bounded_items = scan.finish(session_meta.clone());
+        let full = session
+            .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+            .await
+            .expect("full reference replay");
+        let bounded = session
+            .reconstruct_history_from_rollout(&turn_context, &bounded_items)
+            .await
+            .expect("bounded reference replay");
+        assert_eq!(
+            bounded.previous_turn_settings,
+            (!explicit_resume_metadata).then(|| expected_prior_settings.clone())
+        );
+        assert_eq!(
+            bounded.last_started_turn_id.as_deref(),
+            (!explicit_resume_metadata).then_some("historical-reference-turn")
+        );
+        assert_eq!(bounded.history, vec![source.clone()]);
+        assert_eq!(bounded, full);
+    }
+}
+
 #[test_case(ThreadHistoryMode::Paginated; "inline")]
 #[test_case(ThreadHistoryMode::PaginatedRefsV1; "references_v1")]
 #[test_case(ThreadHistoryMode::PaginatedRefsV2; "references_v2")]
@@ -2387,10 +2491,14 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
     assert_eq!(reconstructed.window_id, None);
 }
 
+#[test_case(GuardianContextMode::Legacy; "legacy_review")]
+#[test_case(GuardianContextMode::ThreadOwned; "thread_owned_review")]
 #[tokio::test]
-async fn reconstruct_history_legacy_compaction_without_replacement_history_does_not_inject_current_initial_context()
- {
-    let (session, turn_context) = make_session_and_context().await;
+async fn reconstruct_history_legacy_compaction_without_replacement_history_does_not_inject_current_initial_context(
+    guardian_context_mode: GuardianContextMode,
+) {
+    let (mut session, turn_context) = make_session_and_context().await;
+    session.guardian_context_mode = guardian_context_mode;
     let answer = codex_history::RetainedContextEvent::VerifiedAnswer {
         answer: codex_history::VerifiedAnswer {
             turn_id: "legacy-turn".to_owned(),
@@ -2403,15 +2511,21 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
         acceptance_order: None,
     };
     let mut retained = codex_history::RetainedContext::default();
-    retained.record_user_message(
-        codex_history::RetainedUserMessage {
-            turn_id: String::new(),
-            message_id: None,
-            text: "before compact".to_owned(),
-            complete: false,
-        },
-        codex_history::RetainedInputSource::Local(None),
-    );
+    // Legacy review preserves the original transcript, not a complete retained-user ledger.
+    // Thread-owned capture keeps this genuine unannotated input as an incomplete excerpt.
+    // Neither mode may enroll the generated compaction summary as another user instruction.
+    match guardian_context_mode {
+        GuardianContextMode::Legacy => retained.mark_user_messages_incomplete(),
+        GuardianContextMode::ThreadOwned => retained.record_user_message(
+            codex_history::RetainedUserMessage {
+                turn_id: String::new(),
+                message_id: None,
+                text: "before compact".to_owned(),
+                complete: false,
+            },
+            codex_history::RetainedInputSource::Local(None),
+        ),
+    }
     retained.record(&answer);
     let rollout_items = vec![
         RolloutItem::ResponseItem(user_message("before compact").into()),
@@ -2448,6 +2562,18 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
     );
     assert!(reconstructed.reference_context_item.is_none());
     assert_eq!(reconstructed.retained_context, retained);
+    assert!(reconstructed.retained_context.verified_answers_complete());
+    assert!(!reconstructed.retained_context.user_messages_complete());
+    assert_eq!(
+        reconstructed.guardian_history,
+        match guardian_context_mode {
+            GuardianContextMode::Legacy => Some(codex_history::GuardianHistoryCheckpoint(vec![
+                user_message("before compact"),
+                assistant_message("assistant reply"),
+            ])),
+            GuardianContextMode::ThreadOwned => None,
+        }
+    );
 }
 
 #[tokio::test]

@@ -200,60 +200,66 @@ fn same_checkpoint_inline_item_cannot_satisfy_its_own_backward_reference() {
 
 #[test]
 fn inline_only_entry_checkpoint_is_a_complete_history_base() {
+    let mut scan = ModelContextScan::for_history_mode(ThreadHistoryMode::Paginated);
+    assert_eq!(
+        scan.push(entry_checkpoint(vec![inline("msg-inline")])),
+        ModelContextScanProgress::Complete
+    );
+}
+
+#[test]
+fn historical_checkpoint_without_resume_metadata_requires_a_completed_turn_context() {
     for history_mode in [
-        ThreadHistoryMode::Paginated,
+        ThreadHistoryMode::Legacy,
         ThreadHistoryMode::PaginatedRefsV1,
         ThreadHistoryMode::PaginatedRefsV2,
     ] {
         let mut scan = ModelContextScan::for_history_mode(history_mode);
         assert_eq!(
             scan.push(entry_checkpoint(vec![inline("msg-inline")])),
-            ModelContextScanProgress::Complete
+            ModelContextScanProgress::Continue
         );
+        assert_eq!(
+            scan.push(agent_message()),
+            ModelContextScanProgress::Continue
+        );
+        assert_eq!(
+            scan.push(turn_started()),
+            ModelContextScanProgress::Continue
+        );
+        assert_completed_turn_context(&mut scan, ModelContextScanProgress::Complete);
     }
 }
 
 #[test]
-fn legacy_checkpoint_without_resume_metadata_still_requires_a_completed_turn_context() {
-    let mut scan = ModelContextScan::for_history_mode(ThreadHistoryMode::Legacy);
-
-    assert_eq!(
-        scan.push(entry_checkpoint(vec![inline("msg-inline")])),
-        ModelContextScanProgress::Continue
-    );
-    assert_eq!(
-        scan.push(agent_message()),
-        ModelContextScanProgress::Continue
-    );
-    assert_eq!(
-        scan.push(turn_started()),
-        ModelContextScanProgress::Continue
-    );
-    assert_completed_turn_context(&mut scan, ModelContextScanProgress::Complete);
-}
-
-#[test]
-fn legacy_checkpoint_with_resume_metadata_owns_its_companion_boundary() {
-    let mut scan = ModelContextScan::for_history_mode(ThreadHistoryMode::Legacy);
-    let mut checkpoint = entry_checkpoint(vec![inline("msg-inline")]);
-    let RolloutItem::Compacted(compacted) = &mut checkpoint else {
-        unreachable!();
-    };
-    compacted.resume_metadata = Some(codex_history::CompactionResumeMetadata {
-        multi_agent_version: None,
-        last_started_turn_id: None,
-        previous_turn_settings: None,
-    });
-    assert_eq!(
-        scan.push(checkpoint.clone()),
-        ModelContextScanProgress::Complete
-    );
-    let metadata = session_meta();
-    assert_eq!(
-        serde_json::to_value(scan.finish(metadata.clone())).expect("serialize context"),
-        serde_json::to_value(vec![RolloutItem::SessionMeta(metadata), checkpoint])
-            .expect("serialize expected context")
-    );
+fn explicit_empty_resume_metadata_owns_its_companion_boundary() {
+    for history_mode in [
+        ThreadHistoryMode::Legacy,
+        ThreadHistoryMode::PaginatedRefsV1,
+        ThreadHistoryMode::PaginatedRefsV2,
+    ] {
+        let mut scan = ModelContextScan::for_history_mode(history_mode);
+        let mut checkpoint = entry_checkpoint(vec![inline("msg-inline")]);
+        let RolloutItem::Compacted(compacted) = &mut checkpoint else {
+            unreachable!();
+        };
+        compacted.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+            multi_agent_version: None,
+            last_started_turn_id: None,
+            previous_turn_settings: None,
+        });
+        assert_eq!(
+            scan.push(checkpoint.clone()),
+            ModelContextScanProgress::Complete
+        );
+        let mut metadata = session_meta();
+        metadata.meta.history_mode = history_mode;
+        assert_eq!(
+            serde_json::to_value(scan.finish(metadata.clone())).expect("serialize context"),
+            serde_json::to_value(vec![RolloutItem::SessionMeta(metadata), checkpoint])
+                .expect("serialize expected context")
+        );
+    }
 }
 
 #[test]

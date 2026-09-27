@@ -28,8 +28,9 @@ mod tests;
 /// Loads rollout items needed to reconstruct the latest model-visible context.
 ///
 /// Paginated JSONL rollouts use a reverse scan. It stops at the newest `CompactedItem` with both
-/// replacement history and a window number once all referenced sources are available. Older
-/// records supply only demanded sources, not missing companion metadata. If no bounded cutoff is
+/// replacement history and a window number once all referenced sources are available. Historical
+/// reference checkpoints without resume metadata also retain one completed-turn metadata baseline;
+/// new-contract checkpoints use older records only for demanded sources. If no bounded cutoff is
 /// possible, reread the complete lineage because the bounded accumulator drops unrelated payloads.
 ///
 /// Compressed segments are decoded before applying their original JSONL offsets. Legacy rollouts
@@ -177,7 +178,9 @@ fn scan_model_context_from_lineage_blocking(
     lineage: &RolloutLineage,
     session_meta: SessionMetaLine,
 ) -> io::Result<Vec<RolloutItem>> {
-    let mut scan = ModelContextScan::default();
+    // The canonical rollout owns the exact generation. SQLite exposes only the public family
+    // and cannot distinguish historical reference checkpoints from native paginated history.
+    let mut scan = ModelContextScan::for_history_mode(session_meta.meta.history_mode);
     let mut bounded = false;
     'segments: for segment in lineage.segments().iter().rev() {
         let file = codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;

@@ -26,10 +26,10 @@ pub enum ModelContextScanProgress {
 /// reverse-paged cloud readers can both feed their items through this scan to share the cutoff
 /// rules and chronological replay assembly.
 ///
-/// The scan stops once it has a complete checkpoint and its explicit sources. Paginated
-/// checkpoints own their resume boundary; absent companion metadata must not be borrowed from
-/// older turns. Legacy migration additionally needs a completed-turn baseline when the checkpoint
-/// predates `resume_metadata`.
+/// The scan stops once it has a complete checkpoint and its explicit sources. Native paginated
+/// checkpoints own their resume boundary. Historical reference-backed checkpoints and legacy
+/// migration additionally need a completed-turn baseline until `resume_metadata` explicitly owns
+/// that state, including when its fields are intentionally absent.
 ///
 /// An entry-backed replacement history is only a bounded base once every `Reference` has found an
 /// older source item. Sources may be top-level response items, legacy replacement-history items,
@@ -40,7 +40,8 @@ pub enum ModelContextScanProgress {
 /// needed to reconstruct one completed turn's durable context baseline. This keeps a successful
 /// scan bounded by the context it will actually replay, even when a requested source is very old.
 ///
-/// For legacy migration, a turn establishes a context baseline with a user-turn boundary (a paginated
+/// For historical reference checkpoints and legacy migration, a turn establishes a context
+/// baseline with a user-turn boundary (a paginated
 /// `ItemCompleted(UserMessage)` marker, agent message, or inter-agent message), or a full
 /// `WorldState` snapshot newer than that turn's latest compaction. The snapshot also lets turns
 /// with empty input supply resume metadata, matching rollout reconstruction. Without either,
@@ -87,10 +88,10 @@ impl Default for ModelContextScan {
 }
 
 impl ModelContextScan {
-    /// Selects legacy migration metadata recovery or checkpoint-local paginated replay.
+    /// Selects historical metadata recovery or native checkpoint-local paginated replay.
     pub fn for_history_mode(history_mode: ThreadHistoryMode) -> Self {
         Self {
-            checkpoint_local_metadata: history_mode.is_paginated(),
+            checkpoint_local_metadata: matches!(history_mode, ThreadHistoryMode::Paginated),
             ..Self::default()
         }
     }

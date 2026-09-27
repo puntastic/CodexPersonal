@@ -4012,8 +4012,16 @@ async fn migration_preserves_legacy_displayed_thread_names() {
         .await
         .expect("write legacy Guardian name");
 
-    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
-        if history_mode == ThreadHistoryMode::Paginated {
+    // SQLite lists the stable history family; a canonical rollout read preserves the fork's
+    // exact writer generation after migration.
+    for (listed_mode, canonical_mode) in [
+        (ThreadHistoryMode::Legacy, ThreadHistoryMode::Legacy),
+        (
+            ThreadHistoryMode::Paginated,
+            ThreadHistoryMode::PaginatedRefsV1,
+        ),
+    ] {
+        if canonical_mode == ThreadHistoryMode::PaginatedRefsV1 {
             store
                 .migrate_rollouts(apply_options())
                 .await
@@ -4063,7 +4071,7 @@ async fn migration_preserves_legacy_displayed_thread_names() {
                     listed.history_mode,
                     read.history_mode
                 ),
-                (Some(name), Some(name), history_mode, history_mode),
+                (Some(name), Some(name), listed_mode, canonical_mode),
             );
         }
     }

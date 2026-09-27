@@ -546,6 +546,9 @@ async fn bounded_context_drops_large_unrelated_pre_base_payloads() {
     let expected = vec![
         RolloutItem::SessionMeta(session_meta),
         source_response("selected-source", "source"),
+        turn_started("turn-1"),
+        user_message("metadata turn"),
+        turn_context(home.path(), "turn-1"),
         selected,
         suffix,
     ];
