@@ -9,14 +9,21 @@ and only then select it for the next Desktop restart.
 
 ## Current update and last qualification
 
-The September13 qualified update is on `codex/upstream-sync-20260913`, based on stable
-`rust-v0.154.0` (`6b9826e3aa83b1a5947db50f4332cb9c65f1b340`) and selected later
-fixes. Runtime source `c196cb9040fbfba882e1ff5ae539736b7a8ab81b` is published to
-personal/main and packaged as0.154.0. The package is selected for the next
-restart; actual post-restart Desktop and phone use remain unobserved.
-Its evidence, exclusions and remaining gates live in
-[`updates/2026-09-13.md`](updates/2026-09-13.md). The live source verified at the
-start of this pass was `620e488dcbbb2613fa4e723a1d6633c10d8a1ad2`.
+The September27 source-qualified update is on `codex/upstream-sync-20260927`,
+based on stable `rust-v0.157.1`
+(`36650394c5b38c2990ccf2a3457165ca3e9d9726`) and two narrowly selected later fixes.
+Its package qualification and next-start selection are pending. Decisions,
+tests, exclusions and recovery gates live in
+[`updates/2026-09-27.md`](updates/2026-09-27.md).
+
+The running package verified at intake is0.154.0, compiled from
+`c196cb9040fbfba882e1ff5ae539736b7a8ab81b`, fingerprintfda313ec…; selector,
+config mirror and actual process path agree. Personal/main started at
+`d222195d9fb3383772600c60c954de653aec918a`. The
+[`September13 receipt`](updates/2026-09-13.md) describes that prior build;
+its selection-time restart limitation was later resolved by actual restart
+observation in Ath1331. It remains the live backend until the new selection and
+a separate user restart.
 
 The following block records the prior September5 source qualification; its
 then-pending deployment state is historical, not a current deployment receipt.
@@ -60,6 +67,16 @@ or mismatched references, restore retained context and Guardian history, and
 then replay the surviving suffix. A child fork re-encodes inherited references
 for its own rollout but clears parent-local retained authorization and Guardian
 history.
+
+Checkpoint-local resume metadata is a narrower contract than pagination.
+Native `Paginated` uses the upstream local boundary. Historical `PaginatedRefsV1`
+and `PaginatedRefsV2` checkpoints without `resume_metadata` still require the
+earlier completed-turn metadata baseline; a small metadata scan preserves that
+without retaining every earlier model item. `Some(resume_metadata)` owns the
+boundary even when its fields explicitly contain no prior settings or turn.
+The canonical rollout supplies the exact history generation; the SQLite listing
+projection only supplies the paginated family. Broadening a native-paginated
+check to `is_paginated()` at this seam loses old-reference recovery state.
 
 Model history, host-owned Guardian history, and retained authorization are
 independent rollback evidence surfaces. Count inter-agent instructions as task

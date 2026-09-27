@@ -2671,15 +2671,13 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
     let (window_number, window_ids) = session.advance_auto_compact_window().await;
     session
         .replace_compacted_history(
-            vec![
-                ResponseItem::Compaction {
-                    id: Some(codex_protocol::ResponseItemId::from_server(
-                        "cmp_guardian_parent_summary".to_string(),
-                    )),
-                    encrypted_content: "encrypted guardian parent summary".to_string(),
-                    internal_chat_message_metadata_passthrough: None,
-                },
-            ]
+            vec![ResponseItem::Compaction {
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "cmp_guardian_parent_summary".to_string(),
+                )),
+                encrypted_content: "encrypted guardian parent summary".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            }]
             .into_iter()
             .map(codex_history::ResponseItemEnvelope::new)
             .collect(),
@@ -2724,9 +2722,13 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         )
         .await;
     assert!(
-        session.conversation_history_snapshot().await.review_items().any(|item| {
-            response_item_contains_message_text(item, "Please push the third docs fix too.")
-        }),
+        session
+            .conversation_history_snapshot()
+            .await
+            .review_items()
+            .any(|item| {
+                response_item_contains_message_text(item, "Please push the third docs fix too.")
+            }),
         "the fixture's newly accepted follow-up must reach the Guardian evidence surface",
     );
     let third_request = GuardianApprovalRequest::ExecCommand {
@@ -3554,9 +3556,8 @@ async fn full_access_approves_without_mutating_guardian_breaker(prior_denials: u
     let (session, mut turn) =
         guardian_test_session_and_turn_with_base_url("http://localhost").await;
     let turn_id = turn.sub_id.to_string();
-    let denials = codex_guardian_reviewer::ReviewDenials::for_thread(
-        &session.services.thread_extension_data,
-    );
+    let denials =
+        codex_guardian_reviewer::ReviewDenials::for_thread(&session.services.thread_extension_data);
     for _ in 0..prior_denials {
         denials.record_denial(&turn_id, turn.model_info()).await;
     }
@@ -3588,8 +3589,16 @@ async fn full_access_approves_without_mutating_guardian_breaker(prior_denials: u
     assert_eq!(decision, ReviewDecision::Approved);
     assert_eq!(denials.is_closed(&turn_id).await, prior_denials == 3);
     if prior_denials == 1 {
-        assert_eq!(denials.record_denial(&turn_id, turn.model_info()).await, None);
-        assert!(denials.record_denial(&turn_id, turn.model_info()).await.is_some());
+        assert_eq!(
+            denials.record_denial(&turn_id, turn.model_info()).await,
+            None
+        );
+        assert!(
+            denials
+                .record_denial(&turn_id, turn.model_info())
+                .await
+                .is_some()
+        );
     }
 }
 
@@ -3814,12 +3823,19 @@ async fn required_guardian_without_cancellation_overrides_extension_ask_user(
         observed.lock().expect("observed approvals").as_slice(),
         &[(GuardianScope::Mcp, strict_auto_review, require_fresh_review)]
     );
-    let denials = codex_guardian_reviewer::ReviewDenials::for_thread(
-        &session.services.thread_extension_data,
-    );
+    let denials =
+        codex_guardian_reviewer::ReviewDenials::for_thread(&session.services.thread_extension_data);
     assert!(!denials.is_closed(&turn.sub_id).await);
-    assert_eq!(denials.record_denial(&turn.sub_id, turn.model_info()).await, None);
-    assert!(denials.record_denial(&turn.sub_id, turn.model_info()).await.is_some());
+    assert_eq!(
+        denials.record_denial(&turn.sub_id, turn.model_info()).await,
+        None
+    );
+    assert!(
+        denials
+            .record_denial(&turn.sub_id, turn.model_info())
+            .await
+            .is_some()
+    );
     Ok(())
 }
 

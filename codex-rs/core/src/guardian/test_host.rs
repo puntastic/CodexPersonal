@@ -29,9 +29,8 @@ pub(crate) async fn record_guardian_denial_for_test(
     _risk_level: codex_protocol::protocol::GuardianRiskLevel,
     _user_authorization: codex_protocol::protocol::GuardianUserAuthorization,
 ) -> bool {
-    let denials = codex_guardian_reviewer::ReviewDenials::for_thread(
-        &session.services.thread_extension_data,
-    );
+    let denials =
+        codex_guardian_reviewer::ReviewDenials::for_thread(&session.services.thread_extension_data);
     if let Some(message) = denials.record_denial(turn_id, turn.model_info()).await {
         session
             .send_event(

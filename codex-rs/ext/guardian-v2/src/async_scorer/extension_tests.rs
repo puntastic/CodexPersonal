@@ -1275,12 +1275,15 @@ async fn adaptive_policy_reuses_valid_evidence_and_falls_back_when_missing() -> 
         ..Default::default()
     });
     thread_store.insert(model);
-    set_cached_score(thread_store, SecurityRiskScore {
-        scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
-        call_id: None,
-        action: None,
-        sampled_at: None,
-    });
+    set_cached_score(
+        thread_store,
+        SecurityRiskScore {
+            scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+            call_id: None,
+            action: None,
+            sampled_at: None,
+        },
+    );
     let progress = thread_store
         .get::<GuardianV2ScoreProgress>()
         .expect("Guardian v2 score progress");
@@ -1319,12 +1322,15 @@ async fn adaptive_policy_reuses_valid_evidence_and_falls_back_when_missing() -> 
         vec![GuardianReviewReason::MissingScore]
     );
 
-    set_cached_score(thread_store, SecurityRiskScore {
-        scores: BTreeMap::from([("action_risk".to_owned(), 0.75)]),
-        call_id: None,
-        action: None,
-        sampled_at: None,
-    });
+    set_cached_score(
+        thread_store,
+        SecurityRiskScore {
+            scores: BTreeMap::from([("action_risk".to_owned(), 0.75)]),
+            call_id: None,
+            action: None,
+            sampled_at: None,
+        },
+    );
     assert_eq!(
         decide_approval_for_test(
             &fixture,

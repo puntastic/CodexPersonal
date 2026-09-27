@@ -30,19 +30,16 @@ async fn denial_reporting_and_breaker_follow_the_issuing_model(
     .await;
     let (session, mut turn, events) = guardian_test_session_turn_and_rx(&server).await;
     let issuing_is_cyber = matches!(issuing_specialty, IssuingSpecialty::Cyber);
-    update_turn_settings_for_test(
-        Arc::get_mut(&mut turn).expect("unique turn"),
-        |settings| {
-            let model = Arc::make_mut(&mut settings.model_info);
-            model.model_specialty = (!issuing_is_cyber).then(|| MODEL_SPECIALTY_CYBER.to_owned());
-            model.model_messages = Some(
-                serde_json::from_value(serde_json::json!({
-                    "auto_review": { "rejection_instructions": "Active thread rejection." }
-                }))
-                .unwrap(),
-            );
-        },
-    );
+    update_turn_settings_for_test(Arc::get_mut(&mut turn).expect("unique turn"), |settings| {
+        let model = Arc::make_mut(&mut settings.model_info);
+        model.model_specialty = (!issuing_is_cyber).then(|| MODEL_SPECIALTY_CYBER.to_owned());
+        model.model_messages = Some(
+            serde_json::from_value(serde_json::json!({
+                "auto_review": { "rejection_instructions": "Active thread rejection." }
+            }))
+            .unwrap(),
+        );
+    });
     let mut context = GuardianReviewContext::from(&turn);
     let model = Arc::make_mut(&mut context.model_info);
     model.slug = "issuing-model".to_owned();
@@ -79,7 +76,12 @@ async fn denial_reporting_and_breaker_follow_the_issuing_model(
     while let Ok(event) = events.try_recv() {
         match event.msg {
             EventMsg::GuardianAssessment(event) => {
-                model_contexts.push(event.model_context.expect("captured model attribution").model_slug);
+                model_contexts.push(
+                    event
+                        .model_context
+                        .expect("captured model attribution")
+                        .model_slug,
+                );
             }
             EventMsg::TurnAborted(event) => panic!("denial interrupted the turn: {event:?}"),
             _ => {}

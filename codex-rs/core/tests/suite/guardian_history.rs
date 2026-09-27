@@ -100,9 +100,8 @@ async fn guardian_history_survives_restart_and_user_fork(
     initial.submit_text_turn(restriction).await?;
     // Denial-lane state is runtime-local even when Guardian evidence is durable.
     let lane_turn_id = "closed-before-restart";
-    let denials = codex_guardian_reviewer::ReviewDenials::for_thread(
-        initial.codex.thread_extension_data(),
-    );
+    let denials =
+        codex_guardian_reviewer::ReviewDenials::for_thread(initial.codex.thread_extension_data());
     let model = initial
         .codex
         .thread_extension_data()
@@ -349,7 +348,10 @@ async fn guardian_answers_survive_compaction_and_eviction() -> Result<()> {
     let test = test_codex()
         .with_config(|config| {
             config.features.enable(Feature::TokenBudget).unwrap();
-            config.features.enable(Feature::GuardianThreadContext).unwrap();
+            config
+                .features
+                .enable(Feature::GuardianThreadContext)
+                .unwrap();
             config
                 .features
                 .enable(Feature::DefaultModeRequestUserInput)

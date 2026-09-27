@@ -505,7 +505,10 @@ async fn encrypted_parent_compaction_requires_original_item_id(thread_context_en
         .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
         .expect("context mode");
     features
-        .set_enabled(Feature::GuardianReuseParentCompaction, !thread_context_enabled)
+        .set_enabled(
+            Feature::GuardianReuseParentCompaction,
+            !thread_context_enabled,
+        )
         .expect("legacy checkpoint reuse is explicit; thread-owned review does not need it");
     let policy =
         ReviewContextPolicy::for_context(GuardianContextMode::from_features(&features), &features);
@@ -831,7 +834,11 @@ async fn run_review_removes_trunk_when_event_stream_is_broken() {
             .clone_history()
             .await
             .history_version(),
-        params.parent_session.clone_history().await.review_history_version(),
+        params
+            .parent_session
+            .clone_history()
+            .await
+            .review_history_version(),
         GuardianContextMode::Legacy,
     )
     .with_environments(params.parent_context.environments())

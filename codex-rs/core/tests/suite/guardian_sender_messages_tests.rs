@@ -26,7 +26,10 @@ async fn guardian_receives_sender_user_messages_with_thread_context() -> Result<
             model.auto_review_model_override = Some("gpt-5.6-luna".to_owned());
         })
         .with_config(|config| {
-            config.features.enable(Feature::GuardianThreadContext).unwrap();
+            config
+                .features
+                .enable(Feature::GuardianThreadContext)
+                .unwrap();
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
         })

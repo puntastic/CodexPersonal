@@ -2842,7 +2842,10 @@ for (let index = 0; index < 7; index++) {{
     let completed = core_test_support::responses::mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("b-complete", "The approval lane is closed; B can still finish."),
+            ev_assistant_message(
+                "b-complete",
+                "The approval lane is closed; B can still finish.",
+            ),
             ev_completed("b-complete"),
         ]),
     )
@@ -2861,7 +2864,9 @@ for (let index = 0; index < 7; index++) {{
         match event.msg {
             EventMsg::TurnStarted(_) => active_id = Some(event.id),
             EventMsg::Warning(warning)
-                if warning.message.contains("Automatic approval lane closed for this turn") =>
+                if warning
+                    .message
+                    .contains("Automatic approval lane closed for this turn") =>
             {
                 assert!(
                     warning
@@ -2885,9 +2890,13 @@ for (let index = 0; index < 7; index++) {{
     assert!(active_id.is_some());
     assert_eq!(warning_id, Some(origin_turn_id));
     assert_ne!(warning_id, active_id);
-    assert!(completed.single_request().body_json().to_string().contains(
-        "closed for the remainder of this turn"
-    ));
+    assert!(
+        completed
+            .single_request()
+            .body_json()
+            .to_string()
+            .contains("closed for the remainder of this turn")
+    );
     for review in reviews {
         assert_eq!(
             review

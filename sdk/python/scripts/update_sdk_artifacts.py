@@ -541,7 +541,9 @@ def generate_v2_all(schema_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         normalized_bundle = Path(td) / schema_bundle_path(schema_dir).name
-        normalized_bundle.write_text(_normalized_schema_bundle_text(schema_dir), encoding="utf-8", newline="\n")
+        normalized_bundle.write_text(
+            _normalized_schema_bundle_text(schema_dir), encoding="utf-8", newline="\n"
+        )
         run_python_module(
             "datamodel_code_generator",
             [
@@ -622,7 +624,9 @@ def _require_nullable_field(out_path: Path, class_name: str, field_pattern: str)
     )
     if count != 1:
         raise RuntimeError(f"Generated {class_name} field did not have the expected nullable shape")
-    out_path.write_text(source[:class_start] + class_source + source[class_end:], encoding="utf-8", newline="\n")
+    out_path.write_text(
+        source[:class_start] + class_source + source[class_end:], encoding="utf-8", newline="\n"
+    )
 
 
 def _preserve_reasoning_effort_enum(out_path: Path) -> None:
@@ -657,7 +661,9 @@ def _preserve_reasoning_effort_enum(out_path: Path) -> None:
         member._value_ = value
         return member
 """
-    out_path.write_text(source[:class_start] + open_enum + source[class_end:], encoding="utf-8", newline="\n")
+    out_path.write_text(
+        source[:class_start] + open_enum + source[class_end:], encoding="utf-8", newline="\n"
+    )
 
 
 def _preserve_thread_source_enum(out_path: Path) -> None:
@@ -684,7 +690,9 @@ def _preserve_thread_source_enum(out_path: Path) -> None:
         member._value_ = value
         return member
 """
-    out_path.write_text(source[:class_start] + open_enum + source[class_end:], encoding="utf-8", newline="\n")
+    out_path.write_text(
+        source[:class_start] + open_enum + source[class_end:], encoding="utf-8", newline="\n"
+    )
 
 
 def _preserve_plan_type_enum(out_path: Path) -> None:
@@ -714,7 +722,9 @@ def _preserve_plan_type_enum(out_path: Path) -> None:
         member._value_ = value
         return member
 """
-    out_path.write_text(source[:class_start] + class_source + source[class_end:], encoding="utf-8", newline="\n")
+    out_path.write_text(
+        source[:class_start] + class_source + source[class_end:], encoding="utf-8", newline="\n"
+    )
 
 
 def _notification_specs(schema_dir: Path) -> list[tuple[str, str]]:

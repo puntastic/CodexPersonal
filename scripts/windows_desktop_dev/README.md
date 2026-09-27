@@ -62,6 +62,13 @@ The lane does not guess a crate or invent a validation matrix. Choose focused
 tests from the changed surface and the repository `AGENTS.md`; a full suite
 remains an explicit consequential choice.
 
+The September27 SDK generator lock was tested with Python3.12. Its code-generator
+dependency rejected the workstation's Python3.14 with a `PythonVersion` error.
+For that locked schema-generation path, pass `-PythonPath` for a compatible
+interpreter and set process-local `UV_PYTHON` to the same interpreter. This does
+not require changing the system Python or user PATH; recheck when the lockfile
+changes rather than preserving a permanent version restriction.
+
 For upstream updates, use the project-specific merge seams and release gates in
 [the upstream integration contract](upstream-integration.md).
 
@@ -76,7 +83,7 @@ ordinary Rust recipes unsandboxed.
 ```powershell
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small
 .\codex-dev.ps1 -Action Build -CargoProfile release
-.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.154.0
+.\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.157.1
 ```
 
 `dev-small` is the normal iteration profile. `release` is available when the

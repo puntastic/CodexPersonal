@@ -4463,10 +4463,7 @@ async fn assert_repeated_compactions_store_image_payload_once_and_resume_exactly
         // checkpoint's durable envelope; retain all other transport and harness metadata.
         envelope.item.clear_content_item_kinds();
     }
-    assert_eq!(
-        resumed_envelopes,
-        vec![expected_later_model_envelope]
-    );
+    assert_eq!(resumed_envelopes, vec![expected_later_model_envelope]);
     assert_eq!(
         strip_metadata_from_items(&raw_history_items(&resumed_history)),
         strip_metadata_from_items(std::slice::from_ref(&later_model_envelope.item))
@@ -12739,7 +12736,6 @@ impl SessionTask for GuardianDeniedApprovalTask {
     }
 }
 
-
 pub(super) struct HeldStepTask {
     pub(super) kind: TaskKind,
     pub(super) finish: Arc<Notify>,
@@ -13185,7 +13181,6 @@ async fn guardian_helper_review_closes_lane_without_aborting_active_turn() {
 
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_complete_flushes_terminal_event_after_delivery() {

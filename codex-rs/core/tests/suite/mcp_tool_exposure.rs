@@ -1133,8 +1133,14 @@ async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespac
         .await?;
     let initial_captures = counters.binding_captures.load(Ordering::SeqCst);
     let initial_index_builds = counters.search_index_builds.load(Ordering::SeqCst);
-    assert!(initial_captures > 0, "the initial turn must capture an MCP binding");
-    assert!(initial_index_builds > 0, "the initial turn must build the search index");
+    assert!(
+        initial_captures > 0,
+        "the initial turn must capture an MCP binding"
+    );
+    assert!(
+        initial_index_builds > 0,
+        "the initial turn must build the search index"
+    );
 
     // Publish a new catalog revision with the same metadata from the ready client.
     test.codex.refresh_codex_apps_tools().await?;
@@ -1258,8 +1264,8 @@ async fn refreshed_mcp_handlers_follow_changed_metadata_and_removed_tools() -> R
     })]));
     let apps_server = AppsTestServer::mount_with_tools(&server, Arc::clone(&tools)).await?;
     let response = mount_sse_sequence(&server, completed_response_sequence(/*count*/ 3)).await;
-    let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url)
-        .with_config(|config| {
+    let mut builder =
+        search_capable_apps_builder(apps_server.chatgpt_base_url).with_config(|config| {
             config.features.enable(Feature::CodeModeOnly).unwrap();
             config.code_mode.direct_only_tool_namespaces =
                 vec![SEARCH_CALENDAR_NAMESPACE.to_owned()];

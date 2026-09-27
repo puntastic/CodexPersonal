@@ -183,11 +183,18 @@ def test_root_format_driver_covers_all_formatter_groups(
     def fake_check_output(args, *, cwd):
         if args == ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"]:
             assert cwd == tmp_path / "codex-rs"
-            return json.dumps({
-                "workspace_members": ["codex-test"],
-                "packages": [{"id": "codex-test", "name": "codex-test",
-                              "targets": [{"src_path": str(tmp_path / "codex-rs/src/lib.rs")}]}],
-            }).encode()
+            return json.dumps(
+                {
+                    "workspace_members": ["codex-test"],
+                    "packages": [
+                        {
+                            "id": "codex-test",
+                            "name": "codex-test",
+                            "targets": [{"src_path": str(tmp_path / "codex-rs/src/lib.rs")}],
+                        }
+                    ],
+                }
+            ).encode()
         assert cwd == tmp_path
         if args == git_ls_files_args + ["--", "*.rs"]:
             return (
@@ -263,9 +270,7 @@ def test_root_format_driver_covers_all_formatter_groups(
         "--config",
         "imports_granularity=Item",
     )
-    assert formatters[1].commands == (
-        script.Command(rustfmt_args, tmp_path / "codex-rs"),
-    )
+    assert formatters[1].commands == (script.Command(rustfmt_args, tmp_path / "codex-rs"),)
     assert checks[1].commands == (
         script.Command(rustfmt_args + ("--check",), tmp_path / "codex-rs"),
     )

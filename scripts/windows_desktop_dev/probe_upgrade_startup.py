@@ -36,30 +36,42 @@ def schema(path):
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
         db.execute("PRAGMA query_only=ON")
         tables = {
-            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            row[0]
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         result = {
             "quick_check": db.execute("PRAGMA quick_check").fetchone()[0],
             "applied_migrations": [
-                row[0] for row in db.execute(
+                row[0]
+                for row in db.execute(
                     "SELECT version FROM _sqlx_migrations WHERE success=1 ORDER BY version"
                 )
             ],
         }
         if "threads" in tables:
             columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
-            result["creator_columns"] = {"creator_user_id", "creator_account_id"} <= columns
-            source = json.dumps({"subagent": {"other": "guardian"}}, separators=(",", ":"))
+            result["creator_columns"] = {
+                "creator_user_id",
+                "creator_account_id",
+            } <= columns
+            source = json.dumps(
+                {"subagent": {"other": "guardian"}}, separators=(",", ":")
+            )
             result["guardian_projection"] = db.execute(
                 "SELECT count(*), coalesce(sum(length(title)),0), "
                 "coalesce(sum(length(first_user_message)),0) FROM threads WHERE source=?",
                 (source,),
             ).fetchone()
             result["attachments_table"] = "thread_attachments" in tables
-            table = "thread_attachments" if result["attachments_table"] else "thread_artifacts"
+            table = (
+                "thread_attachments"
+                if result["attachments_table"]
+                else "thread_artifacts"
+            )
             result["attachment_rows"] = (
                 db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-                if table in tables else None
+                if table in tables
+                else None
             )
         return result
 
@@ -113,13 +125,19 @@ def startup(executable, home, *, check_attachments=False):
     for thread in threads:
         thread.start()
     try:
+
         def request(identifier, method, params):
-            process.stdin.write(json.dumps({"id": identifier, "method": method, "params": params}) + "\n")
+            process.stdin.write(
+                json.dumps({"id": identifier, "method": method, "params": params})
+                + "\n"
+            )
             process.stdin.flush()
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
                 if process.poll() is not None:
-                    raise RuntimeError(f"app-server exited during {method}: {list(errors)}")
+                    raise RuntimeError(
+                        f"app-server exited during {method}: {list(errors)}"
+                    )
                 try:
                     message = messages.get(timeout=0.2)
                 except queue.Empty:
@@ -130,10 +148,17 @@ def startup(executable, home, *, check_attachments=False):
                     return message["result"]
             raise TimeoutError(f"{method} timed out: {list(errors)}")
 
-        response = request(1, "initialize", {
-            "clientInfo": {"name": "codex-personal-upgrade-probe", "version": "0.2.0"},
-            "capabilities": {"experimentalApi": True},
-        })
+        response = request(
+            1,
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "codex-personal-upgrade-probe",
+                    "version": "0.2.0",
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+        )
         if Path(response["codexHome"]).resolve() != home:
             raise RuntimeError("probe did not use its isolated CODEX_HOME")
         process.stdin.write(json.dumps({"method": "initialized"}) + "\n")
@@ -146,14 +171,17 @@ def startup(executable, home, *, check_attachments=False):
             raise RuntimeError("unexpected bounded thread-list result")
         attachment_count = None
         if check_attachments and rows:
-            attachments = request(3, "thread/attachment/list", {"threadId": rows[0]["id"], "limit": 1})
+            attachments = request(
+                3, "thread/attachment/list", {"threadId": rows[0]["id"], "limit": 1}
+            )
             attachment_count = len(attachments["data"])
         process.stdin.close()
         process.wait(timeout=45)
         if process.returncode != 0:
             raise RuntimeError(f"shutdown failed: {list(errors)}")
         return {
-            "user_agent": response["userAgent"], "exit_code": process.returncode,
+            "user_agent": response["userAgent"],
+            "exit_code": process.returncode,
             "db_only_threads_returned": len(rows),
             "attachment_rows_returned": attachment_count,
             "scope": "initialize, DB-only thread metadata, and candidate attachment listing; no turn or real rollout resumed",
@@ -194,11 +222,18 @@ for path in args.source_companion_db:
     with preserved.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     companions[companion.name] = {
-        "backup": str(preserved), "backup_sha256": digest, "before": schema(preserved),
+        "backup": str(preserved),
+        "backup_sha256": digest,
+        "before": schema(preserved),
     }
 with saved.open("rb") as stream:
     saved_hash = hashlib.file_digest(stream, "sha256").hexdigest()
-report = {"backup": str(saved), "backup_sha256": saved_hash, "before": schema(saved), "companions": companions}
+report = {
+    "backup": str(saved),
+    "backup_sha256": saved_hash,
+    "before": schema(saved),
+    "companions": companions,
+}
 report["candidate"] = startup(candidate, home, check_attachments=True)
 report["after_candidate"] = schema(home / source.name)
 for name, detail in companions.items():
@@ -213,7 +248,9 @@ assert report["after_candidate"]["quick_check"] == "ok"
 assert {55, 56, 57} <= set(report["after_candidate"]["applied_migrations"])
 assert report["after_candidate"]["creator_columns"]
 assert report["after_candidate"]["attachments_table"]
-assert report["after_candidate"]["attachment_rows"] == report["before"]["attachment_rows"]
+assert (
+    report["after_candidate"]["attachment_rows"] == report["before"]["attachment_rows"]
+)
 assert report["after_candidate"]["guardian_projection"][2] == 0
 assert report["after_previous"]["quick_check"] == "ok"
 report["candidate_after_previous"] = startup(candidate, home, check_attachments=True)
