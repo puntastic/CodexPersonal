@@ -118,8 +118,13 @@ disabled for the probes and credentials use a fresh file-only home. The probe
 does not select a Desktop package, modify the source database, run a model
 turn, or prove phone compatibility. Use it for a qualified migration question,
 not as a compulsory whole-profile preservation exercise on every update.
-This revision explicitly asserts migration54/daybreak for the September13
-update; adapt those assertions to a different migration question.
+This revision checks state migrations55–57, attachment-row preservation and
+Guardian projection cleanup for the September27 update. Optional repeated
+`--source-companion-db` arguments preserve coherent, per-database history and
+memory copies as well. The probe lists only copied DB metadata, never resumes
+source rollouts, and checks candidate → previous → candidate startup. Lazy
+stores not opened by those operations remain outside its behavioral proof.
+Adapt the assertions to a different migration question.
 
 ## Deploy, restart, verify
 

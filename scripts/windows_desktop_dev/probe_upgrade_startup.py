@@ -2,9 +2,9 @@
 
 The source opens read-only. A new output directory keeps an untouched backup and
 an isolated trial home. Neither package is selected for Desktop by this probe.
-The schema assertions here target 0.154.0's migration 54/daybreak column; revise
-those assertions for a different migration question rather than treating them
-as a universal release gate.
+The schema assertions target 0.157.1's state migrations55–57. Optional companion
+copies preserve history/memory recovery without claiming that startup exercised
+every lazy store or a model turn. No test resumes a real source rollout.
 """
 
 import argparse
@@ -34,19 +34,37 @@ def backup(source, target):
 
 def schema(path):
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
-        return {
-            "quick_check": db.execute("PRAGMA quick_check").fetchone()[0],
-            "migration_54": db.execute(
-                "SELECT success FROM _sqlx_migrations WHERE version=54"
-            ).fetchone(),
-            "daybreak_column": any(
-                row[1] == "daybreak_enabled"
-                for row in db.execute("PRAGMA table_info(threads)")
-            ),
+        db.execute("PRAGMA query_only=ON")
+        tables = {
+            row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
+        result = {
+            "quick_check": db.execute("PRAGMA quick_check").fetchone()[0],
+            "applied_migrations": [
+                row[0] for row in db.execute(
+                    "SELECT version FROM _sqlx_migrations WHERE success=1 ORDER BY version"
+                )
+            ],
+        }
+        if "threads" in tables:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
+            result["creator_columns"] = {"creator_user_id", "creator_account_id"} <= columns
+            source = json.dumps({"subagent": {"other": "guardian"}}, separators=(",", ":"))
+            result["guardian_projection"] = db.execute(
+                "SELECT count(*), coalesce(sum(length(title)),0), "
+                "coalesce(sum(length(first_user_message)),0) FROM threads WHERE source=?",
+                (source,),
+            ).fetchone()
+            result["attachments_table"] = "thread_attachments" in tables
+            table = "thread_attachments" if result["attachments_table"] else "thread_artifacts"
+            result["attachment_rows"] = (
+                db.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                if table in tables else None
+            )
+        return result
 
 
-def startup(executable, home):
+def startup(executable, home, *, check_attachments=False):
     env = dict(os.environ)
     env.update(
         CODEX_HOME=str(home),
@@ -95,47 +113,51 @@ def startup(executable, home):
     for thread in threads:
         thread.start()
     try:
-        process.stdin.write(
-            json.dumps(
-                {
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "clientInfo": {
-                            "name": "codex-personal-upgrade-probe",
-                            "version": "0.1.0",
-                        }
-                    },
-                }
-            )
-            + "\n"
-        )
-        process.stdin.flush()
-        deadline = time.monotonic() + 45
-        response = None
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise RuntimeError(
-                    f"app-server exited before initialize: {list(errors)}"
-                )
-            try:
-                message = messages.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if message.get("id") == 1:
-                if "error" in message:
-                    raise RuntimeError(f"initialize failed: {message['error']}")
-                response = message["result"]
-                break
-        if response is None:
-            raise TimeoutError(f"initialize timed out: {list(errors)}")
+        def request(identifier, method, params):
+            process.stdin.write(json.dumps({"id": identifier, "method": method, "params": params}) + "\n")
+            process.stdin.flush()
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise RuntimeError(f"app-server exited during {method}: {list(errors)}")
+                try:
+                    message = messages.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if message.get("id") == identifier:
+                    if "error" in message:
+                        raise RuntimeError(f"{method} failed: {message['error']}")
+                    return message["result"]
+            raise TimeoutError(f"{method} timed out: {list(errors)}")
+
+        response = request(1, "initialize", {
+            "clientInfo": {"name": "codex-personal-upgrade-probe", "version": "0.2.0"},
+            "capabilities": {"experimentalApi": True},
+        })
         if Path(response["codexHome"]).resolve() != home:
             raise RuntimeError("probe did not use its isolated CODEX_HOME")
+        process.stdin.write(json.dumps({"method": "initialized"}) + "\n")
+        process.stdin.flush()
+        # DB-only listing explicitly avoids scanning/repairing original rollouts
+        # whose paths survive in the copied state. Never resume those threads.
+        listed = request(2, "thread/list", {"limit": 1, "useStateDbOnly": True})
+        rows = listed["data"]
+        if not isinstance(rows, list) or len(rows) > 1:
+            raise RuntimeError("unexpected bounded thread-list result")
+        attachment_count = None
+        if check_attachments and rows:
+            attachments = request(3, "thread/attachment/list", {"threadId": rows[0]["id"], "limit": 1})
+            attachment_count = len(attachments["data"])
         process.stdin.close()
         process.wait(timeout=45)
         if process.returncode != 0:
             raise RuntimeError(f"shutdown failed: {list(errors)}")
-        return {"user_agent": response["userAgent"], "exit_code": process.returncode}
+        return {
+            "user_agent": response["userAgent"], "exit_code": process.returncode,
+            "db_only_threads_returned": len(rows),
+            "attachment_rows_returned": attachment_count,
+            "scope": "initialize, DB-only thread metadata, and candidate attachment listing; no turn or real rollout resumed",
+        }
     finally:
         if process.poll() is None:
             process.kill()  # Only the probe's own child, never the running Desktop.
@@ -148,6 +170,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--candidate", type=Path, required=True)
 parser.add_argument("--previous", type=Path, required=True)
 parser.add_argument("--source-db", type=Path, required=True)
+parser.add_argument("--source-companion-db", type=Path, action="append", default=[])
 parser.add_argument("--output", type=Path, required=True)
 args = parser.parse_args()
 source = args.source_db.resolve(strict=True)
@@ -160,16 +183,39 @@ home = output / "isolated-home"
 home.mkdir()
 backup(source, saved)
 backup(saved, home / source.name)
+companions = {}
+for path in args.source_companion_db:
+    companion = path.resolve(strict=True)
+    if companion.name == source.name or companion.name in companions:
+        raise ValueError("duplicate companion database name")
+    preserved = output / companion.name
+    backup(companion, preserved)
+    backup(preserved, home / companion.name)
+    with preserved.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    companions[companion.name] = {
+        "backup": str(preserved), "backup_sha256": digest, "before": schema(preserved),
+    }
 with saved.open("rb") as stream:
     saved_hash = hashlib.file_digest(stream, "sha256").hexdigest()
-report = {"backup": str(saved), "backup_sha256": saved_hash, "before": schema(saved)}
-report["candidate"] = startup(candidate, home)
+report = {"backup": str(saved), "backup_sha256": saved_hash, "before": schema(saved), "companions": companions}
+report["candidate"] = startup(candidate, home, check_attachments=True)
 report["after_candidate"] = schema(home / source.name)
+for name, detail in companions.items():
+    detail["after_candidate"] = schema(home / name)
 report["previous_after_migration"] = startup(previous, home)
 report["after_previous"] = schema(home / source.name)
+for name, detail in companions.items():
+    detail["after_previous"] = schema(home / name)
+    assert detail["after_candidate"]["quick_check"] == "ok"
+    assert detail["after_previous"]["quick_check"] == "ok"
 assert report["after_candidate"]["quick_check"] == "ok"
-assert report["after_candidate"]["migration_54"] == (1,)
-assert report["after_candidate"]["daybreak_column"]
+assert {55, 56, 57} <= set(report["after_candidate"]["applied_migrations"])
+assert report["after_candidate"]["creator_columns"]
+assert report["after_candidate"]["attachments_table"]
+assert report["after_candidate"]["attachment_rows"] == report["before"]["attachment_rows"]
+assert report["after_candidate"]["guardian_projection"][2] == 0
 assert report["after_previous"]["quick_check"] == "ok"
+report["candidate_after_previous"] = startup(candidate, home, check_attachments=True)
 (output / "receipt.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 print(json.dumps(report))

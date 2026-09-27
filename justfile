@@ -176,8 +176,8 @@ build-for-release:
     bazel build //codex-rs/cli:release_binaries
 
 # Regenerate the json schema for config.toml from the current config types.
-write-config-schema:
-    cargo run -p codex-config-schema --bin codex-write-config-schema
+write-config-schema *args:
+    cargo run {args} -p codex-config-schema --bin codex-write-config-schema
 
 # Regenerate app-server protocol schemas and the Python SDK derived from them.
 write-app-server-schema *args:

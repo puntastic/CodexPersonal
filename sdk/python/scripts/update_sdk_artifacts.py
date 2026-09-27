@@ -181,7 +181,7 @@ def stage_python_sdk_package(
         requirements["require_runtime_version"](runtime_versions[0])
     except ValueError as exc:
         raise RuntimeError(f"Cannot package the Python SDK: {exc}") from exc
-    pyproject_path.write_text(pyproject_text)
+    pyproject_path.write_text(pyproject_text, encoding="utf-8", newline="\n")
     return staging_dir
 
 
@@ -209,7 +209,7 @@ def stage_python_runtime_package(
     pyproject_text = _rewrite_project_version(pyproject_text, package_version)
     if platform_tag is not None:
         pyproject_text = _rewrite_runtime_platform_tag(pyproject_text, platform_tag)
-    pyproject_path.write_text(pyproject_text)
+    pyproject_path.write_text(pyproject_text, encoding="utf-8", newline="\n")
 
     runtime_package_root = staged_runtime_package_root(staging_dir)
     if package_source.is_dir():
@@ -541,7 +541,7 @@ def generate_v2_all(schema_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         normalized_bundle = Path(td) / schema_bundle_path(schema_dir).name
-        normalized_bundle.write_text(_normalized_schema_bundle_text(schema_dir))
+        normalized_bundle.write_text(_normalized_schema_bundle_text(schema_dir), encoding="utf-8", newline="\n")
         run_python_module(
             "datamodel_code_generator",
             [
@@ -601,7 +601,7 @@ def _preserve_inline_image_class_names(out_path: Path) -> None:
             raise RuntimeError(f"Generated SDK already defines {stable_name}")
         source = re.sub(rf"\b{re.escape(generated_name)}\b", stable_name, source)
 
-    out_path.write_text(source)
+    out_path.write_text(source, encoding="utf-8", newline="\n")
 
 
 def _require_nullable_field(out_path: Path, class_name: str, field_pattern: str) -> None:
@@ -622,7 +622,7 @@ def _require_nullable_field(out_path: Path, class_name: str, field_pattern: str)
     )
     if count != 1:
         raise RuntimeError(f"Generated {class_name} field did not have the expected nullable shape")
-    out_path.write_text(source[:class_start] + class_source + source[class_end:])
+    out_path.write_text(source[:class_start] + class_source + source[class_end:], encoding="utf-8", newline="\n")
 
 
 def _preserve_reasoning_effort_enum(out_path: Path) -> None:
@@ -657,7 +657,7 @@ def _preserve_reasoning_effort_enum(out_path: Path) -> None:
         member._value_ = value
         return member
 """
-    out_path.write_text(source[:class_start] + open_enum + source[class_end:])
+    out_path.write_text(source[:class_start] + open_enum + source[class_end:], encoding="utf-8", newline="\n")
 
 
 def _preserve_thread_source_enum(out_path: Path) -> None:
@@ -684,7 +684,7 @@ def _preserve_thread_source_enum(out_path: Path) -> None:
         member._value_ = value
         return member
 """
-    out_path.write_text(source[:class_start] + open_enum + source[class_end:])
+    out_path.write_text(source[:class_start] + open_enum + source[class_end:], encoding="utf-8", newline="\n")
 
 
 def _preserve_plan_type_enum(out_path: Path) -> None:
@@ -714,7 +714,7 @@ def _preserve_plan_type_enum(out_path: Path) -> None:
         member._value_ = value
         return member
 """
-    out_path.write_text(source[:class_start] + class_source + source[class_end:])
+    out_path.write_text(source[:class_start] + class_source + source[class_end:], encoding="utf-8", newline="\n")
 
 
 def _notification_specs(schema_dir: Path) -> list[tuple[str, str]]:
@@ -851,7 +851,7 @@ def generate_notification_registry(schema_dir: Path) -> None:
         ]
     )
 
-    out.write_text("\n".join(lines))
+    out.write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
 def _normalize_generated_timestamps(root: Path) -> None:
@@ -861,7 +861,7 @@ def _normalize_generated_timestamps(root: Path) -> None:
         content = py_file.read_text()
         normalized = timestamp_re.sub("#   timestamp: <normalized>", content)
         if normalized != content:
-            py_file.write_text(normalized)
+            py_file.write_text(normalized, encoding="utf-8", newline="\n")
 
 
 FIELD_ANNOTATION_OVERRIDES: dict[str, str] = {
@@ -1381,7 +1381,7 @@ def generate_public_api_flat_methods() -> None:
         "AsyncThread.flat_methods",
         _render_thread_block(turn_start_fields, is_async=True),
     )
-    public_api_path.write_text(source)
+    public_api_path.write_text(source, encoding="utf-8", newline="\n")
     run_python_module("ruff", ["format", str(public_api_path)], cwd=sdk_root())
 
 

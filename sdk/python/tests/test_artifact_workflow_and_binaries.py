@@ -102,6 +102,16 @@ def test_generation_has_single_maintenance_entrypoint_script() -> None:
     assert scripts == ["update_sdk_artifacts.py"]
 
 
+def test_generated_timestamp_normalization_uses_lf_bytes(tmp_path: Path) -> None:
+    script = _load_update_script_module()
+    generated = tmp_path / "generated.py"
+    generated.write_bytes(b"#   timestamp: 2026-09-27T00:00:00\r\nclass Example: pass\r\n")
+
+    script._normalize_generated_timestamps(generated)
+
+    assert generated.read_bytes() == b"#   timestamp: <normalized>\nclass Example: pass\n"
+
+
 def test_root_fmt_recipes_use_shared_formatter_driver() -> None:
     """The root formatting recipes should use the shared cross-platform driver."""
     justfile = ROOT.parents[1] / "justfile"
@@ -171,6 +181,13 @@ def test_root_format_driver_covers_all_formatter_groups(
 
     # The Python SDK CI image has no Git; keep discovery mocked at the process boundary.
     def fake_check_output(args, *, cwd):
+        if args == ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"]:
+            assert cwd == tmp_path / "codex-rs"
+            return json.dumps({
+                "workspace_members": ["codex-test"],
+                "packages": [{"id": "codex-test", "name": "codex-test",
+                              "targets": [{"src_path": str(tmp_path / "codex-rs/src/lib.rs")}]}],
+            }).encode()
         assert cwd == tmp_path
         if args == git_ls_files_args + ["--", "*.rs"]:
             return (
@@ -239,24 +256,18 @@ def test_root_format_driver_covers_all_formatter_groups(
     assert formatters[0].commands[-1].args == ("just", "--unstable", "--fmt")
     assert checks[0].commands[-1].args == ("just", "--unstable", "--fmt", "--check")
     rustfmt_args = (
-        "rustfmt",
-        "--edition",
-        "2024",
-        "--config-path",
-        str(tmp_path / "codex-rs/rustfmt.toml"),
+        "cargo",
+        "fmt",
+        *(("-p", "codex-test") if sys.platform == "win32" else ()),
+        "--",
         "--config",
-        "imports_granularity=Item,skip_children=true",
-    )
-    rust_files = (
-        os.path.join("..", "bazel", "rules", "example.rs"),
-        "new file.rs",
-        os.path.join("src", "lib.rs"),
+        "imports_granularity=Item",
     )
     assert formatters[1].commands == (
-        script.Command(rustfmt_args + rust_files, tmp_path / "codex-rs"),
+        script.Command(rustfmt_args, tmp_path / "codex-rs"),
     )
     assert checks[1].commands == (
-        script.Command(rustfmt_args + ("--check",) + rust_files, tmp_path / "codex-rs"),
+        script.Command(rustfmt_args + ("--check",), tmp_path / "codex-rs"),
     )
     format_buildifier_args = formatters[2].commands[-1].args
     check_buildifier_args = checks[2].commands[-1].args
