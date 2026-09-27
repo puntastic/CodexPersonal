@@ -13,9 +13,11 @@ use std::sync::Mutex;
 
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_protocol::protocol::UserMessageImageKind;
 use codex_rollout::CompactedHistoryEntry;
 use codex_rollout::CompactedHistoryResolver;
 use codex_rollout::RetainedContext;
@@ -208,6 +210,17 @@ impl RollbackPlan {
             }
         }
 
+        if rewrite.is_some()
+            && let RolloutItem::Compacted(compacted) = &mut line.item
+            && let Some(metadata) = &mut compacted.resume_metadata
+        {
+            // Rewritten history cannot attest to its old last-started turn or prior settings.
+            // Preserve the checkpoint-local contract and runtime selection, but do not allow
+            // removed-turn metadata to authorize a continuation after migration drops markers.
+            metadata.last_started_turn_id = None;
+            metadata.previous_turn_settings = None;
+        }
+
         if matches!(rewrite, Some(CompactionRewrite::EmptyReplayAnchor)) {
             compacted_history.index_explicit_sources_for_ids(&line.item, &self.requested_item_ids);
             let RolloutItem::Compacted(compacted) = &mut line.item else {
@@ -249,6 +262,7 @@ pub(super) struct RollbackPlanner {
     pending_delivery_boundary: Option<usize>,
     turn_boundaries: HashMap<String, usize>,
     call_boundaries: HashMap<(String, String), Option<usize>>,
+    delivery_boundaries: HashMap<String, Option<usize>>,
     retained_fact_sources: Vec<RetainedFactSource>,
     compactions: Vec<CompactionFrame>,
     model_replay: ModelReplayPlanner,
@@ -267,6 +281,7 @@ impl RollbackPlanner {
             pending_delivery_boundary: None,
             turn_boundaries: HashMap::new(),
             call_boundaries: HashMap::new(),
+            delivery_boundaries: HashMap::new(),
             retained_fact_sources: Vec::new(),
             compactions: Vec::new(),
             model_replay: ModelReplayPlanner::new(),
@@ -326,6 +341,18 @@ impl RollbackPlanner {
                 {
                     self.call_boundaries.insert(
                         (turn_id.to_owned(), call_id.clone()),
+                        self.record_boundaries[index],
+                    );
+                }
+                if let Some(delivery) = response
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.sender_user_messages.as_deref())
+                    && response.id().map(ResponseItemId::as_str)
+                        == Some(delivery.receiver_message_id.as_str())
+                {
+                    self.delivery_boundaries.insert(
+                        delivery.receiver_message_id.clone(),
                         self.record_boundaries[index],
                     );
                 }
@@ -649,6 +676,13 @@ impl RollbackPlanner {
                     } else {
                         // Checkpoints written without instruction retention keep the legacy
                         // source-call boundary, including answers before a same-turn steer.
+                        context.retain_sender_deliveries(|delivery| {
+                            self.delivery_boundaries
+                                .get(&delivery.receiver_message_id)
+                                .is_some_and(|boundary| {
+                                    boundary.is_none_or(|boundary| self.boundaries[boundary].alive)
+                                })
+                        });
                         context.retain_answers(|answer| {
                             self.call_boundaries
                                 .get(&(answer.turn_id.clone(), answer.call_id.clone()))
@@ -738,19 +772,39 @@ fn explicit_event_turn_id(event: &EventMsg) -> Option<&str> {
 fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent) -> bool {
     let mut text = String::new();
     let mut images = Vec::new();
+    let mut file_ids = Vec::new();
+    let mut image_order = Vec::new();
     let mut audio = Vec::new();
     for item in content {
         match item {
             ContentItem::InputText { text: item_text } => text.push_str(item_text),
-            ContentItem::InputImage { image_url, .. } => images.push(image_url.as_str()),
+            ContentItem::InputImage { image, .. } => match image {
+                ImageReference::Inline { image_url } => {
+                    image_order.push(UserMessageImageKind::Inline);
+                    images.push(image_url.as_str());
+                }
+                ImageReference::File { file_id } => {
+                    image_order.push(UserMessageImageKind::File);
+                    file_ids.push(file_id.as_str());
+                }
+            },
             ContentItem::InputAudio { audio_url } => audio.push(audio_url.as_str()),
             ContentItem::OutputText { .. } => return false,
         }
     }
     text == event.message
+        && (!event.has_complete_image_order() || image_order == event.image_order)
         && images
             == event
                 .images
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        && file_ids
+            == event
+                .file_ids
                 .as_deref()
                 .unwrap_or_default()
                 .iter()

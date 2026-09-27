@@ -9,6 +9,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::ThreadHistoryMode;
 
 /// Whether a reverse model-context scan needs more rollout items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,18 +20,16 @@ pub enum ModelContextScanProgress {
     Complete,
 }
 
-/// Accumulates newest-to-oldest rollout items until they are sufficient to reconstruct the latest
-/// model context.
+/// Finds a bounded suffix for reconstructing the most recent context window.
 ///
 /// Storage implementations own how they fetch older items. Local JSONL readers and future
 /// reverse-paged cloud readers can both feed their items through this scan to share the cutoff
 /// rules and chronological replay assembly.
 ///
-/// The scan stops once it has both:
-///
-/// - `saw_compaction`: a `CompactedItem` with one replacement-history form and `window_number`;
-/// - `saw_completed_turn_context`: a completed turn with a compatible `TurnContextItem` and a
-///   durable context baseline.
+/// The scan stops once it has a complete checkpoint and its explicit sources. Paginated
+/// checkpoints own their resume boundary; absent companion metadata must not be borrowed from
+/// older turns. Legacy migration additionally needs a completed-turn baseline when the checkpoint
+/// predates `resume_metadata`.
 ///
 /// An entry-backed replacement history is only a bounded base once every `Reference` has found an
 /// older source item. Sources may be top-level response items, legacy replacement-history items,
@@ -41,7 +40,7 @@ pub enum ModelContextScanProgress {
 /// needed to reconstruct one completed turn's durable context baseline. This keeps a successful
 /// scan bounded by the context it will actually replay, even when a requested source is very old.
 ///
-/// A turn establishes a context baseline with a user-turn boundary (a paginated
+/// For legacy migration, a turn establishes a context baseline with a user-turn boundary (a paginated
 /// `ItemCompleted(UserMessage)` marker, agent message, or inter-agent message), or a full
 /// `WorldState` snapshot newer than that turn's latest compaction. The snapshot also lets turns
 /// with empty input supply resume metadata, matching rollout reconstruction. Without either,
@@ -58,12 +57,13 @@ pub enum ModelContextScanProgress {
 /// When one appears, the scanner continues to the beginning. Callers that need the legacy full-
 /// replay fallback must reread their source after the scan reaches the beginning; dropped pre-base
 /// payloads cannot be reconstructed by this one-pass accumulator.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ModelContextScan {
     items_newest_first: Vec<RolloutItem>,
     saw_compaction: bool,
     saw_completed_turn_context: bool,
     must_scan_to_start: bool,
+    checkpoint_local_metadata: bool,
     /// Replacement-history references, which Guardian-only inline evidence cannot satisfy.
     unresolved_reference_ids: HashSet<String>,
     /// Guardian review-history references, satisfied by normal or Guardian-only explicit sources.
@@ -71,7 +71,30 @@ pub struct ModelContextScan {
     active_segment: ActiveTurnSegment,
 }
 
+impl Default for ModelContextScan {
+    fn default() -> Self {
+        Self {
+            items_newest_first: Vec::new(),
+            saw_compaction: false,
+            saw_completed_turn_context: false,
+            must_scan_to_start: false,
+            checkpoint_local_metadata: true,
+            unresolved_reference_ids: HashSet::new(),
+            unresolved_guardian_reference_ids: HashSet::new(),
+            active_segment: ActiveTurnSegment::default(),
+        }
+    }
+}
+
 impl ModelContextScan {
+    /// Selects legacy migration metadata recovery or checkpoint-local paginated replay.
+    pub fn for_history_mode(history_mode: ThreadHistoryMode) -> Self {
+        Self {
+            checkpoint_local_metadata: history_mode.is_paginated(),
+            ..Self::default()
+        }
+    }
+
     /// Adds the next newest-to-oldest rollout item and reports whether the reader can stop.
     pub fn push(&mut self, item: RolloutItem) -> ModelContextScanProgress {
         let retain_complete_item = !self.saw_compaction;
@@ -113,7 +136,7 @@ impl ModelContextScan {
         }
     }
 
-    /// Returns the collected items in chronological order with canonical head metadata.
+    /// Returns the collected items in chronological order.
     ///
     /// Call this after [`Self::push`] returns [`ModelContextScanProgress::Complete`]. An incomplete
     /// scan is still returned chronologically, but it is not a full-replay fallback once the scan
@@ -121,9 +144,6 @@ impl ModelContextScan {
     pub fn finish(mut self, session_meta: SessionMetaLine) -> Vec<RolloutItem> {
         self.items_newest_first.reverse();
         if self.has_bounded_cutoff() {
-            // A bounded scan stops before reaching the head. Prepend the separately loaded head
-            // SessionMeta, which remains canonical when copied fork history contains later
-            // metadata.
             self.items_newest_first
                 .insert(0, RolloutItem::SessionMeta(session_meta));
         }
@@ -165,6 +185,12 @@ impl ModelContextScan {
                     self.saw_compaction = true;
                     self.active_segment.saw_compaction = true;
                     if is_selected_base {
+                        // A checkpoint-local resume contract explicitly bounds companion state,
+                        // including intentionally absent values. Older items are source carriers
+                        // only and may not restore a prior settings or world-state baseline.
+                        if self.checkpoint_local_metadata || compacted.resume_metadata.is_some() {
+                            self.saw_completed_turn_context = true;
+                        }
                         // Register references only after examining the selected checkpoint. An
                         // inline entry in that same checkpoint is not an older explicit source.
                         if let Some(entries) = &compacted.replacement_history_entries {

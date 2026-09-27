@@ -4,17 +4,18 @@ use std::borrow::Cow;
 use sqlx::AssertSqlSafe;
 #[cfg(windows)]
 use sqlx::SqlSafeStr;
-use sqlx::SqlitePool;
 #[cfg(windows)]
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
+use sqlx_sqlite::SqlitePool;
 
-pub(crate) static STATE_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
-pub(crate) static LOGS_MIGRATOR: Migrator = sqlx::migrate!("./logs_migrations");
-pub(crate) static GOALS_MIGRATOR: Migrator = sqlx::migrate!("./goals_migrations");
-pub(crate) static MEMORIES_MIGRATOR: Migrator = sqlx::migrate!("./memory_migrations");
-pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx::migrate!("./queue_migrations");
-pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator = sqlx::migrate!("./thread_history_migrations");
+pub(crate) static STATE_MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations");
+pub(crate) static LOGS_MIGRATOR: Migrator = sqlx_macros::migrate!("./logs_migrations");
+pub(crate) static GOALS_MIGRATOR: Migrator = sqlx_macros::migrate!("./goals_migrations");
+pub(crate) static MEMORIES_MIGRATOR: Migrator = sqlx_macros::migrate!("./memory_migrations");
+pub(crate) static QUEUE_MIGRATOR: Migrator = sqlx_macros::migrate!("./queue_migrations");
+pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator =
+    sqlx_macros::migrate!("./thread_history_migrations");
 
 const HISTORY_MODE_MIGRATION_VERSION: i64 = 20_260_827_031_709;
 

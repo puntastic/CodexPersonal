@@ -29,8 +29,8 @@ pub(super) async fn create_thread(
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
     let history_mode = params.history_mode;
     store.ensure_live_recorder_absent(thread_id).await?;
-    let writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
-    let recorder = create_thread::create_thread(store, params).await?;
+    let writer_lock = store.acquire_writer_lock(thread_id)?;
+    let recorder = create_thread::create_thread(store, params, writer_lock.clone()).await?;
     store
         .insert_live_recorder(thread_id, recorder, thread_id, history_mode, writer_lock)
         .await
@@ -49,7 +49,7 @@ pub(super) async fn resume_thread(
     } = params;
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
     store.ensure_live_recorder_absent(thread_id).await?;
-    let writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
+    let writer_lock = store.acquire_writer_lock(thread_id)?;
 
     // The writer lock makes the selected rollout head stable while we reopen it. Caller-supplied
     // replay can have been loaded before a migration or revert, so it is evidence to validate, not
@@ -187,11 +187,15 @@ pub(super) async fn resume_thread(
         model_provider_id: metadata.model_provider.clone(),
         generate_memories: matches!(metadata.memory_mode, ThreadMemoryMode::Enabled),
     };
-    let recorder = RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path))
-        .await
-        .map_err(|err| ThreadStoreError::Internal {
-            message: format!("failed to resume local thread recorder: {err}"),
-        })?;
+    let recorder = RolloutRecorder::new_with_writer_lock(
+        &config,
+        RolloutRecorderParams::resume(rollout_path),
+        writer_lock.clone(),
+    )
+    .await
+    .map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to resume local thread recorder: {err}"),
+    })?;
     store
         .insert_live_recorder(thread_id, recorder, rollout_id, history_mode, writer_lock)
         .await
@@ -394,13 +398,17 @@ pub(super) async fn discard_thread(
     if pending_metadata.take().is_some() {
         store.pending_thread_metadata.remove(thread_id).await;
     }
-    store
+    let entry = store
         .live_recorders
         .lock()
         .await
         .remove(&thread_id)
-        .map(|_| ())
-        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })
+        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    entry
+        .recorder
+        .discard()
+        .await
+        .map_err(thread_store_io_error)
 }
 
 pub(super) async fn rollout_path(

@@ -21,6 +21,7 @@ use codex_protocol::user_input::UserInput;
 use codex_rollout::CompactedHistoryEntry;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -107,8 +108,37 @@ async fn revert_keeps_thread_id_and_hides_suffix_across_repeated_reverts() {
         .expect("read replacement metadata")
         .meta;
     assert_eq!(replacement_meta.id, thread_id);
+    assert_eq!(
+        (
+            replacement_meta.creator_user_id.as_deref(),
+            replacement_meta.creator_account_id.as_deref()
+        ),
+        (Some("creator-user"), Some("creator-account")),
+    );
     assert_eq!(replacement_meta.memory_mode, None);
+    assert_eq!(
+        replacement_meta.runtime_workspace_roots,
+        Some(vec![home.path().join("workspace")])
+    );
     assert_eq!(turn_ids(&store, thread_id).await, vec!["turn-1"]);
+
+    // Simulate an older binary replacing the rollout without the creator fields it does not know.
+    let rollout = tokio::fs::read_to_string(&first_replacement_path)
+        .await
+        .expect("read replacement rollout");
+    let (meta_line, remaining_lines) = rollout.split_once('\n').expect("session metadata line");
+    let mut meta_line: serde_json::Value = serde_json::from_str(meta_line).expect("parse metadata");
+    let payload = meta_line["payload"]
+        .as_object_mut()
+        .expect("metadata payload");
+    payload.remove("creator_user_id");
+    payload.remove("creator_account_id");
+    tokio::fs::write(
+        &first_replacement_path,
+        format!("{meta_line}\n{remaining_lines}"),
+    )
+    .await
+    .expect("write legacy replacement rollout");
 
     store
         .revert_thread(RevertThreadParams {
@@ -119,6 +149,22 @@ async fn revert_keeps_thread_id_and_hides_suffix_across_repeated_reverts() {
         .await
         .expect("revert before first turn");
     assert_eq!(turn_ids(&store, thread_id).await, Vec::<String>::new());
+    let stored = state_db
+        .get_thread(thread_id)
+        .await
+        .expect("read metadata")
+        .expect("thread metadata");
+    let recovered = codex_rollout::read_session_meta_line(&stored.rollout_path)
+        .await
+        .expect("read recovered creator metadata")
+        .meta;
+    assert_eq!(
+        (recovered.creator_user_id, recovered.creator_account_id),
+        (
+            Some("creator-user".to_string()),
+            Some("creator-account".to_string())
+        ),
+    );
 
     store
         .archive_thread(ArchiveThreadParams { thread_id })
@@ -170,6 +216,7 @@ async fn revert_preserves_refs_v1_and_resolves_bounded_model_context() {
     let selected_turn_context = RolloutItem::TurnContext(TurnContextItem {
         turn_id: Some("turn-1".to_string()),
         root_turn_id: None,
+        disabled_plugin_ids: None,
         cwd: serde_json::from_value(serde_json::json!(home.path())).expect("absolute cwd"),
         workspace_roots: None,
         current_date: None,
@@ -207,6 +254,7 @@ async fn revert_preserves_refs_v1_and_resolves_bounded_model_context() {
         window_id: None,
         compaction_response_id: None,
         latest_token_usage_record: None,
+        resume_metadata: None,
     });
     let selected_source_envelope = match &selected_source {
         RolloutItem::ResponseItem(envelope) => envelope.clone(),
@@ -428,6 +476,8 @@ async fn create_paginated_thread(
 ) {
     store
         .create_thread(CreateThreadParams {
+            creator_user_id: Some("creator-user".to_string()),
+            creator_account_id: Some("creator-account".to_string()),
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
@@ -444,6 +494,7 @@ async fn create_paginated_thread(
             history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: "window-1".to_string(),
+            runtime_workspace_roots: Some(vec![store.config.codex_home.join("workspace").abs()]),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),
                 model_provider: "test-provider".to_string(),
@@ -475,6 +526,7 @@ async fn turn_ids(store: &LocalThreadStore, thread_id: ThreadId) -> Vec<String> 
 fn turn_started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_id.to_string(),
+        root_turn_id: None,
         trace_id: None,
         started_at: Some(10),
         model_context_window: None,

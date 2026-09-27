@@ -1,4 +1,4 @@
-//! Exercises retained review history through compaction, resume, fork, eviction, and rollback.
+//! Exercises retained review history through compaction, resume, fork, and eviction.
 
 use anyhow::Result;
 use base64::Engine;
@@ -13,6 +13,7 @@ use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::models::ImageReference;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -75,6 +76,10 @@ async fn guardian_history_survives_restart_and_user_fork(
             config.experimental_thread_store = store_config;
             config
                 .features
+                .enable(Feature::GuardianThreadContext)
+                .expect("exercise retained Guardian history");
+            config
+                .features
                 .enable(Feature::TokenBudget)
                 .expect("enable token budget");
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
@@ -93,6 +98,20 @@ async fn guardian_history_survives_restart_and_user_fork(
     let restriction = "Keep the release private.";
     mount_sse_once(&server, sse(vec![ev_completed("restriction")])).await;
     initial.submit_text_turn(restriction).await?;
+    // Denial-lane state is runtime-local even when Guardian evidence is durable.
+    let lane_turn_id = "closed-before-restart";
+    let denials = codex_guardian_reviewer::ReviewDenials::for_thread(
+        initial.codex.thread_extension_data(),
+    );
+    let model = initial
+        .codex
+        .thread_extension_data()
+        .get::<codex_protocol::openai_models::ModelInfo>()
+        .expect("resolved parent model");
+    for _ in 0..3 {
+        denials.record_denial(lane_turn_id, &model).await;
+    }
+    assert!(denials.is_closed(lane_turn_id).await);
     initial.codex.shutdown_and_wait().await?;
     let thread_id = initial.session_configured.thread_id;
     initial.thread_manager.remove_thread(&thread_id).await;
@@ -123,12 +142,8 @@ async fn guardian_history_survives_restart_and_user_fork(
         initial
             .thread_manager
             .fork_prepared_thread(
-                initial.config.clone(),
+                codex_core::StartThreadOptions::new(initial.config.clone()),
                 prepared,
-                /*thread_source*/ None,
-                /*parent_trace*/ None,
-                ClientMcpExtensions::default(),
-                /*reserved_thread_id*/ None,
             )
             .await?
     } else {
@@ -136,12 +151,8 @@ async fn guardian_history_survives_restart_and_user_fork(
             .thread_manager
             .fork_thread_from_history(
                 ForkSnapshot::Interrupted,
-                initial.config.clone(),
+                codex_core::StartThreadOptions::new(initial.config.clone()),
                 history.clone(),
-                /*thread_source*/ None,
-                /*parent_trace*/ None,
-                ClientMcpExtensions::default(),
-                /*reserved_thread_id*/ None,
             )
             .await?
     };
@@ -156,6 +167,12 @@ async fn guardian_history_survives_restart_and_user_fork(
         )
         .await?;
     for thread in [&fork.thread, &resumed.thread] {
+        assert!(
+            !codex_guardian_reviewer::ReviewDenials::for_thread(thread.thread_extension_data())
+                .is_closed(lane_turn_id)
+                .await,
+            "resume and fork must not inherit closed approval lanes",
+        );
         if pathless_store.is_some() {
             assert_eq!(thread.rollout_path(), None);
         }
@@ -222,6 +239,10 @@ async fn guardian_history_uses_deltas_between_eviction_batches() -> Result<()> {
                 .features
                 .disable(Feature::GuardianThreadContext)
                 .expect("use the retained legacy history");
+            config
+                .features
+                .enable(Feature::GuardianReuseParentCompaction)
+                .expect("exercise retained legacy checkpoint reuse");
             config.update_plan_enabled = true;
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
@@ -318,7 +339,7 @@ async fn guardian_history_uses_deltas_between_eviction_batches() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardian_history_survives_compaction_and_eviction_but_not_rollback() -> Result<()> {
+async fn guardian_answers_survive_compaction_and_eviction() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(
         Ok(()),
@@ -328,6 +349,7 @@ async fn guardian_history_survives_compaction_and_eviction_but_not_rollback() ->
     let test = test_codex()
         .with_config(|config| {
             config.features.enable(Feature::TokenBudget).unwrap();
+            config.features.enable(Feature::GuardianThreadContext).unwrap();
             config
                 .features
                 .enable(Feature::DefaultModeRequestUserInput)
@@ -421,105 +443,82 @@ async fn guardian_history_survives_compaction_and_eviction_but_not_rollback() ->
     );
     assert!(image_url.len() > 4 * 1024 * 1024);
     let command = r#"{"cmd":"echo publish","sandbox_permissions":"require_escalated","justification":"Publish the inspected change."}"#;
-    for (prompt, retained) in [
-        ("Do not publish the attached image.", true),
-        ("Inspect a different repository.", false),
-    ] {
-        let review = mount_sse_sequence(
-            &server,
-            vec![
-                sse(vec![
-                    ev_function_call("publish", "exec_command", command),
-                    ev_completed("publish"),
-                ]),
-                sse(vec![
-                    ev_assistant_message("review", r#"{"outcome":"deny"}"#),
-                    ev_completed("review"),
-                ]),
-                sse(vec![ev_completed("publish-done")]),
-            ],
-        )
-        .await;
-        test.codex
-            .start_or_steer_turn(TurnInputRequest::user_input(vec![
-                UserInput::Text {
-                    text: prompt.to_owned(),
-                    text_elements: Vec::new(),
-                },
-                UserInput::Image {
-                    image_url: image_url.clone(),
-                    detail: None,
-                },
-            ]))
-            .await?;
-        wait_for_event(&test.codex, |event| {
-            matches!(event, EventMsg::TurnComplete(_))
-        })
-        .await;
-        let requests = review.requests();
-        assert!(
-            requests[0]
-                .input()
-                .iter()
-                .filter_map(|item| item["content"].as_array())
-                .flatten()
-                .any(|item| item["image_url"]
-                    .as_str()
-                    .is_some_and(|url| url.len() > 4 * 1024 * 1024))
-        );
-        let guardian = requests
+    let prompt = "Do not publish the attached image.";
+    let review = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_function_call("publish", "exec_command", command),
+                ev_completed("publish"),
+            ]),
+            sse(vec![
+                ev_assistant_message("review", r#"{"outcome":"deny"}"#),
+                ev_completed("review"),
+            ]),
+            sse(vec![ev_completed("publish-done")]),
+        ],
+    )
+    .await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![
+            UserInput::Text {
+                text: prompt.to_owned(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Image {
+                image: ImageReference::Inline { image_url },
+                detail: None,
+            },
+        ]))
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let requests = review.requests();
+    assert!(
+        requests[0]
+            .input()
             .iter()
-            .find(|request| {
-                request.body_json()["client_metadata"]["x-openai-subagent"] == "guardian"
-            })
-            .expect("Guardian request");
-        let transcript = serde_json::to_string(&guardian.input())?;
-        assert!(transcript.contains(prompt));
-        if retained {
-            let trusted_answers = transcript
-                .split_once(">>> TRUSTED USER ANSWERS START")
-                .expect("trusted answers survive compaction")
-                .1
-                .split_once(">>> TRUSTED USER ANSWERS END")
-                .expect("trusted answers end marker")
-                .0;
-            assert!(trusted_answers.contains("user: Do not publish anything."));
-            let positions = [
-                "Only publish to a private repository.",
-                "tool update_plan call",
-                "tool update_plan result",
-                "Do not publish the attached image.",
-            ]
-            .map(|text| {
-                transcript
-                    .find(text)
-                    .unwrap_or_else(|| panic!("missing {text}: {transcript}"))
-            });
-            let mut ordered = positions;
-            ordered.sort();
-            assert_eq!(positions, ordered);
-            assert!(
-                requests[0]
-                    .input()
-                    .iter()
-                    .all(|item| item["call_id"] != "inspect-0"
-                        && item["call_id"] != "confirm-publish")
-            );
-            test.codex.ensure_rollout_materialized().await;
-            test.codex
-                .submit(Op::ThreadRollback { num_turns: 2 })
-                .await?;
-            wait_for_event(&test.codex, |event| {
-                matches!(event, EventMsg::ThreadRolledBack(_))
-            })
-            .await;
-        } else {
-            assert!(!transcript.contains(">>> TRUSTED USER ANSWERS START"));
-            assert!(!transcript.contains("Do not publish anything."));
-            assert!(!transcript.contains("Only publish to a private repository."));
-            assert!(!transcript.contains("tool update_plan call"));
-            assert!(!transcript.contains("tool update_plan result"));
-        }
-    }
+            .filter_map(|item| item["content"].as_array())
+            .flatten()
+            .any(|item| item["image_url"]
+                .as_str()
+                .is_some_and(|url| url.len() > 4 * 1024 * 1024))
+    );
+    let guardian = requests
+        .iter()
+        .find(|request| request.body_json()["client_metadata"]["x-openai-subagent"] == "guardian")
+        .expect("Guardian request");
+    let transcript = serde_json::to_string(&guardian.input())?;
+    assert!(transcript.contains(prompt));
+    let trusted_answers = transcript
+        .split_once(">>> TRUSTED USER ANSWERS START")
+        .expect("trusted answers survive compaction")
+        .1
+        .split_once(">>> TRUSTED USER ANSWERS END")
+        .expect("trusted answers end marker")
+        .0;
+    assert!(trusted_answers.contains("user: Do not publish anything."));
+    let positions = [
+        "Only publish to a private repository.",
+        "Do not publish the attached image.",
+    ]
+    .map(|text| {
+        transcript
+            .find(text)
+            .unwrap_or_else(|| panic!("missing {text}: {transcript}"))
+    });
+    assert!(!transcript.contains("tool update_plan call"));
+    assert!(!transcript.contains("tool update_plan result"));
+    let mut ordered = positions;
+    ordered.sort();
+    assert_eq!(positions, ordered);
+    assert!(
+        requests[0]
+            .input()
+            .iter()
+            .all(|item| item["call_id"] != "inspect-0" && item["call_id"] != "confirm-publish")
+    );
     Ok(())
 }

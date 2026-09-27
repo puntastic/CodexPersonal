@@ -6,11 +6,13 @@ use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
 use codex_app_server_protocol::ClientInfo;
+use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::DeprecationNoticeNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -20,6 +22,9 @@ use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus;
+use codex_app_server_protocol::ThreadUnsubscribeParams;
+use codex_app_server_protocol::ThreadUnsubscribeResponse;
+use codex_app_server_protocol::ThreadUnsubscribeStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -73,6 +78,88 @@ async fn thread_rollback_rejects_paginated_thread() -> Result<()> {
         "paginated threads do not support thread/rollback"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_rollback_resubscribes_before_idle_unload() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_sandbox_mode("danger-full-access")
+        .with_root_config("thread_unload_delay_secs = 2")
+        .write(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            history_mode: Some(ThreadHistoryMode::Legacy),
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "Keep a persisted turn for rollback.".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+    let unsubscribed: ThreadUnsubscribeResponse = mcp
+        .request(|request_id| ClientRequest::ThreadUnsubscribe {
+            request_id,
+            params: ThreadUnsubscribeParams {
+                thread_id: thread.id.clone(),
+            },
+        })
+        .await?;
+    assert_eq!(unsubscribed.status, ThreadUnsubscribeStatus::Unsubscribed);
+
+    let rolled_back: ThreadRollbackResponse = mcp
+        .request(|request_id| ClientRequest::ThreadRollback {
+            request_id,
+            params: ThreadRollbackParams {
+                thread_id: thread.id.clone(),
+                num_turns: 1,
+            },
+        })
+        .await?;
+    assert_eq!(rolled_back.thread.id, thread.id);
+    assert!(rolled_back.thread.turns.is_empty());
+    assert!(
+        timeout(
+            std::time::Duration::from_millis(/*millis*/ 2200),
+            mcp.read_stream_until_notification_message("thread/closed"),
+        )
+        .await
+        .is_err(),
+        "rollback must keep its listener subscribed beyond the old idle-unload deadline"
+    );
+
+    let unsubscribed: ThreadUnsubscribeResponse = mcp
+        .request(|request_id| ClientRequest::ThreadUnsubscribe {
+            request_id,
+            params: ThreadUnsubscribeParams {
+                thread_id: thread.id.clone(),
+            },
+        })
+        .await?;
+    assert_eq!(unsubscribed.status, ThreadUnsubscribeStatus::Unsubscribed);
+    let closed: ThreadClosedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("thread/closed")).await??;
+    assert_eq!(
+        closed,
+        ThreadClosedNotification {
+            thread_id: thread.id
+        }
+    );
     Ok(())
 }
 
@@ -306,8 +393,23 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
         other => panic!("expected user message item, got {other:?}"),
     }
 
-    let _: ThreadResumeResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(pipelined_resume_id)).await??;
+    // The next serialized response is also a completion barrier: a cancelled rollback
+    // acknowledgement must not produce a second error after its successful response.
+    let pipelined_resume = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            match mcp.read_next_message().await? {
+                JSONRPCMessage::Response(response)
+                    if response.id == RequestId::Integer(pipelined_resume_id) =>
+                {
+                    break anyhow::Ok(response);
+                }
+                JSONRPCMessage::Notification(_) => {}
+                other => anyhow::bail!("unexpected message after rollback response: {other:?}"),
+            }
+        }
+    })
+    .await??;
+    let _: ThreadResumeResponse = to_response(pipelined_resume)?;
 
     // Resume after rollback completes to verify the pruned history.
     let resume_id = mcp

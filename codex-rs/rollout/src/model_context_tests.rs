@@ -141,9 +141,6 @@ fn bounded_finish_retains_only_exact_reconstruction_inputs() {
         RolloutItem::SessionMeta(canonical_meta.clone()),
         top_level_response("msg-top-level"),
         legacy_checkpoint(vec![response("msg-checkpoint")]),
-        turn_started(),
-        agent_message(),
-        turn_context(),
         selected,
         suffix,
     ];
@@ -203,18 +200,22 @@ fn same_checkpoint_inline_item_cannot_satisfy_its_own_backward_reference() {
 
 #[test]
 fn inline_only_entry_checkpoint_is_a_complete_history_base() {
-    let mut scan = ModelContextScan::default();
-
-    assert_eq!(
-        scan.push(entry_checkpoint(vec![inline("msg-inline")])),
-        ModelContextScanProgress::Continue
-    );
-    assert_completed_turn_context(&mut scan, ModelContextScanProgress::Complete);
+    for history_mode in [
+        ThreadHistoryMode::Paginated,
+        ThreadHistoryMode::PaginatedRefsV1,
+        ThreadHistoryMode::PaginatedRefsV2,
+    ] {
+        let mut scan = ModelContextScan::for_history_mode(history_mode);
+        assert_eq!(
+            scan.push(entry_checkpoint(vec![inline("msg-inline")])),
+            ModelContextScanProgress::Complete
+        );
+    }
 }
 
 #[test]
-fn entry_checkpoint_still_requires_a_completed_turn_context() {
-    let mut scan = ModelContextScan::default();
+fn legacy_checkpoint_without_resume_metadata_still_requires_a_completed_turn_context() {
+    let mut scan = ModelContextScan::for_history_mode(ThreadHistoryMode::Legacy);
 
     assert_eq!(
         scan.push(entry_checkpoint(vec![inline("msg-inline")])),
@@ -227,6 +228,31 @@ fn entry_checkpoint_still_requires_a_completed_turn_context() {
     assert_eq!(
         scan.push(turn_started()),
         ModelContextScanProgress::Continue
+    );
+    assert_completed_turn_context(&mut scan, ModelContextScanProgress::Complete);
+}
+
+#[test]
+fn legacy_checkpoint_with_resume_metadata_owns_its_companion_boundary() {
+    let mut scan = ModelContextScan::for_history_mode(ThreadHistoryMode::Legacy);
+    let mut checkpoint = entry_checkpoint(vec![inline("msg-inline")]);
+    let RolloutItem::Compacted(compacted) = &mut checkpoint else {
+        unreachable!();
+    };
+    compacted.resume_metadata = Some(codex_history::CompactionResumeMetadata {
+        multi_agent_version: None,
+        last_started_turn_id: None,
+        previous_turn_settings: None,
+    });
+    assert_eq!(
+        scan.push(checkpoint.clone()),
+        ModelContextScanProgress::Complete
+    );
+    let metadata = session_meta();
+    assert_eq!(
+        serde_json::to_value(scan.finish(metadata.clone())).expect("serialize context"),
+        serde_json::to_value(vec![RolloutItem::SessionMeta(metadata), checkpoint])
+            .expect("serialize expected context")
     );
 }
 
@@ -258,7 +284,7 @@ fn guardian_reference_retains_an_older_guardian_only_source_carrier() {
             .0,
         vec![response("msg-guardian")]
     );
-    let RolloutItem::Compacted(carrier) = &rollout[selected_index - 4] else {
+    let RolloutItem::Compacted(carrier) = &rollout[selected_index - 1] else {
         panic!("expected compacted source carrier");
     };
     assert_eq!(carrier.replacement_history, None);
@@ -353,6 +379,7 @@ fn entry_checkpoint(entries: Vec<CompactedHistoryEntry>) -> RolloutItem {
         window_id: None,
         compaction_response_id: None,
         latest_token_usage_record: None,
+        resume_metadata: None,
     })
 }
 
@@ -392,6 +419,7 @@ fn legacy_checkpoint(items: Vec<ResponseItem>) -> RolloutItem {
         window_id: None,
         compaction_response_id: None,
         latest_token_usage_record: None,
+        resume_metadata: None,
     })
 }
 
@@ -452,6 +480,7 @@ fn turn_context() -> RolloutItem {
     RolloutItem::TurnContext(TurnContextItem {
         turn_id: Some("turn-1".to_string()),
         root_turn_id: None,
+        disabled_plugin_ids: None,
         cwd: AbsolutePathBuf::from_absolute_path(cwd).expect("absolute current directory"),
         workspace_roots: None,
         current_date: None,
@@ -494,6 +523,7 @@ fn agent_message() -> RolloutItem {
 fn turn_started() -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: "turn-1".to_string(),
+        root_turn_id: None,
         trace_id: None,
         started_at: None,
         model_context_window: Some(128_000),

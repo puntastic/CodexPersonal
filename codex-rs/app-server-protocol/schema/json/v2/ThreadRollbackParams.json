@@ -1,9 +1,9 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "DEPRECATED: `thread/rollback` will be removed soon.",
+  "description": "Legacy-history compatibility for older Desktop clients; paginated histories use `thread/revert`.",
   "properties": {
     "numTurns": {
-      "description": "The number of turns to drop from the end of the thread. Must be >= 1.\n\nThis only modifies the thread's history and does not revert local file changes that have been made by the agent. Clients are responsible for reverting these changes.",
+      "description": "Number of trailing turns to remove, at least one. This does not revert file changes.",
       "format": "uint32",
       "minimum": 0.0,
       "type": "integer"

@@ -24,7 +24,10 @@ pub(super) async fn prepare(
     let cross_process_source_reservation = store
         .writer_lock_coordinator
         .reserve_lifecycle(thread_id)
-        .await?;
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to reserve thread {thread_id} lifecycle: {err}"),
+        })?;
     // Keep the source reserved until persistence and lineage materialization finish, even if the
     // caller cancels fork preparation.
     let lineage_store = store.clone();

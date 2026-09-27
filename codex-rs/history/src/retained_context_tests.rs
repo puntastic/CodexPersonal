@@ -388,13 +388,80 @@ fn metadata_free_rollback_uses_the_retained_user_message_ledger() {
 fn metadata_free_rollback_fails_closed_without_a_user_message_ledger() {
     let mut context = RetainedContext::default();
     context.record(&publish_answer());
+    context.record_sender_user_messages(&CodexHarnessMetadata {
+        user_input_order: Some(7),
+        sender_user_messages: Some(Box::new(SenderUserMessages {
+            receiver_turn_id: "sender-turn".to_owned(),
+            receiver_message_id: "sender-message".to_owned(),
+            text: "Sender context cannot survive an ambiguous rollback.".to_owned(),
+        })),
+        ..Default::default()
+    });
 
     context.rollback_latest_user_messages(1);
 
     assert_eq!(context.ordered_entries().count(), 0);
     assert!(!context.user_messages_complete());
     assert!(!context.verified_answers_complete());
-    assert_eq!(context.next_order, 1);
+    assert_eq!(context.sender_user_messages(), None);
+    assert_eq!(context.next_order, 8);
+}
+
+#[test]
+fn sender_deliveries_follow_exact_and_compacted_user_boundaries_after_restore() {
+    enum Boundary {
+        Order,
+        Identity,
+        CompactedLedger,
+    }
+    let mut context = RetainedContext::default();
+    for index in 0..3 {
+        let order = index * 2;
+        context.record_user_message(
+            RetainedUserMessage {
+                turn_id: "shared-turn".to_owned(),
+                message_id: Some(format!("user-{index}")),
+                text: format!("Instruction {index}"),
+                complete: true,
+            },
+            RetainedInputSource::Local(Some(order)),
+        );
+        context.record_sender_user_messages(&CodexHarnessMetadata {
+            user_input_order: Some(order + 1),
+            sender_user_messages: Some(Box::new(SenderUserMessages {
+                receiver_turn_id: "shared-turn".to_owned(),
+                receiver_message_id: format!("delivery-{index}"),
+                text: format!("Sender context {index}"),
+            })),
+            ..Default::default()
+        });
+    }
+    let checkpoint = serde_json::from_value(serde_json::to_value(&context).unwrap()).unwrap();
+    let mut expected = context.clone();
+    expected.user_messages.truncate(1);
+    expected.sender_deliveries.truncate(1);
+
+    for boundary in [
+        Boundary::Order,
+        Boundary::Identity,
+        Boundary::CompactedLedger,
+    ] {
+        let mut restored = RetainedContext::default();
+        restored.restore(Some(&checkpoint), &[]);
+        match boundary {
+            Boundary::Order => assert!(restored.rollback_at_user_message_boundary(
+                /*first_removed_message_id*/ None,
+                RetainedInputSource::Local(Some(2)),
+            )),
+            Boundary::Identity => assert!(restored.rollback_at_user_message_boundary(
+                Some("user-1"),
+                RetainedInputSource::Local(None),
+            )),
+            Boundary::CompactedLedger => restored.rollback_latest_user_messages(2),
+        }
+        assert_eq!(restored, expected);
+        assert_eq!(restored.verified_answers().count(), 0);
+    }
 }
 
 #[test]

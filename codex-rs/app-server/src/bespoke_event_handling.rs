@@ -8,6 +8,7 @@ use crate::request_processors::populate_thread_turns_from_history;
 use crate::request_processors::thread_from_stored_thread;
 use crate::request_processors::thread_settings_from_config_snapshot;
 use crate::server_request_error::is_turn_transition_server_request_error;
+use crate::thread_state::PendingRollback;
 use crate::thread_state::ThreadState;
 use crate::thread_state::TurnSummary;
 use crate::thread_state::resolve_server_request_on_thread_listener;
@@ -72,7 +73,6 @@ use codex_app_server_protocol::ThreadRealtimeTranscriptDeltaNotification;
 use codex_app_server_protocol::ThreadRealtimeTranscriptDoneNotification;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
-use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
 use codex_app_server_protocol::ToolRequestUserInputOption;
@@ -98,11 +98,12 @@ use codex_core::CodexThread;
 use codex_core::ThreadManager;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
+use codex_protocol::error::CodexErrorInfo as CoreCodexErrorInfo;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
+use codex_protocol::items::ModelInvocationContext;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::models::AdditionalPermissionProfile as CoreAdditionalPermissionProfile;
 use codex_protocol::plan_tool::UpdatePlanArgs;
-use codex_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
@@ -138,6 +139,7 @@ enum CommandExecutionApprovalPresentation {
 
 #[derive(Debug, PartialEq)]
 struct CommandExecutionCompletionItem {
+    model_context: Option<ModelInvocationContext>,
     plugin_id: Option<String>,
     script_path: Option<String>,
     command: String,
@@ -145,7 +147,6 @@ struct CommandExecutionCompletionItem {
     command_actions: Vec<V2ParsedCommand>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_bespoke_event_handling(
     event: Event,
     conversation_id: ThreadId,
@@ -154,8 +155,6 @@ pub(crate) async fn apply_bespoke_event_handling(
     outgoing: ThreadScopedOutgoingMessageSender,
     thread_state: Arc<tokio::sync::Mutex<ThreadState>>,
     thread_watch_manager: ThreadWatchManager,
-    thread_list_state_permit: Arc<tokio::sync::Semaphore>,
-    fallback_model_provider: String,
 ) {
     let Event {
         id: event_turn_id,
@@ -306,6 +305,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             ) {
                 Some(ThreadItem::CommandExecution {
                     id,
+                    model_context,
                     plugin_id,
                     script_path,
                     command,
@@ -315,6 +315,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 }) => Some((
                     id,
                     CommandExecutionCompletionItem {
+                        model_context,
                         plugin_id,
                         script_path,
                         command,
@@ -336,6 +337,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     &conversation_id,
                     assessment_turn_id.clone(),
                     target_item_id.clone(),
+                    completion_item.model_context.clone(),
                     completion_item.plugin_id.clone(),
                     completion_item.script_path.clone(),
                     completion_item.command.clone(),
@@ -681,6 +683,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .map(CommandExecutionApprovalDecision::from)
                 .collect::<Vec<_>>();
             let ExecApprovalRequestEvent {
+                model_context,
                 kind,
                 call_id,
                 plugin_id,
@@ -735,6 +738,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 CommandExecutionApprovalPresentation::Network(network_approval_context)
             } else {
                 let completion_item = CommandExecutionCompletionItem {
+                    model_context,
                     plugin_id,
                     script_path,
                     command: command_presentation.command,
@@ -763,6 +767,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     &conversation_id,
                     event_turn_id.clone(),
                     call_id.clone(),
+                    completion_item.model_context.clone(),
                     completion_item.plugin_id.clone(),
                     completion_item.script_path.clone(),
                     completion_item.command.clone(),
@@ -885,7 +890,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 Some(turn_id) => Some(turn_id),
                 None => {
                     let state = thread_state.lock().await;
-                    state.active_turn_snapshot().map(|turn| turn.id)
+                    state.active_turn_id().map(str::to_owned)
                 }
             };
             let server_name = request.server_name.clone();
@@ -1036,24 +1041,20 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .note_system_error(&conversation_id.to_string())
                 .await;
 
-            let message = ev.message.clone();
-            let codex_error_info = ev.codex_error_info.clone();
-            // If this error belongs to an in-flight `thread/rollback` request, fail that request
-            // (and clear pending state) so subsequent rollbacks are unblocked.
-            //
-            // Don't send a notification for this error.
+            // Legacy Desktop rollback requests complete through the listener,
+            // including failure; release their pending admission before returning.
             if matches!(
-                codex_error_info,
+                ev.codex_error_info,
                 Some(CoreCodexErrorInfo::ThreadRollbackFailed)
             ) {
                 return handle_thread_rollback_failed(
                     conversation_id,
-                    message,
+                    ev.message,
                     &thread_state,
                     &outgoing,
                 )
                 .await;
-            };
+            }
 
             if !ev.affects_turn_status() {
                 return;
@@ -1183,7 +1184,9 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .send_server_notification(ServerNotification::HookCompleted(notification))
                 .await;
         }
-        EventMsg::RawResponseItem(raw_response_item_event) => {
+        EventMsg::RawResponseItem(mut raw_response_item_event) => {
+            // Keep warehouse metadata out of app-server notifications.
+            raw_response_item_event.item.clear_executed_tool_calls();
             let mut notification = ServerNotification::RawResponseItemCompleted(
                 RawResponseItemCompletedNotification {
                     thread_id: conversation_id.to_string(),
@@ -1245,7 +1248,13 @@ pub(crate) async fn apply_bespoke_event_handling(
                 state.pending_rollbacks.take()
             };
 
-            if let Some((request_id, _completion_tx)) = pending {
+            if let Some(PendingRollback {
+                request_id,
+                completion_tx,
+                thread_list_state_permit,
+                fallback_model_provider,
+            }) = pending
+            {
                 let _thread_list_state_permit = match thread_list_state_permit.acquire().await {
                     Ok(permit) => permit,
                     Err(err) => {
@@ -1257,6 +1266,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                                 )),
                             )
                             .await;
+                        let _ = completion_tx.send(Ok(()));
                         return;
                     }
                 };
@@ -1277,6 +1287,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                                 )),
                             )
                             .await;
+                        let _ = completion_tx.send(Ok(()));
                         return;
                     }
                 };
@@ -1295,12 +1306,14 @@ pub(crate) async fn apply_bespoke_event_handling(
                         outgoing
                             .send_error(request_id.clone(), internal_error(err))
                             .await;
+                        let _ = completion_tx.send(Ok(()));
                         return;
                     }
                 };
 
                 apply_live_thread_settings(&mut response.thread, &config_snapshot);
                 outgoing.send_response(request_id, response).await;
+                let _ = completion_tx.send(Ok(()));
             }
         }
         EventMsg::ThreadGoalUpdated(thread_goal_event) => {
@@ -1482,6 +1495,7 @@ async fn start_command_execution_item(
     conversation_id: &ThreadId,
     turn_id: String,
     item_id: String,
+    model_context: Option<ModelInvocationContext>,
     plugin_id: Option<String>,
     script_path: Option<String>,
     command: String,
@@ -1505,6 +1519,7 @@ async fn start_command_execution_item(
             started_at_ms: now_unix_timestamp_ms(),
             item: ThreadItem::CommandExecution {
                 id: item_id,
+                model_context,
                 plugin_id,
                 script_path,
                 command,
@@ -1549,6 +1564,7 @@ async fn complete_command_execution_item(
 
     let item = ThreadItem::CommandExecution {
         id: item_id,
+        model_context: completion_item.model_context,
         plugin_id: completion_item.plugin_id,
         script_path: completion_item.script_path,
         command: completion_item.command,
@@ -1643,10 +1659,16 @@ async fn handle_thread_rollback_failed(
 ) {
     let pending_rollback = thread_state.lock().await.pending_rollbacks.take();
 
-    if let Some((request_id, _completion_tx)) = pending_rollback {
+    if let Some(PendingRollback {
+        request_id,
+        completion_tx,
+        ..
+    }) = pending_rollback
+    {
         outgoing
             .send_error(request_id, invalid_request(message))
             .await;
+        let _ = completion_tx.send(Ok(()));
     }
 }
 
@@ -1670,7 +1692,6 @@ fn thread_rollback_response_from_stored_thread(
     thread.status = loaded_status;
     Ok(ThreadRollbackResponse { thread })
 }
-
 async fn respond_to_pending_interrupts(
     thread_state: &Arc<Mutex<ThreadState>>,
     outgoing: &ThreadScopedOutgoingMessageSender,
@@ -2219,11 +2240,11 @@ mod tests {
     use anyhow::Result;
     use anyhow::anyhow;
     use anyhow::bail;
-    use chrono::Utc;
     use codex_app_server_protocol::AutoReviewDecisionSource;
     use codex_app_server_protocol::GuardianApprovalReviewStatus;
     use codex_app_server_protocol::JSONRPCErrorError;
     use codex_app_server_protocol::ServerRequest;
+    use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::TurnPlanStepStatus;
     use codex_login::CodexAuth;
     use codex_protocol::AgentPath;
@@ -2235,11 +2256,8 @@ mod tests {
     use codex_protocol::items::TurnItem as CoreTurnItem;
     use codex_protocol::models::FileSystemPermissions as CoreFileSystemPermissions;
     use codex_protocol::models::NetworkPermissions as CoreNetworkPermissions;
-    use codex_protocol::models::PermissionProfile;
     use codex_protocol::plan_tool::PlanItemArg;
     use codex_protocol::plan_tool::StepStatus;
-    use codex_protocol::protocol::AgentMessageEvent;
-    use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::AuthRecoveryEvent;
     use codex_protocol::protocol::CreditsSnapshot;
     use codex_protocol::protocol::EventMsg;
@@ -2249,13 +2267,8 @@ mod tests {
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
-    use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::TokenUsage;
     use codex_protocol::protocol::TokenUsageInfo;
-    use codex_protocol::protocol::UserMessageEvent;
-    use codex_rollout::RolloutItem;
-    use codex_thread_store::StoredThread;
-    use codex_thread_store::StoredThreadHistory;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
@@ -2268,6 +2281,87 @@ mod tests {
 
     fn new_thread_state() -> Arc<Mutex<ThreadState>> {
         Arc::new(Mutex::new(ThreadState::default()))
+    }
+
+    #[tokio::test]
+    async fn rollback_failure_queues_one_error_before_acknowledging_completion() -> Result<()> {
+        let conversation_id = ThreadId::new();
+        let thread_state = new_thread_state();
+        let (tx, mut rx) = mpsc::channel(/*buffer*/ 1);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
+        let request_id = crate::outgoing_message::ConnectionRequestId {
+            connection_id: ConnectionId(1),
+            request_id: RequestId::Integer(2),
+        };
+        // Fill the outbound queue so terminal-response admission is observable separately
+        // from taking the pending rollback out of thread state.
+        outgoing
+            .send_error(
+                crate::outgoing_message::ConnectionRequestId {
+                    connection_id: ConnectionId(1),
+                    request_id: RequestId::Integer(1),
+                },
+                invalid_request("queue blocker"),
+            )
+            .await;
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            conversation_id,
+        );
+        let (completion_tx, mut completion_rx) = oneshot::channel();
+        thread_state.lock().await.pending_rollbacks = Some(PendingRollback {
+            request_id: request_id.clone(),
+            completion_tx,
+            thread_list_state_permit: Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
+            fallback_model_provider: "mock-provider".to_string(),
+        });
+        let handler_state = Arc::clone(&thread_state);
+        let handler = tokio::spawn(async move {
+            handle_thread_rollback_failed(
+                conversation_id,
+                "Cannot rollback while a turn is in progress.".to_string(),
+                &handler_state,
+                &outgoing,
+            )
+            .await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), async {
+            while thread_state.lock().await.pending_rollbacks.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(/*millis*/ 50),
+                &mut completion_rx,
+            )
+            .await
+            .is_err(),
+            "rollback must not acknowledge before its error can enter the outbound queue"
+        );
+        let _ = recv_broadcast_message(&mut rx).await?;
+        handler.await?;
+        assert_eq!(completion_rx.await?, Ok(()));
+
+        let OutgoingMessage::Error(error) = recv_broadcast_message(&mut rx).await? else {
+            bail!("expected the rollback error response");
+        };
+        assert_eq!(error.id, request_id.request_id);
+        assert_eq!(
+            error.error,
+            invalid_request("Cannot rollback while a turn is in progress.")
+        );
+        assert!(thread_state.lock().await.pending_rollbacks.is_none());
+        assert!(
+            rx.try_recv().is_err(),
+            "only one terminal response is queued"
+        );
+        Ok(())
     }
 
     const TEST_TURN_COMPLETED_AT: i64 = 1_716_000_456;
@@ -2296,87 +2390,6 @@ mod tests {
         Ok(envelope.notification)
     }
 
-    #[test]
-    fn rollback_response_rebuilds_pathless_thread_from_stored_history() -> Result<()> {
-        let thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000789")?;
-        let created_at = Utc::now();
-        let history_items = vec![
-            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
-                client_id: None,
-                message: "before rollback".to_string(),
-                images: None,
-                local_images: Vec::new(),
-                text_elements: Vec::new(),
-                ..Default::default()
-            })),
-            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
-                message: "after rollback".to_string(),
-                phase: None,
-                memory_citation: None,
-                delivery: None,
-                questions: None,
-            })),
-        ];
-        let stored_thread = StoredThread {
-            originator: None,
-            thread_id,
-            extra_config: None,
-            rollout_path: None,
-            forked_from_id: None,
-            parent_thread_id: None,
-            preview: "fallback preview".to_string(),
-            name: Some("Rollback thread".to_string()),
-            model_provider: "openai".to_string(),
-            model: None,
-            reasoning_effort: None,
-            created_at,
-            updated_at: created_at,
-            recency_at: created_at,
-            archived_at: None,
-            section: None,
-            section_position: None,
-            section_entered_at: None,
-            project_id: None,
-            daybreak_enabled: None,
-            cwd: test_path_buf("/tmp").abs().into(),
-            cli_version: "0.0.0".to_string(),
-            source: SessionSource::Cli,
-            history_mode: Default::default(),
-            thread_source: None,
-            agent_nickname: None,
-            agent_role: None,
-            agent_path: None,
-            git_info: None,
-            approval_mode: AskForApproval::OnRequest,
-            permission_profile: PermissionProfile::read_only(),
-            token_usage: None,
-            first_user_message: Some("before rollback".to_string()),
-            history: Some(StoredThreadHistory {
-                thread_id,
-                items: history_items,
-            }),
-        };
-        let fallback_cwd = test_path_buf("/tmp").abs();
-
-        let response = thread_rollback_response_from_stored_thread(
-            stored_thread,
-            thread_id.to_string(),
-            "fallback-provider",
-            &fallback_cwd,
-            ThreadStatus::NotLoaded,
-        )
-        .expect("rollback response should rebuild from stored history");
-
-        assert_eq!(response.thread.id, thread_id.to_string());
-        assert_eq!(response.thread.path, None);
-        assert_eq!(response.thread.preview, "fallback preview");
-        assert_eq!(response.thread.name.as_deref(), Some("Rollback thread"));
-        assert_eq!(response.thread.status, ThreadStatus::NotLoaded);
-        assert_eq!(response.thread.turns.len(), 1);
-        assert_eq!(response.thread.turns[0].items.len(), 2);
-        Ok(())
-    }
-
     fn turn_complete_event(turn_id: &str) -> TurnCompleteEvent {
         TurnCompleteEvent {
             turn_id: turn_id.to_string(),
@@ -2401,6 +2414,7 @@ mod tests {
 
     fn command_execution_completion_item(command: &str) -> CommandExecutionCompletionItem {
         CommandExecutionCompletionItem {
+            model_context: None,
             plugin_id: Some("sample@openai-curated".to_string()),
             script_path: Some("scripts/run.py".to_string()),
             command: command.to_string(),
@@ -2435,6 +2449,7 @@ mod tests {
         };
         GuardianAssessmentEvent {
             review_reason: None,
+            model_context: None,
             id: format!("review-{id}"),
             target_item_id: Some(id.to_string()),
             plugin_id: Some("sample@openai-curated".to_string()),
@@ -2485,8 +2500,6 @@ mod tests {
                 self.outgoing.clone(),
                 self.thread_state.clone(),
                 self.thread_watch_manager.clone(),
-                Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
-                "test-provider".to_string(),
             )
             .await;
         }
@@ -2505,6 +2518,7 @@ mod tests {
             "turn-from-event",
             &GuardianAssessmentEvent {
                 review_reason: None,
+                model_context: None,
                 id: "review-1".to_string(),
                 target_item_id: Some("item-1".to_string()),
                 plugin_id: None,
@@ -2554,6 +2568,7 @@ mod tests {
             "turn-from-event",
             &GuardianAssessmentEvent {
                 review_reason: None,
+                model_context: None,
                 id: "review-2".to_string(),
                 target_item_id: Some("item-2".to_string()),
                 plugin_id: None,
@@ -2611,6 +2626,7 @@ mod tests {
             "turn-from-event",
             &GuardianAssessmentEvent {
                 review_reason: None,
+                model_context: None,
                 id: "review-3".to_string(),
                 target_item_id: None,
                 plugin_id: None,
@@ -2666,6 +2682,7 @@ mod tests {
             &conversation_id,
             "turn-1".to_string(),
             "cmd-1".to_string(),
+            completion_item.model_context.clone(),
             completion_item.plugin_id.clone(),
             completion_item.script_path.clone(),
             completion_item.command.clone(),
@@ -2686,6 +2703,7 @@ mod tests {
                 assert_eq!(
                     payload.item,
                     ThreadItem::CommandExecution {
+                        model_context: None,
                         id: "cmd-1".to_string(),
                         plugin_id: completion_item.plugin_id.clone(),
                         script_path: completion_item.script_path.clone(),
@@ -2708,6 +2726,7 @@ mod tests {
             &conversation_id,
             "turn-1".to_string(),
             "cmd-1".to_string(),
+            completion_item.model_context.clone(),
             completion_item.plugin_id.clone(),
             completion_item.script_path.clone(),
             completion_item.command.clone(),
@@ -2744,6 +2763,7 @@ mod tests {
             &conversation_id,
             "turn-1".to_string(),
             "cmd-1".to_string(),
+            completion_item.model_context.clone(),
             completion_item.plugin_id.clone(),
             completion_item.script_path.clone(),
             completion_item.command.clone(),
@@ -3281,6 +3301,7 @@ mod tests {
                 "turn-1",
                 &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
+                    root_turn_id: None,
                     trace_id: None,
                     started_at: Some(42),
                     model_context_window: None,
@@ -3316,6 +3337,7 @@ mod tests {
                 id: "turn-1".to_string(),
                 msg: EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
                     turn_id: "turn-1".to_string(),
+                    root_turn_id: None,
                     trace_id: None,
                     started_at: Some(42),
                     model_context_window: None,
@@ -3328,8 +3350,6 @@ mod tests {
             outgoing.clone(),
             Arc::clone(&thread_state),
             thread_watch_manager.clone(),
-            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
-            "test-provider".to_string(),
         )
         .await;
 
@@ -3370,8 +3390,6 @@ mod tests {
                 outgoing.clone(),
                 Arc::clone(&thread_state),
                 thread_watch_manager.clone(),
-                Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
-                "test-provider".to_string(),
             )
             .await;
 
@@ -3388,6 +3406,7 @@ mod tests {
                 })
             );
         }
+
         Ok(())
     }
 
@@ -3451,8 +3470,6 @@ mod tests {
             outgoing,
             new_thread_state(),
             thread_watch_manager.clone(),
-            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
-            "test-provider".to_string(),
         )
         .await;
 
@@ -3540,8 +3557,6 @@ mod tests {
             outgoing,
             new_thread_state(),
             ThreadWatchManager::new(),
-            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
-            "test-provider".to_string(),
         )
         .await;
 
@@ -3592,6 +3607,7 @@ mod tests {
                 &event_turn_id,
                 &EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
                     turn_id: event_turn_id.clone(),
+                    root_turn_id: None,
                     trace_id: None,
                     started_at: Some(42),
                     model_context_window: None,

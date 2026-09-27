@@ -1,3 +1,9 @@
+#[path = "daemon_continuation.rs"]
+mod daemon_continuation;
+
+#[path = "daemon_snapshot.rs"]
+mod daemon_snapshot;
+
 use super::persisted_resume_settings::PersistedResumeSettings;
 use super::persisted_resume_settings::latest_persisted_resume_settings;
 use super::thread_enrichment::enrich_loaded_threads;
@@ -6,15 +12,18 @@ use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use crate::error_code::method_not_found;
+use crate::thread_state::PendingRollback;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
 use codex_app_server_protocol::ThreadRevertedNotification;
+use codex_app_server_protocol::ThreadRollbackParams;
 use codex_app_server_protocol::ThreadSection;
 use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
+use codex_config::types::WindowsSandboxModeToml;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::SanitizedGitUrl;
@@ -84,6 +93,7 @@ struct ThreadListFilters {
 #[derive(PartialEq)]
 struct ResumeConfigState {
     history_cwd: Option<PathBuf>,
+    workspace_roots: Option<Vec<AbsolutePathBuf>>,
     persisted_metadata: Option<ThreadMetadata>,
     persisted_settings: Option<PersistedResumeSettings>,
 }
@@ -456,6 +466,12 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
 }
 
+/// Whether resume attaches a client or restores a cold runtime during daemon startup.
+pub(crate) enum ThreadResumeTarget {
+    Client(ConnectionRequestId),
+    DaemonRecovery(Option<codex_app_server_transport::daemon_recovery::InterruptedTurn>),
+}
+
 /// Outcome of trying to satisfy a resume request from an already loaded thread.
 enum RunningThreadResumeResult {
     /// The request was delegated to the loaded thread.
@@ -543,7 +559,7 @@ impl ThreadRequestProcessor {
 
     pub(crate) async fn thread_resume(
         &self,
-        request_id: ConnectionRequestId,
+        target: ThreadResumeTarget,
         params: ThreadResumeParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
@@ -552,7 +568,7 @@ impl ThreadRequestProcessor {
         let mut prepared_config = None;
         // Keep the resume future off the request handler's stack.
         while Box::pin(self.thread_resume_inner(
-            request_id.clone(),
+            &target,
             &params,
             app_server_client_name.clone(),
             app_server_client_version.clone(),
@@ -573,13 +589,14 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_fork_inner(
+        // Keep the large fork future out of the shared request dispatcher's stack frame.
+        Box::pin(self.thread_fork_inner(
             request_id,
             params,
             app_server_client_name,
             app_server_client_version,
             client_mcp_extensions,
-        )
+        ))
         .await
         .map(|()| None)
     }
@@ -810,7 +827,7 @@ impl ThreadRequestProcessor {
             )
             .await;
         }
-        self.thread_rollback_inner(request_id, params)
+        self.thread_rollback_start(request_id, params)
             .await
             .map(|()| None)
     }
@@ -1049,12 +1066,23 @@ impl ThreadRequestProcessor {
         Ok(ThreadUnsubscribeResponse { status })
     }
 
-    async fn prepare_thread_for_archive(&self, thread_id: ThreadId) {
-        self.prepare_thread_for_removal(thread_id, "archive").await;
+    async fn prepare_thread_for_archive(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), JSONRPCErrorError> {
+        self.prepare_thread_for_removal(thread_id, "archive").await
     }
 
-    pub(super) async fn prepare_thread_for_removal(&self, thread_id: ThreadId, operation: &str) {
-        let removed_conversation = self.thread_manager.remove_thread(&thread_id).await;
+    pub(super) async fn prepare_thread_for_removal(
+        &self,
+        thread_id: ThreadId,
+        operation: &str,
+    ) -> Result<(), JSONRPCErrorError> {
+        let removed_conversation = self
+            .thread_manager
+            .remove_thread_for_client(&thread_id)
+            .await
+            .map_err(|err| core_thread_write_error(operation, err))?;
         if let Some(conversation) = removed_conversation {
             info!("thread {thread_id} was active; shutting down");
             match wait_for_thread_shutdown(&conversation).await {
@@ -1070,6 +1098,7 @@ impl ThreadRequestProcessor {
             }
         }
         self.finalize_thread_teardown(thread_id).await;
+        Ok(())
     }
 
     fn listener_task_context(&self) -> ListenerTaskContext {
@@ -1079,8 +1108,6 @@ impl ThreadRequestProcessor {
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
             thread_watch_manager: self.thread_watch_manager.clone(),
-            thread_list_state_permit: self.thread_list_state_permit.clone(),
-            fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
             thread_unload_delay: self.config.thread_unload_delay,
             skills_watcher: Arc::clone(&self.skills_watcher),
@@ -1153,6 +1180,7 @@ impl ThreadRequestProcessor {
             session_start_source,
             thread_source,
             project_id,
+            daybreak_enabled,
             environments,
         } = params;
         if matches!(
@@ -1211,8 +1239,6 @@ impl ThreadRequestProcessor {
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
             thread_watch_manager: self.thread_watch_manager.clone(),
-            thread_list_state_permit: self.thread_list_state_permit.clone(),
-            fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
             thread_unload_delay: self.config.thread_unload_delay,
             skills_watcher: Arc::clone(&self.skills_watcher),
@@ -1241,6 +1267,7 @@ impl ThreadRequestProcessor {
                 session_start_source,
                 thread_source.map(Into::into),
                 project_id,
+                daybreak_enabled,
                 environments,
                 service_name,
                 allow_provider_model_fallback,
@@ -1322,6 +1349,7 @@ impl ThreadRequestProcessor {
         session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
         thread_source: Option<codex_protocol::protocol::ThreadSource>,
         project_id: Option<String>,
+        daybreak_enabled: Option<bool>,
         environment_selections: Option<Vec<TurnEnvironmentSelection>>,
         service_name: Option<String>,
         allow_provider_model_fallback: bool,
@@ -1335,6 +1363,11 @@ impl ThreadRequestProcessor {
             .load_with_overrides(config_overrides.clone(), typesafe_overrides.clone())
             .await
             .map_err(|err| config_load_error(&err))?;
+        if config.ephemeral && daybreak_enabled.is_some() {
+            return Err(invalid_request(
+                "daybreakEnabled is not supported for ephemeral threads",
+            ));
+        }
         // Project-local config can launch host processes, so only the effective
         // permissions after managed constraints can imply project trust.
         let effective_permission_profile = config.permissions.effective_permission_profile();
@@ -1350,6 +1383,7 @@ impl ThreadRequestProcessor {
 
         if requested_cwd.is_some()
             && config.active_project.trust_level.is_none()
+            && !config.config_layer_stack.is_projectless()
             && effective_permissions_trust_project
         {
             let trust_target = resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &config.cwd)
@@ -1401,10 +1435,23 @@ impl ThreadRequestProcessor {
                 .map_err(|err| config_load_error(&err))?;
         }
 
+        // Thread config can include project-local warnings absent at initialization.
+        let mut config_warnings = config
+            .startup_warnings
+            .iter()
+            .map(|summary| ConfigWarningNotification {
+                summary: summary.clone(),
+                details: None,
+                path: None,
+                range: None,
+            })
+            .collect::<Vec<_>>();
         if let Ok(Some(err)) =
             codex_core::check_execpolicy_for_warnings(&config.config_layer_stack).await
         {
-            let notification = crate::exec_policy_config_warning(&err);
+            config_warnings.push(crate::exec_policy_config_warning(&err));
+        }
+        for notification in config_warnings {
             if !initial_config_warnings.contains(&notification) {
                 listener_task_context
                     .outgoing
@@ -1450,6 +1497,7 @@ impl ThreadRequestProcessor {
                 thread_store.as_ref(),
                 StoreThreadMetadataPatch {
                     project_id: project_id.clone().map(Some),
+                    daybreak_enabled,
                     ..Default::default()
                 },
                 "thread/start",
@@ -1532,6 +1580,7 @@ impl ThreadRequestProcessor {
             session_configured.rollout_path.clone(),
         );
         thread.project_id = project_id.clone();
+        thread.daybreak_enabled = daybreak_enabled;
 
         // Auto-attach a thread listener when starting a thread.
         log_listener_attach_result(
@@ -1581,6 +1630,7 @@ impl ThreadRequestProcessor {
 
         let response = ThreadStartResponse {
             thread: thread.clone(),
+            disabled_plugin_ids: config_snapshot.disabled_plugin_ids,
             model: config_snapshot.model,
             model_provider: config_snapshot.model_provider_id,
             service_tier: config_snapshot.service_tier,
@@ -1720,9 +1770,10 @@ impl ThreadRequestProcessor {
 
         archive_thread_ids[1..].reverse();
         // Collaboration may resume an archived descendant without unarchiving it.
-        self.prepare_thread_for_archive(thread_id).await;
+        self.prepare_thread_for_archive(thread_id).await?;
         for &descendant_thread_id in subtree_thread_ids.iter().skip(1).rev() {
-            self.prepare_thread_for_archive(descendant_thread_id).await;
+            self.prepare_thread_for_archive(descendant_thread_id)
+                .await?;
         }
 
         let archived_thread_ids = self
@@ -1855,13 +1906,9 @@ impl ThreadRequestProcessor {
             .clone()
             .ok_or_else(|| internal_error("sqlite state db unavailable for memory reset"))?;
 
-        state_db
-            .memories()
-            .clear_memory_data()
-            .await
-            .map_err(|err| {
-                internal_error(format!("failed to clear memory rows in memories db: {err}"))
-            })?;
+        state_db.clear_all_memory_data().await.map_err(|err| {
+            internal_error(format!("failed to clear memory rows in memories db: {err}"))
+        })?;
 
         clear_memory_roots_contents(&self.config.codex_home)
             .await
@@ -2012,7 +2059,7 @@ impl ThreadRequestProcessor {
             &self.config.cwd,
         );
         if let Ok(loaded_thread) = self.thread_manager.get_thread(thread_uuid).await {
-            thread.session_id = loaded_thread.session_configured().session_id.to_string();
+            thread.session_id = loaded_thread.startup_metadata().session_id.to_string();
             let config_snapshot = loaded_thread.config_snapshot().await;
             apply_live_thread_settings(&mut thread, &config_snapshot);
         }
@@ -2082,14 +2129,6 @@ impl ThreadRequestProcessor {
         self.attach_thread_name(thread_id, &mut thread).await;
         let thread_id = thread.id.clone();
         Ok((ThreadUnarchiveResponse { thread }, thread_id))
-    }
-
-    async fn thread_rollback_inner(
-        &self,
-        request_id: &ConnectionRequestId,
-        params: ThreadRollbackParams,
-    ) -> Result<(), JSONRPCErrorError> {
-        self.thread_rollback_start(request_id, params).await
     }
 
     async fn thread_revert_response(
@@ -2262,6 +2301,15 @@ impl ThreadRequestProcessor {
                     "failed to restore thread settings after revert: {err}"
                 ))
             })?;
+        // Replace the resume-time checkpoint written from the original config.
+        codex_thread
+            .checkpoint_thread_settings()
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to persist restored thread settings after revert: {err}"
+                ))
+            })?;
         Self::set_app_server_client_info(
             codex_thread.as_ref(),
             app_server_client_name,
@@ -2332,6 +2380,22 @@ impl ThreadRequestProcessor {
             ));
         }
 
+        // Subscribe through the lifecycle owner before depending on listener completion. An
+        // idle unload must either reject this request as closing or retain this subscriber.
+        if matches!(
+            self.ensure_conversation_listener(
+                thread_id,
+                request_id.connection_id,
+                /*raw_events_enabled*/ false,
+            )
+            .await?,
+            EnsureConversationListenerResult::ConnectionClosed
+        ) {
+            return Err(internal_error(format!(
+                "connection closed before thread {thread_id} could be rolled back"
+            )));
+        }
+
         let request = request_id.clone();
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
 
@@ -2341,7 +2405,12 @@ impl ThreadRequestProcessor {
             if thread_state.pending_rollbacks.is_some() {
                 true
             } else {
-                thread_state.pending_rollbacks = Some((request, completion_tx));
+                thread_state.pending_rollbacks = Some(PendingRollback {
+                    request_id: request,
+                    completion_tx,
+                    thread_list_state_permit: Arc::clone(&self.thread_list_state_permit),
+                    fallback_model_provider: self.config.model_provider_id.clone(),
+                });
                 false
             }
         };
@@ -2366,12 +2435,14 @@ impl ThreadRequestProcessor {
 
             return Err(internal_error(format!("failed to start rollback: {err}")));
         }
-        // The listener drops the sender after queuing the response, including errors.
-        // Keep the RPC's drain admission alive until then, without holding thread state.
-        let _ = completion_rx.await;
-        Ok(())
+        // Keep drain admission until the listener explicitly acknowledges a queued terminal
+        // response. Teardown or unexpected listener loss must complete this RPC with an error.
+        completion_rx.await.map_err(|_| {
+            internal_error(format!(
+                "thread {thread_id} listener stopped before rollback response was queued"
+            ))
+        })?
     }
-
     async fn thread_compact_start_inner(
         &self,
         request_id: &ConnectionRequestId,
@@ -2381,6 +2452,10 @@ impl ThreadRequestProcessor {
 
         let (_, thread) = self.load_thread(&thread_id).await?;
         ensure_direct_input_allowed(thread.as_ref()).await?;
+        self.config_manager
+            .check_thread_model_provider(thread.config().await.as_ref())
+            .await
+            .map_err(|error| config_load_error(&error))?;
         self.submit_core_op(request_id, thread.as_ref(), Op::Compact)
             .await
             .map_err(|err| internal_error(format!("failed to start compaction: {err}")))?;
@@ -2849,6 +2924,17 @@ impl ThreadRequestProcessor {
         thread_id: ThreadId,
         include_turns: bool,
     ) -> Result<Thread, ThreadReadViewError> {
+        // Read staging first: persistence can consume it while the stored thread is read.
+        let pending_daybreak_enabled = self
+            .thread_store
+            .read_pending_thread_metadata(thread_id)
+            .await
+            .map_err(|err| {
+                ThreadReadViewError::Internal(format!(
+                    "failed to read pending thread metadata: {err}"
+                ))
+            })?
+            .and_then(|metadata| metadata.daybreak_enabled);
         let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
         let mut thread = if include_turns {
             if let Some(loaded_thread) = loaded_thread.as_ref() {
@@ -2901,6 +2987,8 @@ impl ThreadRequestProcessor {
                 "thread not loaded: {thread_id}"
             )));
         };
+
+        thread.daybreak_enabled = thread.daybreak_enabled.or(pending_daybreak_enabled);
 
         let has_live_in_progress_turn = if let Some(loaded_thread) = loaded_thread.as_ref() {
             matches!(loaded_thread.agent_status().await, AgentStatus::Running)
@@ -3467,8 +3555,15 @@ impl ThreadRequestProcessor {
             .into_iter()
             .map(|stored_item| {
                 let turn_id = stored_item.turn_id.clone();
+                let started_at_ms = stored_item.started_at_ms;
+                let completed_at_ms = stored_item.completed_at_ms;
                 let item = deserialize_stored_thread_item(stored_item)?;
-                Ok(ThreadItemEntry { turn_id, item })
+                Ok(ThreadItemEntry {
+                    turn_id,
+                    item,
+                    started_at_ms,
+                    completed_at_ms,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -3608,7 +3703,7 @@ impl ThreadRequestProcessor {
 
     async fn thread_resume_inner(
         &self,
-        request_id: ConnectionRequestId,
+        target: &ThreadResumeTarget,
         params: &ThreadResumeParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
@@ -3622,56 +3717,51 @@ impl ThreadRequestProcessor {
                 .await
                 .contains(&thread_id)
         {
-            self.outgoing
-                .send_error(
-                    request_id,
-                    invalid_request(format!(
-                        "thread {thread_id} is closing; retry thread/resume after the thread is closed"
-                    )),
-                )
-                .await;
-            return Ok(ControlFlow::Break(()));
+            return Err(invalid_request(format!(
+                "thread {thread_id} is closing; retry thread/resume after the thread is closed"
+            )));
         }
 
         if params.sandbox.is_some() && params.permissions.is_some() {
-            self.outgoing
-                .send_error(
-                    request_id,
-                    invalid_request("`permissions` cannot be combined with `sandbox`"),
-                )
-                .await;
-            return Ok(ControlFlow::Break(()));
+            return Err(invalid_request(
+                "`permissions` cannot be combined with `sandbox`",
+            ));
         }
         let redact_resume_payloads =
             should_redact_thread_resume_payloads(app_server_client_name.as_deref());
 
-        let _thread_list_state_permit = match self.acquire_thread_list_state_permit().await {
-            Ok(permit) => permit,
-            Err(error) => {
-                self.outgoing.send_error(request_id, error).await;
-                return Ok(ControlFlow::Break(()));
-            }
-        };
-        let stored_thread_from_running_probe = match self
-            .resume_running_thread(
-                &request_id,
-                params,
-                app_server_client_name.clone(),
-                app_server_client_version.clone(),
-                /*cold_resume_history*/ None,
-            )
-            .await
-        {
-            Ok(RunningThreadResumeResult::Handled(completion)) => {
-                // The listener may need this permit to finish the response.
-                drop(_thread_list_state_permit);
-                let _ = completion.await;
-                return Ok(ControlFlow::Break(()));
-            }
-            Ok(RunningThreadResumeResult::NotRunning(stored_thread)) => stored_thread,
-            Err(error) => {
-                self.outgoing.send_error(request_id, error).await;
-                return Ok(ControlFlow::Break(()));
+        let _thread_list_state_permit = self.acquire_thread_list_state_permit().await?;
+        let stored_thread_from_running_probe = match target {
+            ThreadResumeTarget::Client(request_id) => match self
+                .resume_running_thread(
+                    request_id,
+                    params,
+                    app_server_client_name.clone(),
+                    app_server_client_version.clone(),
+                    /*cold_resume_history*/ None,
+                )
+                .await?
+            {
+                RunningThreadResumeResult::Handled(completion) => {
+                    // The listener may need this permit to finish the response.
+                    drop(_thread_list_state_permit);
+                    let _ = completion.await;
+                    return Ok(ControlFlow::Break(()));
+                }
+                RunningThreadResumeResult::NotRunning(stored_thread) => stored_thread,
+            },
+            ThreadResumeTarget::DaemonRecovery(saved) => {
+                let thread_id = ThreadId::from_string(&params.thread_id)
+                    .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+                // Recheck under the same permit as client resume, including after config loading.
+                if self.thread_manager.get_thread(thread_id).await.is_ok() {
+                    if let Some(saved) = saved {
+                        self.continue_daemon_turn(&params.thread_id, saved.clone())
+                            .await;
+                    }
+                    return Ok(ControlFlow::Break(()));
+                }
+                None
             }
         };
 
@@ -3721,13 +3811,7 @@ impl ThreadRequestProcessor {
                 Err(error) => Err(error),
             }
         };
-        let (thread_history, resume_source_thread) = match resume_result {
-            Ok(value) => value,
-            Err(error) => {
-                self.outgoing.send_error(request_id, error).await;
-                return Ok(ControlFlow::Break(()));
-            }
-        };
+        let (thread_history, resume_source_thread) = resume_result?;
         if let InitialHistory::Resumed(resumed) = &thread_history
             && self
                 .pending_thread_unloads
@@ -3747,7 +3831,11 @@ impl ThreadRequestProcessor {
                 .then_some(thread.thread_id)
         });
         let paginated_resume = paginated_thread_id.is_some();
-        if paginated_resume && include_turns && prepared_config.is_none() {
+        if paginated_resume
+            && include_turns
+            && prepared_config.is_none()
+            && let ThreadResumeTarget::Client(request_id) = target
+        {
             self.send_deprecation_notice(
                 request_id.connection_id,
                 PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY,
@@ -3760,6 +3848,9 @@ impl ThreadRequestProcessor {
             && let Some((source, _)) = thread_history.get_resumed_session_sources()
             && !can_accept_direct_input(thread_history.get_multi_agent_version(), &source)
         {
+            let ThreadResumeTarget::Client(request_id) = target else {
+                return Ok(ControlFlow::Break(()));
+            };
             let child_thread_id = resumed_history.conversation_id;
             self.thread_manager
                 .ensure_multi_agent_v2_child_loaded(child_thread_id)
@@ -3785,7 +3876,7 @@ impl ThreadRequestProcessor {
             };
             return match self
                 .resume_running_thread(
-                    &request_id,
+                    request_id,
                     &attach_params,
                     app_server_client_name,
                     app_server_client_version,
@@ -3805,21 +3896,72 @@ impl ThreadRequestProcessor {
         }
 
         // Copied or referenced history can contain another thread's settings. Only snapshots
-        // explicitly owned by this thread can override its startup cwd.
-        let history_cwd = if let InitialHistory::Resumed(resumed) = &thread_history {
+        // explicitly owned by this thread can override its startup cwd and workspace folders.
+        let history_settings = if let InitialHistory::Resumed(resumed) = &thread_history {
             resumed.history.iter().rev().find_map(|item| match item {
                 RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
                     if event.thread_id == Some(resumed.conversation_id) =>
                 {
-                    Some(event.thread_settings.cwd.to_path_buf())
+                    Some(&event.thread_settings)
                 }
                 _ => None,
             })
         } else {
             None
         };
-        let history_cwd = history_cwd.or_else(|| thread_history.session_cwd());
-        let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+        let history_cwd = history_settings
+            .map(|settings| settings.cwd.to_path_buf())
+            .or_else(|| thread_history.session_cwd());
+        let mut runtime_workspace_roots =
+            runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+        if runtime_workspace_roots.is_none() {
+            // A retained owned snapshot is authoritative. Only use startup metadata when
+            // no such snapshot exists; missing roots do not resurrect an older selection.
+            let saved_workspaces: Option<(&Path, Vec<&Path>)> = match history_settings {
+                Some(settings) => settings.runtime_workspace_roots.as_ref().map(|roots| {
+                    (
+                        settings.cwd.as_path(),
+                        roots.iter().map(AbsolutePathBuf::as_path).collect(),
+                    )
+                }),
+                None => {
+                    if let InitialHistory::Resumed(resumed) = &thread_history
+                        && let Some(RolloutItem::SessionMeta(meta)) = resumed.history.first()
+                        && meta.meta.id == resumed.conversation_id
+                        && let Some(roots) = &meta.meta.runtime_workspace_roots
+                    {
+                        Some((
+                            meta.meta.cwd.as_path(),
+                            roots.iter().map(PathBuf::as_path).collect(),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some((saved_cwd, saved_roots)) = saved_workspaces {
+                let resume_cwd = resolve_request_cwd(cwd.as_ref().map(PathBuf::from))?;
+                // Retarget before validation so an explicit cwd can replace a
+                // startup cwd recorded on another operating system.
+                let restored_roots = path_utils::replace_path_and_deduplicate(
+                    saved_roots,
+                    saved_cwd,
+                    resume_cwd.as_ref().map_or(saved_cwd, AbsolutePathBuf::as_path),
+                )
+                    .into_iter()
+                    .map(|root| {
+                        AbsolutePathBuf::from_absolute_path_checked(root).map_err(|err| {
+                            invalid_params(format!(
+                                "cannot restore workspace root `{}` on this host: {err}. Pass `runtimeWorkspaceRoots` with valid local paths or an empty list.",
+                                root.display()
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                // Validation can normalize distinct saved paths to the same root.
+                runtime_workspace_roots = Some(resolve_runtime_workspace_roots(restored_roots));
+            }
+        }
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
@@ -3839,20 +3981,9 @@ impl ThreadRequestProcessor {
                 .as_mut()
                 .and_then(|overrides| overrides.remove("approval_policy"))
         {
-            let approval_policy = match serde_json::from_value(value) {
-                Ok(approval_policy) => approval_policy,
-                Err(err) => {
-                    self.outgoing
-                        .send_error(
-                            request_id,
-                            invalid_params(format!(
-                                "invalid `approval_policy` config override: {err}"
-                            )),
-                        )
-                        .await;
-                    return Ok(ControlFlow::Break(()));
-                }
-            };
+            let approval_policy = serde_json::from_value(value).map_err(|err| {
+                invalid_params(format!("invalid `approval_policy` config override: {err}"))
+            })?;
             typesafe_overrides.approval_policy = Some(approval_policy);
         }
         let has_explicit_model_resume_override =
@@ -3871,6 +4002,7 @@ impl ThreadRequestProcessor {
                 .is_some_and(|metadata| metadata.reasoning_effort.is_none());
         let config_state = ResumeConfigState {
             history_cwd: history_cwd.clone(),
+            workspace_roots: typesafe_overrides.workspace_roots.clone(),
             persisted_metadata,
             persisted_settings: match &thread_history {
                 InitialHistory::Resumed(resumed) => {
@@ -3884,19 +4016,11 @@ impl ThreadRequestProcessor {
             _ => {
                 // Config loading can call back into Desktop; release the permit during host work.
                 drop(_thread_list_state_permit);
-                let config = match self
+                let config = self
                     .config_manager
                     .load_for_cwd(request_overrides, typesafe_overrides, history_cwd)
                     .await
-                {
-                    Ok(config) => config,
-                    Err(err) => {
-                        self.outgoing
-                            .send_error(request_id, config_load_error(&err))
-                            .await;
-                        return Ok(ControlFlow::Break(()));
-                    }
-                };
+                    .map_err(|err| config_load_error(&err))?;
                 *prepared_config = Some(PreparedResumeConfig {
                     state: config_state,
                     config,
@@ -3917,7 +4041,12 @@ impl ThreadRequestProcessor {
                 config,
                 thread_history,
                 self.auth_manager.clone(),
-                self.request_trace_context(&request_id).await,
+                match target {
+                    ThreadResumeTarget::Client(request_id) => {
+                        self.request_trace_context(request_id).await
+                    }
+                    ThreadResumeTarget::DaemonRecovery(_) => None,
+                },
                 client_mcp_extensions,
             )
             .await
@@ -3928,6 +4057,25 @@ impl ThreadRequestProcessor {
                 session_configured,
                 ..
             }) => {
+                let ThreadResumeTarget::Client(request_id) = target else {
+                    // Observe lifecycle events without attaching a client subscription.
+                    self.thread_watch_manager
+                        .upsert_thread(&thread_id.to_string())
+                        .await;
+                    // Invoke idle work before arming subscriber-based unloading.
+                    codex_thread
+                        .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                        .await;
+                    if let ThreadResumeTarget::DaemonRecovery(Some(saved)) = target {
+                        self.continue_daemon_turn(&thread_id.to_string(), saved.clone())
+                            .await;
+                    }
+                    let state = self.thread_state_manager.thread_state(thread_id).await;
+                    self.ensure_listener_task_running(thread_id, Arc::clone(&codex_thread), state)
+                        .await?;
+                    return Ok(ControlFlow::Break(()));
+                };
+                let request_id = request_id.clone();
                 if let Err(err) = Self::set_app_server_client_info(
                     codex_thread.as_ref(),
                     app_server_client_name,
@@ -4090,6 +4238,7 @@ impl ThreadRequestProcessor {
                 let thread_originator = config_snapshot.originator.clone();
                 let response = ThreadResumeResponse {
                     thread,
+                    disabled_plugin_ids: config_snapshot.disabled_plugin_ids,
                     model: session_configured.model,
                     model_provider: session_configured.model_provider_id,
                     service_tier: session_configured.service_tier,
@@ -4101,6 +4250,7 @@ impl ThreadRequestProcessor {
                     sandbox,
                     active_permission_profile,
                     reasoning_effort: session_configured.reasoning_effort,
+                    collaboration_mode: Some(config_snapshot.collaboration_mode),
                     multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
                     initial_turns_page,
                     turns_backwards_cursor,
@@ -4138,7 +4288,7 @@ impl ThreadRequestProcessor {
                     CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
                     _ => internal_error(format!("error resuming thread: {err}")),
                 };
-                self.outgoing.send_error(request_id, error).await;
+                return Err(error);
             }
         }
         Ok(ControlFlow::Break(()))
@@ -4364,7 +4514,7 @@ impl ThreadRequestProcessor {
                 config_snapshot.model_provider_id.as_str(),
                 /*include_turns*/ false,
             );
-            thread_summary.session_id = existing_thread.session_configured().session_id.to_string();
+            thread_summary.session_id = existing_thread.startup_metadata().session_id.to_string();
             thread_summary.thread_source = config_snapshot.thread_source.clone().map(Into::into);
             apply_live_thread_settings(&mut thread_summary, &config_snapshot);
             thread_summary.can_accept_direct_input = Some(can_accept_direct_input(
@@ -4654,7 +4804,7 @@ impl ThreadRequestProcessor {
         include_turns: bool,
     ) -> std::result::Result<Thread, String> {
         let config_snapshot = thread.config_snapshot().await;
-        let session_id = thread.session_configured().session_id.to_string();
+        let session_id = thread.startup_metadata().session_id.to_string();
         let can_accept_direct_input = can_accept_direct_input(
             thread.multi_agent_version(),
             &config_snapshot.session_source,
@@ -4841,7 +4991,7 @@ impl ThreadRequestProcessor {
             .name
             .as_deref()
             .and_then(codex_core::util::normalize_thread_name);
-        let prepared_fork = if paginated_source {
+        let mut prepared_fork = if paginated_source {
             let boundary = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
                 (Some(turn_id), None) => {
                     codex_thread_store::ForkBoundary::ThroughTurn(turn_id.to_string())
@@ -4900,18 +5050,17 @@ impl ThreadRequestProcessor {
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();
         if cfg!(windows) {
-            match WindowsSandboxLevel::from_config(&self.config) {
-                WindowsSandboxLevel::Elevated => {
-                    cli_overrides
-                        .insert("windows.sandbox".to_string(), serde_json::json!("elevated"));
+            let mode = self.config.permissions.windows_sandbox_mode.or_else(|| {
+                match WindowsSandboxLevel::from_config(&self.config) {
+                    WindowsSandboxLevel::Elevated => Some(WindowsSandboxModeToml::Elevated),
+                    WindowsSandboxLevel::RestrictedToken => {
+                        Some(WindowsSandboxModeToml::Unelevated)
+                    }
+                    WindowsSandboxLevel::Disabled => None,
                 }
-                WindowsSandboxLevel::RestrictedToken => {
-                    cli_overrides.insert(
-                        "windows.sandbox".to_string(),
-                        serde_json::json!("unelevated"),
-                    );
-                }
-                WindowsSandboxLevel::Disabled => {}
+            });
+            if let Some(mode) = mode {
+                cli_overrides.insert("windows.sandbox".to_string(), serde_json::json!(mode));
             }
         }
         let request_overrides = if cli_overrides.is_empty() {
@@ -4944,8 +5093,9 @@ impl ThreadRequestProcessor {
             !has_permission_override(request_overrides.as_ref(), &typesafe_overrides);
         let needs_latest_settings =
             restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
+        let loaded_parent = self.thread_manager.get_thread(source_thread_id).await.ok();
         let loaded_parent_settings = if paginated_source && needs_latest_settings {
-            if let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await {
+            if let Some(parent) = loaded_parent.as_ref() {
                 let snapshot = parent.thread_settings_snapshot().await;
                 Some(PersistedResumeSettings {
                     approval_policy: snapshot.approval_policy,
@@ -4960,10 +5110,10 @@ impl ThreadRequestProcessor {
         };
         let latest_context = if paginated_source
             && needs_latest_settings
-            && loaded_parent_settings.is_none()
+            && loaded_parent.is_none()
             && (last_turn_id.is_some() || before_turn_id.is_some())
         {
-            Some(
+            Some(Arc::new(
                 self.thread_store
                     .load_latest_model_context(StoreLoadThreadHistoryParams {
                         thread_id: source_thread_id,
@@ -4972,10 +5122,23 @@ impl ThreadRequestProcessor {
                     .await
                     .map_err(thread_store_resume_read_error)?
                     .items,
-            )
+            ))
         } else {
             None
         };
+        // The fork cutoff can remove the only TurnContext that records the selected version.
+        // Recover it from the untrimmed source or live parent, independently of permission overrides.
+        let source_multi_agent_version = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: source_thread_id,
+            history: Arc::clone(latest_context.as_ref().unwrap_or(&source_history_items)),
+            rollout_path: source_thread.rollout_path.clone(),
+        })
+        .get_multi_agent_version()
+        .or_else(|| {
+            loaded_parent
+                .as_ref()
+                .and_then(|parent| parent.multi_agent_version())
+        });
         let persisted_settings = loaded_parent_settings.or_else(|| {
             latest_persisted_resume_settings(
                 latest_context
@@ -5008,7 +5171,7 @@ impl ThreadRequestProcessor {
         let parent_trace = self.request_trace_context(&request_id).await;
         let thread_source = thread_source.map(Into::into);
 
-        let history_items = if prepared_fork.is_some() {
+        let mut history_items = if prepared_fork.is_some() {
             source_history_items
         } else {
             let source_history_items = Arc::unwrap_or_clone(source_history_items);
@@ -5026,6 +5189,21 @@ impl ThreadRequestProcessor {
             };
             Arc::new(history_items)
         };
+        if let Some(multi_agent_version) = source_multi_agent_version
+            && (last_turn_id.is_some() || before_turn_id.is_some())
+        {
+            // Update only the fork's in-memory metadata; the source rollout stays unchanged.
+            for item in Arc::make_mut(&mut history_items) {
+                if let RolloutItem::SessionMeta(meta) = item
+                    && meta.meta.id == source_thread_id
+                {
+                    meta.meta.multi_agent_version = Some(multi_agent_version);
+                }
+            }
+            if let Some(prepared_fork) = prepared_fork.as_mut() {
+                prepared_fork.model_context = Arc::clone(&history_items);
+            }
+        }
 
         let ephemeral_preview = if ephemeral {
             if paginated_source && last_turn_id.is_none() && before_turn_id.is_none() {
@@ -5061,31 +5239,27 @@ impl ThreadRequestProcessor {
             .await?
         };
 
+        let fork_options = StartThreadOptions {
+            thread_source,
+            parent_trace,
+            client_mcp_extensions,
+            reserved_thread_id,
+            ..StartThreadOptions::new(config)
+        };
         let new_thread = if let Some(prepared_fork) = prepared_fork {
             self.thread_manager
-                .fork_prepared_thread(
-                    config,
-                    prepared_fork,
-                    thread_source,
-                    parent_trace,
-                    client_mcp_extensions,
-                    reserved_thread_id,
-                )
+                .fork_prepared_thread(fork_options, prepared_fork)
                 .await
         } else {
             self.thread_manager
                 .fork_thread_from_history(
                     ForkSnapshot::Interrupted,
-                    config,
+                    fork_options,
                     InitialHistory::Resumed(ResumedHistory {
                         conversation_id: source_thread_id,
                         history: history_items,
                         rollout_path: source_thread.rollout_path.clone(),
                     }),
-                    thread_source,
-                    parent_trace,
-                    client_mcp_extensions,
-                    reserved_thread_id,
                 )
                 .await
         };
@@ -5256,6 +5430,7 @@ impl ThreadRequestProcessor {
         let thread_originator = config_snapshot.originator.clone();
         let response = ThreadForkResponse {
             thread: thread.clone(),
+            disabled_plugin_ids: config_snapshot.disabled_plugin_ids,
             model: session_configured.model,
             model_provider: session_configured.model_provider_id,
             service_tier: session_configured.service_tier,
@@ -5673,39 +5848,10 @@ pub(super) fn build_thread_resume_initial_turns_page(
 
 pub(super) fn apply_thread_turns_items_view(turns: &mut [Turn], items_view: TurnItemsView) {
     for turn in turns {
-        match items_view {
-            TurnItemsView::NotLoaded => {
-                turn.items.clear();
-                turn.items_view = TurnItemsView::NotLoaded;
-            }
-            TurnItemsView::Summary => {
-                let first_user_message = turn
-                    .items
-                    .iter()
-                    .find(|item| matches!(item, ThreadItem::UserMessage { .. }))
-                    .cloned();
-                let final_agent_message = turn
-                    .items
-                    .iter()
-                    .rev()
-                    .find(|item| matches!(item, ThreadItem::AgentMessage { .. }))
-                    .cloned();
-                turn.items = match (first_user_message, final_agent_message) {
-                    (Some(user_message), Some(agent_message))
-                        if user_message.id() != agent_message.id() =>
-                    {
-                        vec![user_message, agent_message]
-                    }
-                    (Some(user_message), _) => vec![user_message],
-                    (None, Some(agent_message)) => vec![agent_message],
-                    (None, None) => Vec::new(),
-                };
-                turn.items_view = TurnItemsView::Summary;
-            }
-            TurnItemsView::Full => {
-                turn.items_view = TurnItemsView::Full;
-            }
+        if !matches!(items_view, TurnItemsView::Full) && turn.items_view != items_view {
+            turn.items = items_view.project_items(&turn.items);
         }
+        turn.items_view = items_view;
     }
 }
 
@@ -6266,7 +6412,7 @@ fn build_thread_from_loaded_snapshot(
 ) -> Thread {
     build_thread_from_snapshot(
         thread_id,
-        loaded_thread.session_configured().session_id.to_string(),
+        loaded_thread.startup_metadata().session_id.to_string(),
         loaded_thread.multi_agent_version(),
         config_snapshot,
         loaded_thread.rollout_path(),

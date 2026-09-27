@@ -592,6 +592,8 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
     let legacy_thread_id = ThreadId::new();
     store
         .create_thread(CreateThreadParams {
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: legacy_thread_id.into(),
             thread_id: legacy_thread_id,
             extra_config: None,
@@ -608,6 +610,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             history_base: None,
             subagent_history_start_ordinal: None,
             initial_window_id: "window-1".to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(home.path().to_path_buf()),
                 model_provider: "test-provider".to_string(),
@@ -1480,6 +1483,57 @@ async fn subagent_prefix_advances_projection_without_materializing_history() {
     .expect("read projected realtime items");
     assert_eq!(realtime_items, vec![("child:started".to_string(), 6)]);
     assert_eq!(projection_state(&pool, thread_id).await.1, 9);
+}
+
+#[tokio::test]
+async fn projection_preserves_exact_lifecycle_timestamps() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    let timestamps = [
+        (Some(1_789_855_978_123), Some(1_789_855_979_456)),
+        (Some(1_789_855_978_123), Some(1_789_855_978_123)),
+        (None, Some(1_789_855_979_456)),
+        (None, None),
+    ];
+    let mut items = vec![turn_started("turn-1")];
+    for (index, (started_at_ms, completed_at_ms)) in timestamps.iter().enumerate() {
+        items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
+            ItemCompletedEvent {
+                thread_id,
+                turn_id: "turn-1".to_string(),
+                item: TurnItem::UserMessage(UserMessageItem {
+                    id: format!("user-{index}"),
+                    client_id: None,
+                    content: Vec::new(),
+                }),
+                started_at_ms: *started_at_ms,
+                completed_at_ms: completed_at_ms.unwrap_or_default(),
+            },
+        )));
+    }
+    store
+        .append_items(AppendThreadItemsParams { thread_id, items })
+        .await
+        .expect("append lifecycle records");
+    store
+        .shutdown_thread(thread_id)
+        .await
+        .expect("shutdown thread");
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let actual = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+        "SELECT started_at_ms, completed_at_ms FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read persisted lifecycle timestamps");
+    assert_eq!(actual, timestamps);
 }
 
 #[tokio::test]
@@ -2781,6 +2835,8 @@ async fn create_paginated_subagent_thread(
 ) {
     store
         .create_thread(CreateThreadParams {
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
@@ -2797,6 +2853,7 @@ async fn create_paginated_subagent_thread(
             history_base,
             subagent_history_start_ordinal,
             initial_window_id: "window-1".to_string(),
+            runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),
                 model_provider: "test-provider".to_string(),
@@ -2810,6 +2867,7 @@ async fn create_paginated_subagent_thread(
 fn turn_started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_id.to_string(),
+        root_turn_id: None,
         trace_id: None,
         started_at: Some(10),
         model_context_window: None,
@@ -2834,6 +2892,7 @@ fn thread_settings_applied(thread_id: ThreadId) -> RolloutItem {
         ThreadSettingsAppliedEvent {
             thread_id: Some(thread_id),
             thread_settings: ThreadSettingsSnapshot {
+                disabled_plugin_ids: Vec::new(),
                 model: "test-model".to_string(),
                 model_provider_id: "test-provider".to_string(),
                 service_tier: None,
@@ -2845,6 +2904,7 @@ fn thread_settings_applied(thread_id: ThreadId) -> RolloutItem {
                     .expect("current directory")
                     .try_into()
                     .expect("absolute settings cwd"),
+                runtime_workspace_roots: None,
                 reasoning_effort: None,
                 reasoning_summary: None,
                 personality: None,

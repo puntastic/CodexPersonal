@@ -16,6 +16,7 @@ use codex_core::TurnInputRequest;
 use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::config::Config;
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
+use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::CompactedHistoryEntry;
@@ -45,6 +46,7 @@ use codex_thread_store::ReadThreadByRolloutPathParams;
 use codex_thread_store::SortDirection;
 use codex_thread_store::StoredTurnItemsView;
 use codex_thread_store::ThreadStore;
+use core_test_support::ThreadIdle;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::context_snapshot::ContextSnapshotRenderMode;
@@ -52,11 +54,9 @@ use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
-use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -68,7 +68,6 @@ use tempfile::TempDir;
 use wiremock::MockServer;
 
 const AFTER_SECOND_RESUME: &str = "AFTER_SECOND_RESUME";
-const AFTER_ROLLBACK: &str = "AFTER_ROLLBACK";
 const CHECKPOINT_METADATA_KEY: &str = "replacement_history_metadata";
 
 fn network_disabled() -> bool {
@@ -990,7 +989,6 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
 
     Ok(())
 }
-
 fn normalize_line_endings(value: &mut Value) {
     match value {
         Value::String(text) if text.contains('\r') => {
@@ -1132,7 +1130,10 @@ async fn start_test_conversation_with_history_mode(
 ) {
     let base_url = format!("{}/v1", server.uri());
     let model = model.map(str::to_string);
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
     let mut builder = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
         .with_history_mode(history_mode)
         .with_config(move |config| {
             config.update_plan_enabled = true;
@@ -1172,6 +1173,7 @@ async fn user_turn(conversation: &Arc<CodexThread>, text: &str) {
         .await
         .expect("submit user turn");
     wait_for_event(conversation, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    ThreadIdle::wait(conversation).await;
 }
 
 async fn compact_conversation(conversation: &Arc<CodexThread>) {
@@ -1191,6 +1193,7 @@ async fn compact_conversation(conversation: &Arc<CodexThread>) {
     };
     assert_eq!(message, COMPACT_WARNING_MESSAGE);
     wait_for_event(conversation, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    ThreadIdle::wait(conversation).await;
 }
 
 fn fetch_conversation_path(conversation: &Arc<CodexThread>) -> std::path::PathBuf {
@@ -1303,12 +1306,8 @@ async fn fork_paginated_thread(
         .await
         .expect("prepare bounded paginated fork");
     Box::pin(manager.fork_prepared_thread(
-        config.clone(),
+        codex_core::StartThreadOptions::new(config.clone()),
         prepared,
-        /*thread_source*/ None,
-        /*parent_trace*/ None,
-        ClientMcpExtensions::default(),
-        /*reserved_thread_id*/ None,
     ))
     .await
     .expect("fork conversation")

@@ -1,4 +1,5 @@
 use super::auth::RemoteControlConnectionAuth;
+use super::auth::request_client;
 use super::enroll::RemoteControlEnrollment;
 use super::enroll::RemoteControlServerTokenRefreshRequirement;
 use super::enroll::format_headers;
@@ -9,7 +10,6 @@ use super::protocol::RefreshRemoteServerRequest;
 use super::protocol::RemoteControlTarget;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
-use codex_login::default_client::create_client_without_request_logging;
 use rand::Rng;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -27,7 +27,6 @@ pub const REMOTE_CONTROL_APP_SERVER_VERSION: &str =
         Some(version) => version,
         None => env!("CARGO_PKG_VERSION"),
     };
-
 const REMOTE_CONTROL_RETRY_AFTER_JITTER_MAX_MILLIS: u64 = 30_000;
 
 const REMOTE_CONTROL_ENROLL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -248,7 +247,7 @@ where
     Request: Serialize,
     Response: DeserializeOwned,
 {
-    let client = create_client_without_request_logging();
+    let client = request_client(&auth.http_client_factory, url).await?;
     let auth_headers = auth.request_headers()?;
     let response = client
         .post(url)
@@ -259,6 +258,9 @@ where
         .send()
         .await
         .map_err(|err| {
+            if matches!(err, codex_http_client::HttpError::Policy(_)) {
+                return super::auth::request_error(err);
+            }
             let timed_out = err.is_timeout();
             RemoteControlServerRequestError::io_error(
                 format!("failed to {action} remote control server at `{url}`: {err}"),
@@ -271,6 +273,11 @@ where
     let status = response.status();
     let retry_at = retry_after_with_jitter(&headers, OffsetDateTime::now_utc());
     let body = response.bytes().await.map_err(|err| {
+        if matches!(err, codex_http_client::HttpError::Policy(_))
+            && !(retry_at.is_some() && (status.as_u16() == 429 || status.is_server_error()))
+        {
+            return super::auth::request_error(err);
+        }
         let timed_out = err.is_timeout();
         RemoteControlServerRequestError::io_error(
             format!("failed to read remote control {response_kind} response from `{url}`: {err}"),

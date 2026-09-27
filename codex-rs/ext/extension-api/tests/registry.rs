@@ -168,10 +168,10 @@ impl codex_extension_api::SynchronousApprovalReviewer for AllContributors {
     fn review(
         &self,
         _reason: codex_protocol::approvals::GuardianReviewReason,
-    ) -> ExtensionFuture<'_, codex_protocol::protocol::ReviewDecision> {
-        Box::pin(std::future::ready(
+    ) -> ExtensionFuture<'_, Option<codex_protocol::protocol::ReviewDecision>> {
+        Box::pin(std::future::ready(Some(
             codex_protocol::protocol::ReviewDecision::Approved,
-        ))
+        )))
     }
 }
 
@@ -218,6 +218,7 @@ async fn build_round_trips_every_contributor_category() {
     .expect("approval model");
     let input = codex_extension_api::ApprovalDecisionInput {
         approval_id: "approval-1",
+        tool_call_id: None,
         action: &serde_json::Value::Null,
         thread_id: codex_protocol::ThreadId::new(),
         thread_store: &thread_store,

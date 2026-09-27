@@ -1,8 +1,10 @@
 //! Local hard-delete support for persisted threads.
 //!
 //! Existing rollout files are deleted before this operation reports success. A rollout file that
-//! vanishes after discovery counts as already deleted. The app-server deletes main state DB rows
-//! after every associated rollout is removed; this module deletes local history projection rows.
+//! vanishes after discovery counts as already deleted. Main state DB rows are deleted after every
+//! associated rollout is removed, under the same lifecycle lock, so queued artifact mutations cannot
+//! use deleted thread metadata. Host-owned data is cleaned after reference and writer checks,
+//! before removing rollouts, so cleanup failures remain retryable even without a state DB.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -81,7 +83,10 @@ pub(super) async fn delete_thread(
     let _cross_process_lifecycle_guard = store
         .writer_lock_coordinator
         .lock_lifecycle(thread_id)
-        .await?;
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to lock thread {thread_id} lifecycle: {err}"),
+        })?;
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
     let deleted_thread_ids = HashSet::from([thread_id]);
     let reference_index = scan_reference_index(store, &deleted_thread_ids).await?;
@@ -90,13 +95,27 @@ pub(super) async fn delete_thread(
     let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
     let migration_artifacts =
         prepare_thread_delete_migration_artifacts(&store.config.codex_home, thread_id).await?;
-    delete_thread_after_reference_check(
+    if let Some(cleanup) = &store.thread_data_cleanup {
+        cleanup(vec![thread_id]).await?;
+    }
+    let found_rollout = match delete_thread_after_reference_check(
         store,
         thread_rollouts,
         migration_artifacts,
         &mut writer_guards,
     )
     .await
+    {
+        Ok(()) => true,
+        Err(ThreadStoreError::ThreadNotFound { .. }) => false,
+        Err(err) => return Err(err),
+    };
+    let deleted_state_rows = delete_state_rows(store, &[thread_id]).await?;
+    if found_rollout || deleted_state_rows > 0 {
+        Ok(())
+    } else {
+        Err(ThreadStoreError::ThreadNotFound { thread_id })
+    }
 }
 
 pub(super) async fn delete_threads(
@@ -124,7 +143,10 @@ pub(super) async fn delete_threads(
             store
                 .writer_lock_coordinator
                 .lock_lifecycle(thread_id)
-                .await?,
+                .await
+                .map_err(|err| ThreadStoreError::Internal {
+                    message: format!("failed to lock thread {thread_id} lifecycle: {err}"),
+                })?,
         );
     }
     let mut _live_writer_guards = Vec::with_capacity(thread_ids.len());
@@ -153,6 +175,9 @@ pub(super) async fn delete_threads(
         .await?;
         prepared_deletions.push((thread_rollouts, migration_artifacts));
     }
+    if let Some(cleanup) = &store.thread_data_cleanup {
+        cleanup(thread_ids.clone()).await?;
+    }
     for (thread_rollouts, migration_artifacts) in prepared_deletions {
         match delete_thread_after_reference_check(
             store,
@@ -166,7 +191,24 @@ pub(super) async fn delete_threads(
             Err(err) => return Err(err),
         }
     }
+    // Retain the complete retry graph until every rollout has been removed.
+    delete_state_rows(store, &thread_ids).await?;
     Ok(())
+}
+
+async fn delete_state_rows(
+    store: &LocalThreadStore,
+    thread_ids: &[codex_protocol::ThreadId],
+) -> ThreadStoreResult<u64> {
+    let Some(state_db) = store.state_db.as_ref() else {
+        return Ok(0);
+    };
+    state_db
+        .delete_threads_strict(thread_ids)
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to delete thread state: {err}"),
+        })
 }
 
 fn ensure_no_external_references(
@@ -231,7 +273,7 @@ async fn delete_thread_after_reference_check(
     store: &LocalThreadStore,
     mut thread_rollouts: ThreadRollouts,
     migration_artifacts: PreparedThreadDeleteMigrationArtifacts,
-    writer_guards: &mut Vec<super::writer_lock::WriterLockGuard>,
+    writer_guards: &mut Vec<super::WriterLockGuard>,
 ) -> ThreadStoreResult<()> {
     let thread_id = thread_rollouts.thread_id;
     let thread_id_str = thread_id.to_string();
@@ -277,9 +319,17 @@ async fn delete_thread_after_reference_check(
     let removed_migration_artifacts =
         remove_thread_delete_migration_artifacts(migration_artifacts).await?;
 
-    // Drop the recorder before removing files, but retain its writer lock until cleanup finishes.
-    if let Some(entry) = store.live_recorders.lock().await.remove(&thread_id) {
+    // Stop queued file work before removing files, retaining ownership until cleanup finishes.
+    let live_entry = store.live_recorders.lock().await.remove(&thread_id);
+    if let Some(entry) = live_entry {
         writer_guards.push(entry.writer_lock);
+        entry
+            .recorder
+            .discard()
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to stop thread writer before deletion: {err}"),
+            })?;
     }
     let found_rollout_path = !thread_rollouts.paths.is_empty() || removed_migration_artifacts;
     for rollout_path in thread_rollouts.paths {
@@ -706,8 +756,7 @@ mod tests {
             )
             .expect("child session file");
             let _owner_guard = owner
-                .writer_lock_coordinator
-                .acquire(child_thread_id)
+                .acquire_writer_lock(child_thread_id)
                 .expect("acquire child writer lock");
 
             let error = store
@@ -730,8 +779,7 @@ mod tests {
         let owner = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let thread_id = ThreadId::default();
         let _owner_guard = owner
-            .writer_lock_coordinator
-            .acquire(thread_id)
+            .acquire_writer_lock(thread_id)
             .expect("acquire writer lock before rollout exists");
 
         let error = store
@@ -1132,7 +1180,10 @@ SELECT
         )
         .expect("create migration journal directory");
         std::fs::write(&pending_journal, b"").expect("write pending migration marker");
-        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None)
+            .with_thread_data_cleanup(|_| {
+                Box::pin(async { panic!("host cleanup must wait for recovery validation") })
+            });
 
         let error = store
             .delete_thread(DeleteThreadParams { thread_id })
@@ -1142,6 +1193,36 @@ SELECT
         assert!(matches!(error, ThreadStoreError::Conflict { .. }));
         assert!(rollout_path.exists());
         assert!(pending_journal.exists());
+    }
+
+    #[tokio::test]
+    async fn batch_delete_validates_all_migrations_before_host_cleanup_or_file_removal() {
+        let home = TempDir::new().expect("temp dir");
+        let mut thread_ids = Vec::new();
+        let mut paths = Vec::new();
+        for value in [344, 345] {
+            let uuid = Uuid::from_u128(value);
+            thread_ids.push(ThreadId::from_string(&uuid.to_string()).expect("thread id"));
+            paths.push(
+                write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file"),
+            );
+        }
+        let pending = pending_migration_path(home.path(), thread_ids[1]);
+        std::fs::create_dir_all(pending.parent().expect("migration directory"))
+            .expect("create migration directory");
+        std::fs::write(&pending, b"").expect("write pending migration marker");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None)
+            .with_thread_data_cleanup(|_| {
+                Box::pin(async { panic!("batch host cleanup must wait for every recovery check") })
+            });
+
+        let error = store
+            .delete_threads(DeleteThreadsParams { thread_ids })
+            .await
+            .expect_err("pending migration must block the complete batch");
+        assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+        assert!(paths.iter().all(|path| path.exists()));
+        assert!(pending.exists());
     }
 
     #[tokio::test]
