@@ -334,12 +334,14 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization(
         }))?;
         checkpoint.retained_context = Some(Default::default());
         test.codex.ensure_rollout_materialized().await;
-        test.codex = super::guardian_checkpoint_migration::resume(
-            &test,
-            &test.codex,
-            vec![RolloutItem::Compacted(checkpoint)],
-        )
-        .await?;
+        test.codex
+            .append_rollout_items(&[RolloutItem::Compacted(checkpoint)])
+            .await?;
+        // The synthetic checkpoint must belong to the canonical persisted history being resumed.
+        let history =
+            super::guardian_checkpoint_migration::saved_history(&test, &test.codex).await?;
+        test.codex =
+            super::guardian_checkpoint_migration::resume(&test, &test.codex, history).await?;
         assert_eq!(
             codex_core::context::GuardianContextMode::from_history(
                 test.codex.conversation_history_snapshot().await.as_ref()

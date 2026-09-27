@@ -4350,6 +4350,23 @@ async fn assert_repeated_compactions_store_image_payload_once_and_resume_exactly
     }
     session.flush_rollout().await.expect("rollout should flush");
 
+    // This helper starts with Forked([]), so the recorder cannot prove that inherited
+    // context was MCP-free. Compaction checkpoints that exact attribution state on its
+    // final envelope; keep it in the expected durable value rather than stripping it.
+    let expected_later_model_envelope = ResponseItemEnvelope {
+        metadata: Some(CodexHarnessMetadata {
+            mcp_attribution: Some(McpAttribution {
+                status: McpAttributionStatus::AttributionError,
+                error_reason: Some(
+                    codex_protocol::mcp::McpAttributionErrorReason::HistoryMissingCheckpoint,
+                ),
+                sources: Vec::new(),
+            }),
+            ..Default::default()
+        }),
+        ..later_model_envelope.clone()
+    };
+
     let raw_rollout = std::fs::read_to_string(&rollout_path).expect("read raw rollout");
     assert_eq!(
         raw_rollout.matches(IMAGE_DATA_URI).count(),
@@ -4382,7 +4399,7 @@ async fn assert_repeated_compactions_store_image_payload_once_and_resume_exactly
     );
     assert_eq!(
         checkpoints[1].replacement_history.as_deref(),
-        Some(std::slice::from_ref(&later_model_envelope))
+        Some(std::slice::from_ref(&expected_later_model_envelope))
     );
     assert!(checkpoints.iter().all(|checkpoint| {
         checkpoint
@@ -4407,7 +4424,7 @@ async fn assert_repeated_compactions_store_image_payload_once_and_resume_exactly
         materialized_checkpoints,
         vec![
             std::slice::from_ref(&image_envelope),
-            std::slice::from_ref(&later_model_envelope),
+            std::slice::from_ref(&expected_later_model_envelope),
         ]
     );
     let materialized_guardian = materialized
@@ -4440,6 +4457,16 @@ async fn assert_repeated_compactions_store_image_payload_once_and_resume_exactly
         .await
         .expect("cold resume");
     let resumed_history = resumed_session.clone_history().await;
+    let mut resumed_envelopes = resumed_history.annotated_items().to_vec();
+    for envelope in &mut resumed_envelopes {
+        // Replay derives these transport classifications again. They are not part of this
+        // checkpoint's durable envelope; retain all other transport and harness metadata.
+        envelope.item.clear_content_item_kinds();
+    }
+    assert_eq!(
+        resumed_envelopes,
+        vec![expected_later_model_envelope]
+    );
     assert_eq!(
         strip_metadata_from_items(&raw_history_items(&resumed_history)),
         strip_metadata_from_items(std::slice::from_ref(&later_model_envelope.item))

@@ -11,7 +11,11 @@ enum BudgetOutcome {
     RequiresSync,
 }
 
-async fn catalog_budget_fixture(base_url: String, window: i64) -> Result<GuardianFailureFixture> {
+async fn catalog_budget_fixture(
+    base_url: String,
+    window: i64,
+    evidence: BudgetEvidence,
+) -> Result<GuardianFailureFixture> {
     let server = responses::start_mock_server().await;
     let test = test_codex()
         .with_model_info_override(MODEL, move |model| {
@@ -24,9 +28,14 @@ async fn catalog_budget_fixture(base_url: String, window: i64) -> Result<Guardia
         })
         .with_pre_build_hook(|home| {
             std::fs::write(home.join("config.toml"),
-                "[features.guardianv2]\nenabled = true\nmax_parent_compaction_tokens = 4096\n[features.guardianv2.review_scope]\ncomputer_use_only = false\n[features.guardianv2.transcript]\ninclude_images = true\n").unwrap();
+                "[features.guardianv2]\nenabled = true\nreuse_parent_compaction = true\nmax_parent_compaction_tokens = 4096\n[features.guardianv2.review_scope]\ncomputer_use_only = false\n[features.guardianv2.transcript]\ninclude_images = true\n").unwrap();
         })
         .with_config(move |config| {
+            if matches!(evidence, BudgetEvidence::Checkpoint) {
+                // The live approval path must reject an unannotated checkpoint even
+                // when the separate classifier snapshot has matching provenance.
+                config.features.enable(Feature::GuardianThreadContext).unwrap();
+            }
             // A smaller parent window must not replace Luna's catalog allowance.
             config.model_context_window = Some(1_000);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
@@ -98,7 +107,7 @@ async fn assert_catalog_budget(evidence: BudgetEvidence) -> Result<()> {
         .zip([BudgetOutcome::RequiresSync, BudgetOutcome::Fits])
     {
         let server = responses::start_mock_server().await;
-        let fixture = catalog_budget_fixture(server.uri(), window).await?;
+        let fixture = catalog_budget_fixture(server.uri(), window, evidence).await?;
         let response = responses::mount_sse_once(
             &server,
             responses::sse(vec![

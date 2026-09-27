@@ -448,6 +448,7 @@ async fn experimental_context_rejects_provider_owned_credentials(
                     config.model_provider.aws = Some(ModelProviderAwsAuthInfo {
                         profile: Some("unused-test-profile".to_string()),
                         region: Some("us-east-1".to_string()),
+                        credential_export: None,
                         auth_refresh: None,
                     });
                 }

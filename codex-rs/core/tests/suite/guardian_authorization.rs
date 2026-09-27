@@ -165,17 +165,20 @@ async fn guardian_revalidates_owning_session_before_allow(
         .await?;
     if review_mode == GuardianContextMode::Legacy {
         test.codex.ensure_rollout_materialized().await;
-        test.codex = super::guardian_checkpoint_migration::resume(
-            &test,
-            &test.codex,
-            vec![RolloutItem::Compacted(serde_json::from_value(json!({
+        test.codex
+            .append_rollout_items(&[RolloutItem::Compacted(serde_json::from_value(json!({
                 "message": "old checkpoint",
                 "replacement_history": [{
                     "type": "compaction", "id": "old", "encrypted_content": "unknown producer"
                 }]
-            }))?)],
-        )
-        .await?;
+            }))?)])
+            .await?;
+        // The old checkpoint is a durable fixture, not authority to replace a live writer's
+        // identity. Reload the canonical SessionMeta and persisted checkpoint together.
+        let history =
+            super::guardian_checkpoint_migration::saved_history(&test, &test.codex).await?;
+        test.codex =
+            super::guardian_checkpoint_migration::resume(&test, &test.codex, history).await?;
     }
     assert_eq!(
         GuardianContextMode::from_history(

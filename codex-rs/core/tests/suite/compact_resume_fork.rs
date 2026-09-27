@@ -49,14 +49,15 @@ use codex_thread_store::ThreadStore;
 use core_test_support::ThreadIdle;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
-use core_test_support::context_snapshot::ContextSnapshotRenderMode;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -68,6 +69,7 @@ use tempfile::TempDir;
 use wiremock::MockServer;
 
 const AFTER_SECOND_RESUME: &str = "AFTER_SECOND_RESUME";
+const AFTER_ROLLBACK: &str = "AFTER_ROLLBACK";
 const CHECKPOINT_METADATA_KEY: &str = "replacement_history_metadata";
 
 fn network_disabled() -> bool {
@@ -446,7 +448,7 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
     compact_conversation(&base).await;
     user_turn(&base, "AFTER_COMPACT").await;
     let base_path = fetch_conversation_path(&base);
-    let base_thread_id = base.session_configured().thread_id;
+    let base_thread_id = base.startup_metadata().thread_id;
     let state_db = base.state_db().expect("state database");
     assert!(
         base_path.exists(),
@@ -626,7 +628,7 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
     compact_conversation(&base).await;
     user_turn(&base, "AFTER_COMPACT").await;
     let base_path = fetch_conversation_path(&base);
-    let base_thread_id = base.session_configured().thread_id;
+    let base_thread_id = base.startup_metadata().thread_id;
     assert!(
         base_path.exists(),
         "second compact test expects base path {base_path:?} to exist",
@@ -666,7 +668,7 @@ async fn compact_resume_after_second_compaction_preserves_history() -> Result<()
     shutdown_conversation(&forked).await;
     assert_latest_checkpoint_retains_harness_metadata(
         &thread_store,
-        forked.session_configured().thread_id,
+        forked.startup_metadata().thread_id,
         "hello world",
     )
     .await?;
@@ -852,9 +854,7 @@ async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Resu
                 ("before rollback", &requests[2]),
                 ("after rollback", &requests[3]),
             ],
-            &ContextSnapshotOptions::default()
-                .strip_capability_instructions()
-                .render_mode(ContextSnapshotRenderMode::KindWithTextPrefix { max_chars: 64 }),
+            &ContextSnapshotOptions::default(),
         )
     );
 
@@ -981,9 +981,8 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
                 ("rolled-back turn request", &requests[1]),
                 ("follow-up request after rollback", &requests[2]),
             ],
-            &ContextSnapshotOptions::default()
-                .strip_capability_instructions()
-                .render_mode(ContextSnapshotRenderMode::KindWithTextPrefix { max_chars: 96 }),
+            // Keep normalized context text: environment and settings differences are under test.
+            &ContextSnapshotOptions::default(),
         )
     );
 

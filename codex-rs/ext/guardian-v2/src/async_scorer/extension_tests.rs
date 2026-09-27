@@ -1476,15 +1476,13 @@ impl GuardianFailureFixture {
             .await,
             None
         );
+        let metrics = thread_store.get::<RecordingMetrics>().unwrap();
+        let samples = metrics.0.lock().unwrap();
         assert!(
-            thread_store
-                .get::<RecordingMetrics>()
-                .unwrap()
-                .0
-                .lock()
-                .unwrap()
+            samples
                 .iter()
-                .any(|sample| sample == &fast_decision_metric("deferred", expected_reason))
+                .any(|sample| sample == &fast_decision_metric("deferred", expected_reason)),
+            "missing deferred decision reason {expected_reason}; recorded metrics: {samples:?}",
         );
         Ok(())
     }

@@ -39,7 +39,10 @@ async fn finish_turn(thread: &CodexThread) {
     .await;
 }
 
-async fn saved_history(test: &TestCodex, thread: &CodexThread) -> Result<Vec<RolloutItem>> {
+pub(super) async fn saved_history(
+    test: &TestCodex,
+    thread: &CodexThread,
+) -> Result<Vec<RolloutItem>> {
     thread.flush_rollout().await?;
     Ok(test
         .thread_store
@@ -135,6 +138,9 @@ pub(super) async fn migration_scenario() -> Result<Vec<responses::ResponsesReque
     ]))?;
     test.codex.ensure_rollout_materialized().await;
     test.codex.append_rollout_items(&history).await?;
+    // Resume the persisted fixture through its canonical identity and current model context,
+    // rather than presenting the synthetic suffix as the complete durable history.
+    let history = saved_history(&test, &test.codex).await?;
     let thread = resume(&test, &test.codex, history).await?;
     assert_eq!(
         GuardianContextMode::from_history(thread.conversation_history_snapshot().await.as_ref()),

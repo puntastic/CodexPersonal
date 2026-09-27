@@ -1,0 +1,96 @@
+---
+source: core/tests/suite/compact_resume_fork.rs
+assertion_line: 976
+expression: "context_snapshot::format_labeled_requests_snapshot(\"rollback trims pre-turn override context updates before the follow-up request\",\n&[(\"rolled-back turn request\", &requests[1]),\n(\"follow-up request after rollback\", &requests[2]),],\n&ContextSnapshotOptions::default(),)"
+---
+Scenario: rollback trims pre-turn override context updates before the follow-up request
+
+## Window 1
+-- request 1 (turn; rolled-back turn request) --
+00:message/developer:
+    <permissions instructions>
+    Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
+    # Escalation Requests
+
+    Commands are run outside the sandbox if they are approved by the user, or match an existing rule that al...hell control operators, including but not limited to: [hash=d24ebf5fa4e4b9bb]
+
+    - Pipes: |
+    - Logical operators: &&, ||
+    <OMITTED 44 LINES; ~790 TOKENS; hash=3a8900343e968d61>
+    NEVER provide a prefix_rule if your command uses a heredoc or herestring.
+
+    ### Examples
+    Good examples of prefixes:
+    - ["npm", "run", "dev"]
+    - ["gh", "pr", "check"]
+    - ["cargo", "test"]
+    </permissions instructions>
+01:message/user:
+    <environment_context>
+      <cwd><CWD></cwd>
+      <shell><HOST_SHELL></shell>
+      <current_date><CURRENT_DATE></current_date>
+      <timezone><HOST_TIMEZONE></timezone>
+      <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
+    </environment_context>
+02:message/user:
+    turn 1 user
+03:message/assistant:
+    turn 1 assistant
+04:message/developer:
+    <collaboration_mode>ROLLED_BACK_DEV_INSTRUCTIONS</collaboration_mode>
+05:message/user:
+    <environment_context>
+      <cwd><CWD>/PRETURN_CONTEXT_DIFF_CWD</cwd>
+      <shell><HOST_SHELL></shell>
+      <current_date><CURRENT_DATE></current_date>
+      <timezone><HOST_TIMEZONE></timezone>
+      <filesystem><workspace_roots><root><CWD>/PRETURN_CONTEXT_DIFF_CWD</root></workspace_roots><permission_...ntry></file_system></permission_profile></filesystem> [hash=078446faebf69a7f]
+    </environment_context>
+06:message/user:
+    turn 2 user
+
+## Window 2 (after request 1: input diverged at item 06)
+-- request 2 (turn; follow-up request after rollback) --
+00:message/developer:
+    <permissions instructions>
+    Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
+    # Escalation Requests
+
+    Commands are run outside the sandbox if they are approved by the user, or match an existing rule that al...hell control operators, including but not limited to: [hash=d24ebf5fa4e4b9bb]
+
+    - Pipes: |
+    - Logical operators: &&, ||
+    <OMITTED 44 LINES; ~790 TOKENS; hash=3a8900343e968d61>
+    NEVER provide a prefix_rule if your command uses a heredoc or herestring.
+
+    ### Examples
+    Good examples of prefixes:
+    - ["npm", "run", "dev"]
+    - ["gh", "pr", "check"]
+    - ["cargo", "test"]
+    </permissions instructions>
+01:message/user:
+    <environment_context>
+      <cwd><CWD></cwd>
+      <shell><HOST_SHELL></shell>
+      <current_date><CURRENT_DATE></current_date>
+      <timezone><HOST_TIMEZONE></timezone>
+      <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
+    </environment_context>
+02:message/user:
+    turn 1 user
+03:message/assistant:
+    turn 1 assistant
+04:message/developer:
+    <collaboration_mode>ROLLED_BACK_DEV_INSTRUCTIONS</collaboration_mode>
+05:message/user:
+    <environment_context>
+      <cwd><CWD>/PRETURN_CONTEXT_DIFF_CWD</cwd>
+      <shell><HOST_SHELL></shell>
+      <current_date><CURRENT_DATE></current_date>
+      <timezone><HOST_TIMEZONE></timezone>
+      <filesystem><workspace_roots><root><CWD>/PRETURN_CONTEXT_DIFF_CWD</root></workspace_roots><permission_...ntry></file_system></permission_profile></filesystem> [hash=078446faebf69a7f]
+    </environment_context>
+06:message/user:
+    follow-up user

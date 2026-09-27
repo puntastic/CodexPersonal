@@ -2679,6 +2679,29 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
                     encrypted_content: "encrypted guardian parent summary".to_string(),
                     internal_chat_message_metadata_passthrough: None,
                 },
+            ]
+            .into_iter()
+            .map(codex_history::ResponseItemEnvelope::new)
+            .collect(),
+            /*reference_context_item*/ None,
+            /*world_state_baseline*/ None,
+            crate::compact::CompactedHistoryMetadata {
+                message: String::new(),
+                window_number,
+                window_ids,
+                compaction_response_id: None,
+                compaction_model_hash: Some("test-checkpoint".to_owned()),
+                reviewer_compaction_hash: Some("test-checkpoint".to_owned()),
+            },
+        )
+        .await;
+    // Compaction preserves the legacy review transcript; replacement items are not
+    // new accepted input. Record the post-compaction follow-up through the normal path.
+    session
+        .record_conversation_items(
+            turn.as_ref(),
+            turn.model_info(),
+            &[
                 ResponseItem::Message {
                     id: None,
                     role: "user".to_string(),
@@ -2697,22 +2720,15 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,
                 },
-            ]
-            .into_iter()
-            .map(codex_history::ResponseItemEnvelope::new)
-            .collect(),
-            /*reference_context_item*/ None,
-            /*world_state_baseline*/ None,
-            crate::compact::CompactedHistoryMetadata {
-                message: String::new(),
-                window_number,
-                window_ids,
-                compaction_response_id: None,
-                compaction_model_hash: Some("test-checkpoint".to_owned()),
-                reviewer_compaction_hash: Some("test-checkpoint".to_owned()),
-            },
+            ],
         )
         .await;
+    assert!(
+        session.conversation_history_snapshot().await.review_items().any(|item| {
+            response_item_contains_message_text(item, "Please push the third docs fix too.")
+        }),
+        "the fixture's newly accepted follow-up must reach the Guardian evidence surface",
+    );
     let third_request = GuardianApprovalRequest::ExecCommand {
         id: "shell-3".to_string(),
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),

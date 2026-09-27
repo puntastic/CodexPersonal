@@ -285,9 +285,14 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         .with_extra_config(&format!(
             "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[features.guardianv2]\nenabled = true\nthread_context = {thread_context_enabled}\npersist_scores = true\nreuse_parent_compaction = {reuse_parent_compaction}\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
         ));
-    if matches!(context_path, ContextPath::ThreadOwned) {
-        mock_config = mock_config.disable_feature(Feature::GuardianReuseParentCompaction);
-    }
+    // This gate controls legacy synchronous review, independently of Luna's nested
+    // reuse_parent_compaction setting. Thread-owned review must not depend on it.
+    mock_config = match context_path {
+        ContextPath::Legacy => mock_config.enable_feature(Feature::GuardianReuseParentCompaction),
+        ContextPath::ThreadOwned => {
+            mock_config.disable_feature(Feature::GuardianReuseParentCompaction)
+        }
+    };
     mock_config.write(codex_home.path())?;
     let config = load_default_config_for_test(&codex_home).await;
     let models = [

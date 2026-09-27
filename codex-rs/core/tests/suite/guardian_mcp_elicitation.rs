@@ -609,7 +609,6 @@ async fn node_elicitations_attribute_independent_reviews_without_changing_action
                 "tool_name": meta[index]["tool_name"], "arguments": meta[index]["tool_params"],
                 "connector_id": "inner-connector", "connector_name": "Inner Connector",
                 "tool_title": "Inner action",
-                "tool_description": "Review this action independently from JavaScript".repeat(220),
             })
         );
         assert!(prompt.contains("<guardian_tool_descriptions>"));

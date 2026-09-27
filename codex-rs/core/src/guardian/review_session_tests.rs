@@ -504,6 +504,9 @@ async fn encrypted_parent_compaction_requires_original_item_id(thread_context_en
     features
         .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
         .expect("context mode");
+    features
+        .set_enabled(Feature::GuardianReuseParentCompaction, !thread_context_enabled)
+        .expect("legacy checkpoint reuse is explicit; thread-owned review does not need it");
     let policy =
         ReviewContextPolicy::for_context(GuardianContextMode::from_features(&features), &features);
     let item = ResponseItem::Compaction {
