@@ -75,11 +75,42 @@ include both intended schema-hash changes and failed helper launches; they must
 be regenerated after prerequisites are built, not accepted wholesale. Two
 mailbox assertions concern unchanged source and still need a baseline check.
 
-Additional unrun regression cases now cover literal arguments plus nonzero
+Additional regression cases cover literal arguments plus nonzero
 exit/stderr, direct-program PTY input and completion, and the native Windows
 Bash dispatch scar. Fixtures are synthetic; no live model or Desktop session
 is involved. `just --command` requires an explicit working directory here;
 unlike a recipe, it does not apply the justfile's recipe working-directory.
+
+### Resumed qualification
+
+Source checkpoint `3703e5444` includes those additional regression cases.
+The missing helpers now build successfully (19m17s). The unfiltered queued
+core run was interrupted before testing when inspection showed that the
+Windows sandbox integration group provisions machine-level users and firewall
+rules. That machine setup is not needed or selected for this change.
+
+Run `33cd0543-9e5c-4612-9742-5ead8739b1d7` now exercises4151 core tests, excluding
+`suite::windows_sandbox::` (83 tests excluded in total). It completed with4135
+passes and16 failures in1286.053s. All six `unified_exec_argv` end-to-end cases
+passed. The16 residuals are14 schema-hash snapshots and the same two mailbox
+assertions. Snapshot normalization found the expected additional `argv` in one
+visible tool signature. After reviewing that exact delta, a second guarded
+normalization confirmed only tool hashes, `argv`, and assertion-line metadata
+changed; all14 snapshots were accepted. Focused retesting is pending.
+The exact report is `core-prerequisites-fixed.junit.xml` beside the original
+204-failure report. The baseline mailbox discriminator, fix/fmt and canonical
+package also remain pending.
+
+The separately built candidate executable has SHA256
+`a00bc24b489ca22a04985e1a59a3de77cd3e0cd76a1924646f54583280fa3b89`.
+`candidate-probe-01/report.json` contains another48 native-RPC observations,
+reproducing the prior pass/fail pattern exactly: four arms8/8 and the two
+declared negative controls7/8. This exercises the backend, not model use of
+the new tool field. The pinned probe script SHA256 remained
+`364dc6e0f465e0ab341e17acc837bd2fc05e40d7c0efa4e7f08a7ee7273c4234`.
+Single-run timings vary substantially across these two loaded-machine runs;
+they are not a causal speed comparison. A real Nu read/filter/select query
+over this report also returned the expected two negative controls.
 
 The portable Nu0.116.1 probe and stream files are under the same Artifact Staging
 root. `baseline-probe-05/report.json` records48 deterministic observations:

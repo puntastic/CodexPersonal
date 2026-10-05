@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios.rs
+assertion_line: 1117
 expression: "context_snapshot::format_request_history_snapshot(\"Astra checks for Notes, refreshes its installed plugin without restarting, and uses the new skill and Code Mode MCP tool across turns.\",\n&mock.requests(),\n&ContextSnapshotOptions::default().include_request_settings(),)"
 ---
 Scenario: Astra checks for Notes, refreshes its installed plugin without restarting, and uses the new skill and Code Mode MCP tool across turns.
@@ -16,8 +17,8 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (3; hash=32be5470c6e39932):
-        - namespace/functions; hash=e7db0a45c4ec3157
+00:additional_tools/developer (3; hash=fe6f9e08d0571cbd):
+        - namespace/functions; hash=18d6443687b76060
           - custom/exec
           - function/wait
           - function/request_user_input
@@ -110,8 +111,8 @@ Settings:
 ## Window 2 (after request 2: input diverged at item 00)
 Settings: same as window 1
 -- request 3 (turn) --
-00:additional_tools/developer (3; hash=4327e247f74ba810):
-        - namespace/functions; hash=8c17932a39355f2d
+00:additional_tools/developer (3; hash=9e75c8e5d9e73437):
+        - namespace/functions; hash=13763aefbaa738ba
           - custom/exec
           - function/wait
           - function/request_user_input
