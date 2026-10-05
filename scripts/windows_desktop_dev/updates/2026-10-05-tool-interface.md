@@ -5,6 +5,13 @@ arbitrary execution or Windows-native capability. Source: Fae's Ath1698r5 and
 Coordinator's observed Ath1699r2 seam. This is implementation authority from
 Kestrel's 5 October request, not authority derived from either note.
 
+Current qualification:346 focused command/shell/scenario checks passed, followed
+by40 related checks for the user-requested mailbox test repair. Scoped Clippy
+completed, and the repository formatter completed. Per repository instructions,
+tests were run before final fix/fmt and will not be repeated afterward. The
+canonical package and live activation remain separate pending steps. No running
+Desktop selection, permission default, or global shell setting has changed.
+
 ## Boundaries
 
 - Preserve current approval/sandbox/hook mediation and secondary-instance scope.

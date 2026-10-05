@@ -13824,10 +13824,13 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
         |config| {
-            config.features.set_enabled(
-                Feature::GuardianThreadContext,
-                context_mode == GuardianContextMode::ThreadOwned,
-            ).expect("test config should allow choosing the history mode");
+            config
+                .features
+                .set_enabled(
+                    Feature::GuardianThreadContext,
+                    context_mode == GuardianContextMode::ThreadOwned,
+                )
+                .expect("test config should allow choosing the history mode");
         },
     )
     .await;
@@ -13892,10 +13895,13 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
         |config| {
-            config.features.set_enabled(
-                Feature::GuardianThreadContext,
-                context_mode == GuardianContextMode::ThreadOwned,
-            ).expect("test config should allow choosing the history mode");
+            config
+                .features
+                .set_enabled(
+                    Feature::GuardianThreadContext,
+                    context_mode == GuardianContextMode::ThreadOwned,
+                )
+                .expect("test config should allow choosing the history mode");
         },
     )
     .await;

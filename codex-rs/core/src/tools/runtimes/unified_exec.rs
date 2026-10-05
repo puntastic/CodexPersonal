@@ -321,7 +321,8 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             .flatten()
         });
         let shell = requested_shell.as_ref().unwrap_or(environment_shell);
-        let shell_snapshot = if req.shell_type.is_none() || environment_is_remote
+        let shell_snapshot = if req.shell_type.is_none()
+            || environment_is_remote
             || credential_broker_available
                 && launch_sandbox_permissions.requires_escalated_permissions()
         {

@@ -180,10 +180,7 @@ pub(super) fn shell_snapshot_request(
         || !request.turn_environment.shell_snapshot_v2_supported
         || request.turn_environment.selection.cwd != *cwd
         || !matches!(request.shell_mode, UnifiedExecShellMode::Direct)
-        || !matches!(
-            shell_type,
-            ShellType::Bash | ShellType::Zsh | ShellType::Sh
-        )
+        || !matches!(shell_type, ShellType::Bash | ShellType::Zsh | ShellType::Sh)
         || request.command.get(1).is_none_or(|flag| flag != "-lc")
     {
         return None;

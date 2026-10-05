@@ -111,11 +111,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         },
         strict: false,
         defer_loading: None,
-        parameters: JsonSchema::object(
-            properties,
-            None,
-            Some(false.into()),
-        ),
+        parameters: JsonSchema::object(properties, None, Some(false.into())),
         output_schema: Some(unified_exec_output_schema().into()),
     })
 }

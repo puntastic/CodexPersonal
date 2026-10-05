@@ -251,7 +251,9 @@ impl ExecCommandHandler {
         }
         let sandbox_permissions =
             resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
-        let hook_command = args.command_for_inspection().map_err(FunctionCallError::RespondToModel)?;
+        let hook_command = args
+            .command_for_inspection()
+            .map_err(FunctionCallError::RespondToModel)?;
         maybe_emit_implicit_skill_invocation(
             session.as_ref(),
             context.step_context.turn.as_ref(),
@@ -544,7 +546,8 @@ impl CoreToolRuntime for ExecCommandHandler {
         let args: ExecCommandArgs = parse_arguments(&arguments)?;
         if args.argv.is_some() {
             invocation.payload = ToolPayload::Function {
-                arguments: args.rewrite_argv_hook_input(&arguments, &updated_input)
+                arguments: args
+                    .rewrite_argv_hook_input(&arguments, &updated_input)
                     .map_err(FunctionCallError::RespondToModel)?,
             };
             return Ok(invocation);

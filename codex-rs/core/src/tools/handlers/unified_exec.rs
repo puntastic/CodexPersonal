@@ -18,8 +18,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::tools::handlers::parse_arguments;
 
-mod exec_command;
 mod command_input;
+mod exec_command;
 mod write_stdin;
 
 use command_input::CommandInput;
@@ -112,7 +112,10 @@ pub(crate) fn get_command(
     let script = match args.input()? {
         CommandInput::Argv(argv) => {
             if !matches!(shell_mode, UnifiedExecShellMode::Direct) {
-                return Err("direct argv is unavailable with zsh-fork; use cmd for that execution mode".to_string());
+                return Err(
+                    "direct argv is unavailable with zsh-fork; use cmd for that execution mode"
+                        .to_string(),
+                );
             }
             return Ok(ResolvedCommand {
                 command: argv.to_vec(),

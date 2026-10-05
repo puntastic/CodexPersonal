@@ -94,11 +94,7 @@ fn exec_command_tool_matches_expected_spec() {
             description,
             strict: false,
             defer_loading: None,
-            parameters: JsonSchema::object(
-                properties,
-                None,
-                Some(false.into())
-            ),
+            parameters: JsonSchema::object(properties, None, Some(false.into())),
             output_schema: Some(unified_exec_output_schema().into()),
         })
     );

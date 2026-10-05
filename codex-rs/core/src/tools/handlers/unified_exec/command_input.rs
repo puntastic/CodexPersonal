@@ -31,8 +31,9 @@ impl ExecCommandArgs {
         match self.input()? {
             CommandInput::Script(script) => Ok(script.to_string()),
             // Display only: execution uses the original vector, never this shell text.
-            CommandInput::Argv(argv) => shlex::try_join(argv.iter().map(String::as_str))
-                .map_err(|err| err.to_string()),
+            CommandInput::Argv(argv) => {
+                shlex::try_join(argv.iter().map(String::as_str)).map_err(|err| err.to_string())
+            }
         }
     }
 
@@ -52,16 +53,22 @@ impl ExecCommandArgs {
         let argv = updated_input.get("argv").ok_or_else(|| {
             "a direct argv hook rewrite must provide argv; command text alone cannot rewrite direct execution".to_string()
         })?;
-        let argv: Vec<String> = serde_json::from_value(argv.clone()).map_err(|err| err.to_string())?;
+        let argv: Vec<String> =
+            serde_json::from_value(argv.clone()).map_err(|err| err.to_string())?;
         if self.argv.as_ref() == Some(&argv)
             && let Some(command) = updated_input.get("command")
             && command != &json!(self.command_for_inspection()?)
         {
-            return Err("hook changed command text without changing argv; no command was executed".to_string());
+            return Err(
+                "hook changed command text without changing argv; no command was executed"
+                    .to_string(),
+            );
         }
-        let mut rewritten: Value = serde_json::from_str(arguments).map_err(|err| err.to_string())?;
+        let mut rewritten: Value =
+            serde_json::from_str(arguments).map_err(|err| err.to_string())?;
         rewritten["argv"] = json!(argv);
-        let checked: ExecCommandArgs = serde_json::from_value(rewritten.clone()).map_err(|err| err.to_string())?;
+        let checked: ExecCommandArgs =
+            serde_json::from_value(rewritten.clone()).map_err(|err| err.to_string())?;
         checked.input()?;
         serde_json::to_string(&rewritten).map_err(|err| err.to_string())
     }
