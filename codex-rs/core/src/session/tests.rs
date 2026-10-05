@@ -13813,9 +13813,24 @@ async fn active_turn_keeps_first_root_when_mail_coalesces(inherited_root: Option
     sess.abort_all_tasks(TurnAbortReason::Replaced).await;
 }
 
+#[test_case(GuardianContextMode::Legacy, None; "legacy")]
+#[test_case(GuardianContextMode::ThreadOwned, Some(0); "thread_owned")]
 #[tokio::test]
-async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
-    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+async fn steered_input_reopens_mailbox_delivery_for_current_turn(
+    context_mode: GuardianContextMode,
+    expected_acceptance_order: Option<u64>,
+) {
+    let (sess, tc, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            config.features.set_enabled(
+                Feature::GuardianThreadContext,
+                context_mode == GuardianContextMode::ThreadOwned,
+            ).expect("test config should allow choosing the history mode");
+        },
+    )
+    .await;
     let communication = InterAgentCommunication::new(
         AgentPath::try_from("/root/worker").expect("worker path should parse"),
         AgentPath::root(),
@@ -13854,7 +13869,7 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
         (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
         vec![
             TurnInput::UserInput {
-                acceptance_order: Some(0),
+                acceptance_order: expected_acceptance_order,
                 content: vec![UserInput::Text {
                     text: "follow up".to_string(),
                     text_elements: Vec::new(),
@@ -13866,9 +13881,24 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
     );
 }
 
+#[test_case(GuardianContextMode::Legacy, None; "legacy")]
+#[test_case(GuardianContextMode::ThreadOwned, Some(0); "thread_owned")]
 #[tokio::test]
-async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
-    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+async fn stale_defer_mailbox_delivery_does_not_override_steered_input(
+    context_mode: GuardianContextMode,
+    expected_acceptance_order: Option<u64>,
+) {
+    let (sess, tc, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            config.features.set_enabled(
+                Feature::GuardianThreadContext,
+                context_mode == GuardianContextMode::ThreadOwned,
+            ).expect("test config should allow choosing the history mode");
+        },
+    )
+    .await;
     let communication = InterAgentCommunication::new(
         AgentPath::try_from("/root/worker").expect("worker path should parse"),
         AgentPath::root(),
@@ -13911,7 +13941,7 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
         (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
         vec![
             TurnInput::UserInput {
-                acceptance_order: Some(0),
+                acceptance_order: expected_acceptance_order,
                 content: vec![UserInput::Text {
                     text: "follow up".to_string(),
                     text_elements: Vec::new(),

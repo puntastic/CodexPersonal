@@ -144,3 +144,34 @@ model use after activation remains the next evidence for real working benefit.
 The preliminary portfolio from Fae covers PowerShell, Git Bash, WSL, Nu and a
 structured native contract; Xonsh/process APIs supplied the farther-frame donor.
 No second broad literature sweep is owed unless local contact changes the design.
+
+### Baseline discrimination and user-requested mailbox repair
+
+The two mailbox assertions failed identically on the untouched
+`fff6b3c94035a3386b981dcaa63f8e3564943e78` baseline (run
+`da1c2c97-3623-42d2-9377-fe6dfe21aaf9`, `baseline-mailbox.junit.xml`). After
+restoring the candidate,346 focused shell, execution, and scenario tests passed
+in62.098s (run `4d99c62e-80ea-4cf1-9158-91d672ea36ec`,
+`focused-final-preformat.junit.xml`).
+
+Kestrel then explicitly requested repair of the mailbox failures. Source
+inspection showed stale test assumptions: `reserve_user_input_order` deliberately
+returns `None` in Legacy mode, whereas ThreadOwned mode reserves a sequence.
+The fixtures used default Legacy sessions but asserted `Some(0)`. Both tests now
+select and exercise both modes, preserving exact user-input-before-mail delivery
+assertions. This is a test repair, not a production messaging repair or a change
+to live Guardian settings. All40 related mailbox, input-queue, turn-input and
+retained-order checks passed without the initial fixture-construction warnings
+(run `6cdc10ce-c79c-47fb-8f73-5db2da4b3b25`). The started linter was interrupted
+when this new scope arrived and will be rerun after the repair's tests.
+
+### Public-facing home
+
+GitHub readback confirms `puntastic/CodexPersonal` is public; the earlier spoken
+private-fork assumption was wrong. Kestrel authorized setup and user-space Git
+for the separate public `puntastic/agent-toolbench` repository. Its purpose is
+human-readable experiments, relevant fixes, runnable checks and bounded results.
+Show and Tell is the intended announcement venue; no upstream contribution is
+requested. Repository preparation/publication and posting an announcement are
+separate actions. Preserve raw local records locally and publish selected,
+sanitized evidence rather than whole transcripts or workstation state.
