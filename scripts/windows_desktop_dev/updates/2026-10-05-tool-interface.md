@@ -66,6 +66,21 @@ The actual current nextest report was written under THIS worktree's
 some missing-binary diagnostics point at the older shared target. Resolve that
 test-environment split before treating every failure as a runtime defect.
 
+Resume correction: `cargo metadata` and the generated test executable confirm
+that the shared target was used correctly. Nextest's report store is rooted in
+the current worktree independently of Cargo's target directory. This is not a
+split build. The initial run lacked separately built `test_stdio_server`,
+`codex-code-mode-host`, `codex`, and Windows sandbox helpers. Twelve snapshots
+include both intended schema-hash changes and failed helper launches; they must
+be regenerated after prerequisites are built, not accepted wholesale. Two
+mailbox assertions concern unchanged source and still need a baseline check.
+
+Additional unrun regression cases now cover literal arguments plus nonzero
+exit/stderr, direct-program PTY input and completion, and the native Windows
+Bash dispatch scar. Fixtures are synthetic; no live model or Desktop session
+is involved. `just --command` requires an explicit working directory here;
+unlike a recipe, it does not apply the justfile's recipe working-directory.
+
 The portable Nu0.116.1 probe and stream files are under the same Artifact Staging
 root. `baseline-probe-05/report.json` records48 deterministic observations:
 direct, current-Codex-equivalent PowerShell UTF-8, scoped-literal Bash and Nu each
