@@ -182,3 +182,34 @@ Show and Tell is the intended announcement venue; no upstream contribution is
 requested. Repository preparation/publication and posting an announcement are
 separate actions. Preserve raw local records locally and publish selected,
 sanitized evidence rather than whole transcripts or workstation state.
+
+### Final package and public handoff
+
+Scoped `just fix -p codex-core -p codex-shell-command` completed successfully,
+followed by `just fmt`. No Rust tests were rerun after that final formatting
+step, in accordance with this repository's instructions. The canonical
+`dev-small` package built successfully from clean checkpoint
+`af45068bd4299f481fbd77f60131b2b2d8d5641c`, with stable source provenance:
+`codex-rs/target/desktop-dev/packages/af45068bd429-dev-small-20261005-131638725-017b3e70025f`.
+Its executable SHA256 is
+`543441200cc333639486dce09fa1f6926584fdf9ff2aeeb04c4e834c132cdde0`.
+
+The public v2 transport runner exercised that final package in 48 observations,
+again yielding 8/8 for direct, PowerShell UTF-8, scoped-literal Bash and Nu,
+and 7/8 for the two declared controls. The runner's start/end source hashes
+matched. This is isolated native-RPC package qualification, not another Rust
+test-suite run, model performance comparison, or live Desktop activation.
+
+The public home is now `https://github.com/puntastic/agent-toolbench`, main
+`0192c188ed4413922a55314846bafc0c0a9e77ca`, tree
+`74d85b033afd86408c19365b088f15ee10227d94`. It contains the two repair patches,
+original byte-bound harness, usable public runner, selected result projections,
+source boundaries, human-oriented reader routes and an unposted Show and Tell
+draft. All 17 portable repository tests passed locally and on GitHub's Linux
+runner; Actions run37319512704 succeeded. Patch application checks passed
+against the named clean baseline. No announcement or upstream PR was made.
+
+No Deploy action, live selector change, global shell/PATH change or Codex
+restart was performed. The tested package is ready for a separately announced
+activation when Kestrel is ready; verify exposed tool schema and ordinary use
+after restart. The prior selected release remains the rollback baseline.
