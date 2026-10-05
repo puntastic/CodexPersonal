@@ -1,7 +1,7 @@
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::Shell;
 use crate::shell::ShellType;
-use crate::shell::get_shell_by_model_provided_path;
+use crate::shell::get_shell;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -9,16 +9,20 @@ use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::PostToolUsePayload;
 use codex_exec_server::Environment;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_shell_command::shell_detect::detect_shell_type;
 use codex_tools::UnifiedExecShellMode;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(test)]
 use crate::tools::handlers::parse_arguments;
 
 mod exec_command;
+mod command_input;
 mod write_stdin;
+
+use command_input::CommandInput;
 
 pub use exec_command::ExecCommandHandler;
 pub(crate) use exec_command::ExecCommandHandlerOptions;
@@ -26,7 +30,10 @@ pub use write_stdin::WriteStdinHandler;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExecCommandArgs {
-    pub(crate) cmd: String,
+    #[serde(default)]
+    pub(crate) cmd: Option<String>,
+    #[serde(default)]
+    argv: Option<Vec<String>>,
     #[serde(default)]
     shell: Option<String>,
     #[serde(default)]
@@ -74,7 +81,7 @@ fn default_tty() -> bool {
 #[derive(Debug)]
 pub(crate) struct ResolvedCommand {
     pub(crate) command: Vec<String>,
-    pub(crate) shell_type: ShellType,
+    pub(crate) shell_type: Option<ShellType>,
 }
 
 fn post_unified_exec_tool_use_payload(
@@ -102,6 +109,18 @@ pub(crate) fn get_command(
     shell_mode: &UnifiedExecShellMode,
     allow_login_shell: bool,
 ) -> Result<ResolvedCommand, String> {
+    let script = match args.input()? {
+        CommandInput::Argv(argv) => {
+            if !matches!(shell_mode, UnifiedExecShellMode::Direct) {
+                return Err("direct argv is unavailable with zsh-fork; use cmd for that execution mode".to_string());
+            }
+            return Ok(ResolvedCommand {
+                command: argv.to_vec(),
+                shell_type: None,
+            });
+        }
+        CommandInput::Script(script) => script,
+    };
     let use_login_shell = match args.login {
         Some(true) if !allow_login_shell => {
             return Err(
@@ -117,11 +136,19 @@ pub(crate) fn get_command(
             let model_shell = args
                 .shell
                 .as_ref()
-                .map(|shell_str| get_shell_by_model_provided_path(&PathBuf::from(shell_str)));
+                .map(|shell_str| {
+                    let shell_type = detect_shell_type(Path::new(shell_str)).ok_or_else(|| {
+                        "unsupported requested shell type; supported types are bash, zsh, sh, powershell and cmd".to_string()
+                    })?;
+                    get_shell(shell_type).ok_or_else(|| {
+                        format!("requested {} shell is unavailable; no command was executed", shell_type.name())
+                    })
+                })
+                .transpose()?;
             let shell = model_shell.as_ref().unwrap_or(session_shell.as_ref());
             Ok(ResolvedCommand {
-                command: shell.derive_exec_args(&args.cmd, use_login_shell),
-                shell_type: shell.shell_type,
+                command: shell.derive_exec_args(script, use_login_shell),
+                shell_type: Some(shell.shell_type),
             })
         }
         UnifiedExecShellMode::ZshFork(zsh_fork_config) => {
@@ -135,9 +162,9 @@ pub(crate) fn get_command(
                 command: vec![
                     zsh_fork_config.shell_zsh_path.to_string_lossy().to_string(),
                     if use_login_shell { "-lc" } else { "-c" }.to_string(),
-                    args.cmd.clone(),
+                    script.to_string(),
                 ],
-                shell_type: ShellType::Zsh,
+                shell_type: Some(ShellType::Zsh),
             })
         }
     }

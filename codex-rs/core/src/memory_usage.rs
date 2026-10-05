@@ -45,7 +45,7 @@ pub(crate) fn shell_script_for_invocation(invocation: &ToolInvocation) -> Option
     match invocation.tool_name.name.as_str() {
         "exec_command" => serde_json::from_str::<ExecCommandArgs>(arguments)
             .ok()
-            .map(|params| params.cmd),
+            .and_then(|params| params.command_for_inspection().ok()),
         _ => None,
     }
 }

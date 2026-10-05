@@ -76,21 +76,19 @@ fn test_get_command_respects_explicit_bash_shell() -> anyhow::Result<()> {
 
     assert_eq!(args.shell.as_deref(), Some("/bin/bash"));
 
-    let resolved = get_command(
+    let result = get_command(
         &args,
         Arc::new(default_user_shell()),
         &UnifiedExecShellMode::Direct,
         /*allow_login_shell*/ true,
-    )
-    .map_err(anyhow::Error::msg)?;
-    let command = resolved.command;
-
-    assert_eq!(command.last(), Some(&"echo hello".to_string()));
-    if command
-        .iter()
-        .any(|arg| arg.eq_ignore_ascii_case("-Command"))
-    {
-        assert!(command.contains(&"-NoProfile".to_string()));
+    );
+    match get_shell(ShellType::Bash) {
+        Some(expected) => {
+            let resolved = result.map_err(anyhow::Error::msg)?;
+            assert_eq!(resolved.shell_type, Some(ShellType::Bash));
+            assert_eq!(resolved.command, expected.derive_exec_args("echo hello", /*use_login_shell*/ true));
+        }
+        None => assert_eq!(result.unwrap_err(), "requested bash shell is unavailable; no command was executed"),
     }
     Ok(())
 }
@@ -117,24 +115,25 @@ fn test_get_command_resolves_powershell_by_type() -> anyhow::Result<()> {
         Some(powershell_path.to_string_lossy().as_ref())
     );
 
-    let resolved = get_command(
+    let result = get_command(
         &args,
         Arc::new(default_user_shell()),
         &UnifiedExecShellMode::Direct,
         /*allow_login_shell*/ true,
-    )
-    .map_err(anyhow::Error::msg)?;
-    let expected_shell = get_shell(ShellType::PowerShell)
-        .unwrap_or_else(|| codex_shell_command::shell_detect::ultimate_fallback_shell().into());
-    assert_eq!(
-        resolved.command,
-        expected_shell.derive_exec_args("echo hello", /*use_login_shell*/ true)
     );
-    assert_eq!(resolved.shell_type, expected_shell.shell_type);
+    match get_shell(ShellType::PowerShell) {
+        Some(expected_shell) => {
+            let resolved = result.map_err(anyhow::Error::msg)?;
+            assert_eq!(resolved.command, expected_shell.derive_exec_args("echo hello", /*use_login_shell*/ true));
+            assert_eq!(resolved.shell_type, Some(expected_shell.shell_type));
+        }
+        None => assert_eq!(result.unwrap_err(), "requested powershell shell is unavailable; no command was executed"),
+    }
     Ok(())
 }
 
 #[test]
+#[cfg(windows)]
 fn test_get_command_respects_explicit_cmd_shell() -> anyhow::Result<()> {
     let json = r#"{"cmd": "echo hello", "shell": "cmd"}"#;
 
@@ -152,6 +151,14 @@ fn test_get_command_respects_explicit_cmd_shell() -> anyhow::Result<()> {
     let command = resolved.command;
 
     assert_eq!(command[2], "echo hello");
+    Ok(())
+}
+
+#[test]
+fn requested_unknown_shell_is_not_reinterpreted_by_default_shell() -> anyhow::Result<()> {
+    let args: ExecCommandArgs = parse_arguments(r#"{"cmd":"echo never-run","shell":"unsupported-shell"}"#)?;
+    let result = get_command(&args, Arc::new(default_user_shell()), &UnifiedExecShellMode::Direct, /*allow_login_shell*/ false);
+    assert_eq!(result.unwrap_err(), "unsupported requested shell type; supported types are bash, zsh, sh, powershell and cmd");
     Ok(())
 }
 

@@ -210,6 +210,7 @@ mod truncation;
 mod turn_input_submission;
 mod turn_state;
 mod unified_exec;
+mod unified_exec_argv;
 mod unified_exec_process_events;
 mod unified_exec_stdin_approval;
 mod unified_exec_stdin_review_size;

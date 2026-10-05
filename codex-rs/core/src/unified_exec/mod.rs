@@ -113,7 +113,7 @@ impl UnifiedExecContext {
 #[derive(Debug)]
 pub(crate) struct ExecCommandRequest {
     pub command: Vec<String>,
-    pub shell_type: ShellType,
+    pub shell_type: Option<ShellType>,
     pub hook_command: String,
     pub process_id: i32,
     pub yield_time_ms: u64,

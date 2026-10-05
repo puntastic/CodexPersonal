@@ -226,10 +226,26 @@ fn get_zsh_shell() -> Option<DetectedShell> {
     })
 }
 
+#[cfg(not(windows))]
 const BASH_FALLBACK_PATHS: &[&str] = &["/bin/bash", "/usr/bin/bash"];
+#[cfg(windows)]
+const BASH_FALLBACK_PATHS: &[&str] = &[
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+];
 
 fn get_bash_shell() -> Option<DetectedShell> {
     let shell_path = get_shell_path(ShellType::Bash, "bash", BASH_FALLBACK_PATHS);
+    // A trusted PATH entry for Git can locate a non-default Git for Windows
+    // installation without accepting an executable path supplied by the model.
+    #[cfg(windows)]
+    let shell_path = shell_path.or_else(|| {
+        let git = which::which("git").ok()?;
+        let root = git.parent()?.parent()?;
+        [root.join("bin/bash.exe"), root.join("usr/bin/bash.exe")]
+            .into_iter()
+            .find_map(|path| file_exists(&path))
+    });
 
     shell_path.map(|shell_path| DetectedShell {
         shell_type: ShellType::Bash,

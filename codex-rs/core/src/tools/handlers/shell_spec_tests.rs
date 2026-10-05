@@ -38,7 +38,13 @@ fn exec_command_tool_matches_expected_spec() {
     let mut properties = BTreeMap::from([
         (
             "cmd".to_string(),
-            JsonSchema::string(Some("Shell command to execute.".to_string())),
+            JsonSchema::string(Some("Shell script to execute, including pipelines or shell builtins. Use exactly one of cmd or argv.".to_string())),
+        ),
+        (
+            "argv".to_string(),
+            JsonSchema::array(JsonSchema::string(/*description*/ None), Some(
+                "Direct executable and separate arguments, without shell expansion or manual quoting. Use for native programs such as git, rg, python or node. Arbitrary interpreters may be invoked explicitly. Use exactly one of argv or cmd; shell/login:true apply only to cmd. Windows batch files need an explicit cmd.exe invocation.".to_string(),
+            )),
         ),
         (
             "workdir".to_string(),
@@ -50,7 +56,7 @@ fn exec_command_tool_matches_expected_spec() {
         (
             "shell".to_string(),
             JsonSchema::string(Some(
-                    "Shell binary to launch. Defaults to the user's default shell.".to_string(),
+                    "Shell family to use (bash, zsh, sh, powershell or cmd). A path selects its family; the executable is discovered by the host, not taken from that path. Unavailable requests fail without running. Omit for the user's default shell.".to_string(),
                 )),
         ),
         (
@@ -90,7 +96,7 @@ fn exec_command_tool_matches_expected_spec() {
             defer_loading: None,
             parameters: JsonSchema::object(
                 properties,
-                Some(vec!["cmd".to_string()]),
+                None,
                 Some(false.into())
             ),
             output_schema: Some(unified_exec_output_schema().into()),

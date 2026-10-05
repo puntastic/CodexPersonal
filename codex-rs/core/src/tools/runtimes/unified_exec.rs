@@ -69,7 +69,7 @@ const REMOTE_NETWORK_POLICY_DECISION_MARGIN: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug)]
 pub struct UnifiedExecRequest {
     pub command: Vec<String>,
-    pub shell_type: ShellType,
+    pub shell_type: Option<ShellType>,
     pub hook_command: String,
     pub process_id: i32,
     pub cwd: PathUri,
@@ -293,6 +293,11 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                 .network
                 .as_ref()
                 .is_some_and(crate::config::NetworkProxySpec::credential_broker_enabled);
+        if req.shell_type.is_none() && credential_broker_available {
+            return Err(ToolError::Rejected(
+                "direct argv is not yet supported with credential brokerage; use cmd".to_string(),
+            ));
+        }
         if credential_broker_available
             && managed_network.is_some()
             && matches!(self.shell_mode, UnifiedExecShellMode::ZshFork(_))
@@ -301,20 +306,22 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                 "credential brokerage does not yet support shell_zsh_fork; disable shell_zsh_fork to use the broker".to_string(),
             ));
         }
-        let requested_shell = (credential_broker_available
-            && (req.shell_type != environment_shell.shell_type
-                || base_command.first().is_some_and(|path| {
-                    path != environment_shell.shell_path.to_string_lossy().as_ref()
-                })))
-        .then(|| {
-            base_command.first().map(|path| crate::shell::Shell {
-                shell_type: req.shell_type,
-                shell_path: PathBuf::from(path),
+        let requested_shell = req.shell_type.and_then(|shell_type| {
+            (credential_broker_available
+                && (shell_type != environment_shell.shell_type
+                    || base_command.first().is_some_and(|path| {
+                        path != environment_shell.shell_path.to_string_lossy().as_ref()
+                    })))
+            .then(|| {
+                base_command.first().map(|path| crate::shell::Shell {
+                    shell_type,
+                    shell_path: PathBuf::from(path),
+                })
             })
-        })
-        .flatten();
+            .flatten()
+        });
         let shell = requested_shell.as_ref().unwrap_or(environment_shell);
-        let shell_snapshot = if environment_is_remote
+        let shell_snapshot = if req.shell_type.is_none() || environment_is_remote
             || credential_broker_available
                 && launch_sandbox_permissions.requires_escalated_permissions()
         {
@@ -569,12 +576,12 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         }
         let command = prepare_powershell_command_for_elevated_windows_sandbox(
             &command,
-            Some(&req.shell_type),
+            req.shell_type.as_ref(),
             attempt.sandbox_requested,
             attempt.windows_sandbox_level,
             environment_is_remote,
         );
-        let command = if matches!(req.shell_type, ShellType::PowerShell) {
+        let command = if matches!(req.shell_type, Some(ShellType::PowerShell)) {
             prefix_powershell_script_with_utf8(&command)
         } else {
             command
@@ -840,7 +847,7 @@ mod tests {
         let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
         let request = UnifiedExecRequest {
             command: vec!["pwd".to_string()],
-            shell_type: ShellType::Sh,
+            shell_type: Some(ShellType::Sh),
             hook_command: "pwd".to_string(),
             process_id: 1000,
             cwd: cwd.into(),
@@ -943,7 +950,7 @@ mod tests {
             .expect("current dir is absolute");
         UnifiedExecRequest {
             command: vec!["zsh".to_string(), "-c".to_string(), "echo hi".to_string()],
-            shell_type: ShellType::Zsh,
+            shell_type: Some(ShellType::Zsh),
             hook_command: "echo hi".to_string(),
             process_id: 1000,
             cwd: cwd.clone().into(),
