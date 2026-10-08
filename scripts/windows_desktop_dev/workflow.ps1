@@ -174,6 +174,7 @@ CodexPersonal Windows Desktop lane
 Setup installs missing formatter and Bazel helpers into the ignored local tool cache.
 Build defaults to a fresh, ignored package directory, records its hashes and
 source provenance, and advances only this task's last-stable package pointer.
+Build does not support -WhatIf and refuses it before starting any build work.
 Deploy stages an immutable copy and transactionally aligns the User-scope
 CODEX_CLI_PATH next-launch selector, its existing config mirror, and deployment
 state while recording the prior entrypoint and selected build.
@@ -216,6 +217,9 @@ Rollback selects that prior entrypoint; it does not delete packages or data.
             Invoke-CodexDevNative -FilePath $environment.Just -ArgumentList $JustArguments
         }
         "Build" {
+            if ($WhatIf) {
+                throw "Build does not support -WhatIf; no build or package changes were started. Omit -WhatIf only when you intend to build."
+            }
             $parameters = @{
                 CargoProfile = $CargoProfile
                 PackageDirectory = $PackageDirectory

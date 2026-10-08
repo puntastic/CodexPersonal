@@ -102,6 +102,59 @@ $testRoot = Join-Path $tempBase ("codex-desktop-dev-tests-" + [guid]::NewGuid().
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
 try {
+    $realBuild = (Get-Command Invoke-CodexDevBuild).ScriptBlock
+    $script:SelfTestBuildCalls = 0
+    try {
+        function Invoke-CodexDevBuild {
+            param(
+                [string]$CargoProfile,
+                [string]$PackageDirectory,
+                [string]$CargoPath,
+                [string]$CargoHome,
+                [string]$RustupHome,
+                [string]$PythonPath,
+                [string]$RipgrepPath,
+                [string]$RemoteControlAppServerVersion
+            )
+
+            $script:SelfTestBuildCalls++
+            return [pscustomobject]@{
+                Status = "mock_build"
+                CargoProfile = $CargoProfile
+                PackageDirectory = $PackageDirectory
+            }
+        }
+
+        $buildPreviewError = $null
+        try {
+            Invoke-CodexDesktopDev -Action Build -WhatIf -Json
+        } catch {
+            $buildPreviewError = $_.Exception.Message
+        }
+        Assert-CodexDevEqual `
+            "Build does not support -WhatIf; no build or package changes were started. Omit -WhatIf only when you intend to build." `
+            $buildPreviewError `
+            "Build -WhatIf did not explicitly refuse the unsupported preview."
+        Assert-CodexDevEqual 0 $script:SelfTestBuildCalls "Build -WhatIf invoked the build implementation."
+
+        $buildParameters = @{
+            Action = "Build"
+            CargoProfile = "dev-small"
+            PackageDirectory = Join-Path $testRoot "unused-build-output"
+            Json = $true
+        }
+        $buildResult = Invoke-CodexDesktopDev @buildParameters | ConvertFrom-Json
+        Assert-CodexDevEqual 1 $script:SelfTestBuildCalls "Build without -WhatIf did not invoke the build implementation once."
+        Assert-CodexDevEqual "mock_build" $buildResult.Status "Build did not return the build implementation's result."
+        Assert-CodexDevEqual $buildParameters.CargoProfile $buildResult.CargoProfile "Build did not forward the selected Cargo profile."
+        Assert-CodexDevEqual $buildParameters.PackageDirectory $buildResult.PackageDirectory "Build did not forward the selected package directory."
+
+        $null = Invoke-CodexDesktopDev @buildParameters -WhatIf:$false
+        Assert-CodexDevEqual 2 $script:SelfTestBuildCalls "Build with -WhatIf:`$false did not invoke the build implementation once."
+    } finally {
+        Set-Item -LiteralPath Function:\Invoke-CodexDevBuild -Value $realBuild
+    }
+
     $capturedLines = @(Invoke-CodexDevNative -FilePath $env:ComSpec -ArgumentList @(
         "/d", "/s", "/c", "echo capture-one&echo capture-two"
     ) -WorkingDirectory $testRoot -Capture)

@@ -86,6 +86,9 @@ ordinary Rust recipes unsandboxed.
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.157.1
 ```
 
+Build has no preview mode: `-Action Build -WhatIf` fails before toolchain setup,
+compilation, or package changes. Omit `-WhatIf` only when you intend to build.
+
 `dev-small` is the normal iteration profile. `release` is available when the
 optimization shape matters. Both use a locked native-host Cargo build to share
 the existing target cache, then pass the resulting group through the canonical
@@ -223,6 +226,7 @@ feature's tested migration/recovery path.
 The self-test uses disposable packages, config, and deployment state under the
 system temporary directory. It exercises tool resolution and MSVC host
 selection, config preservation, provenance, task-scoped pointers, all packaged
-executable targets, WhatIf, selector/config/state transaction fault recovery,
+executable targets, Build preview refusal without invoking the builder, deployment
+WhatIf, selector/config/state transaction fault recovery,
 two deployments, and rollback. Its persistent-selector adapter is in-memory and
 the tests assert that the real User-scope `CODEX_CLI_PATH` is unchanged.
