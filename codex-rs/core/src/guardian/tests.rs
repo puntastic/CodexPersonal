@@ -263,6 +263,7 @@ fn guardian_requests_map_to_exact_model_policy_scopes() {
         (
             GuardianApprovalRequest::ApplyPatch {
                 id: "patch".to_string(),
+                environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                 cwd: cwd.clone().into(),
                 files: vec![cwd.join("README.md").into()],
                 patch: "*** Begin Patch\n*** End Patch".to_string(),
@@ -317,6 +318,7 @@ fn guardian_requests_map_to_exact_model_policy_scopes() {
         (
             GuardianApprovalRequest::RequestPermissions {
                 id: "permissions".to_string(),
+                environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                 turn_id: "turn".to_string(),
                 reason: None,
                 permissions: Default::default(),

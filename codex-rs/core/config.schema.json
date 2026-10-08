@@ -1980,7 +1980,7 @@
           "type": "number"
         },
         "thread_context": {
-          "description": "Deprecated and ignored; thread-owned Guardian context is always enabled.",
+          "description": "Opt into thread-owned Guardian context; disabled by default in the personal fork.",
           "type": "boolean"
         },
         "transcript": {

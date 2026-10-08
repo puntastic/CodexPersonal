@@ -11812,7 +11812,6 @@ shell_tool = false
 }
 
 #[test_case::test_case(Feature::Personality; "personality")]
-#[test_case::test_case(Feature::GuardianThreadContext; "guardian thread context")]
 fn retired_feature_requirements_do_not_pin_configured_values(
     feature: Feature,
 ) -> std::io::Result<()> {
@@ -11856,14 +11855,58 @@ fn retired_feature_requirements_do_not_pin_configured_values(
                 features.enabled(Feature::ShellTool),
                 warnings.len(),
             ),
-            (
-                Features::with_defaults().enabled(feature),
-                false,
-                usize::from(feature == Feature::GuardianThreadContext),
-            ),
+            (Features::with_defaults().enabled(feature), false, 0,),
         );
     }
 
+    Ok(())
+}
+
+#[test_case::test_case(true, false; "managed_off")]
+#[test_case::test_case(false, true; "managed_on")]
+fn guardian_context_requirements_pin_configuration_and_later_mutations(
+    configured: bool,
+    required: bool,
+) -> std::io::Result<()> {
+    let feature = Feature::GuardianThreadContext;
+    let key = feature.key();
+    let cfg: ConfigToml =
+        toml::from_str(&format!("[features]\n\"{key}\" = {configured}\n")).expect("valid config");
+    let requirement = Sourced::new(
+        FeatureRequirementsToml {
+            entries: BTreeMap::from([(key.to_string(), required)]),
+        },
+        RequirementSource::EnterpriseManaged {
+            id: "enterprise-id".to_string(),
+            name: "enterprise".to_string(),
+        },
+    );
+    // Raw edits that contradict a managed pin are rejected, while the effective
+    // runtime feature set below is normalized to that pin.
+    assert!(validate_feature_requirements_for_config_toml(&cfg, Some(&requirement)).is_err());
+    let configured_features = Features::from_sources(
+        FeatureConfigSource {
+            features: cfg.features.as_ref(),
+            ..Default::default()
+        },
+        FeatureConfigSource::default(),
+        FeatureOverrides::default(),
+    );
+    assert_eq!(configured_features.enabled(feature), configured);
+    let mut warnings = Vec::new();
+    let mut features = ManagedFeatures::from_configured_with_warnings(
+        configured_features,
+        Some(requirement),
+        &mut warnings,
+    )?;
+    assert_eq!(
+        (features.enabled(feature), warnings),
+        (required, Vec::new())
+    );
+    features
+        .set_enabled(feature, !required)
+        .expect("runtime updates should retain the managed feature pin");
+    assert_eq!(features.enabled(feature), required);
     Ok(())
 }
 

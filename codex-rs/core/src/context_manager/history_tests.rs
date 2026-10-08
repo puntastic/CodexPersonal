@@ -212,6 +212,41 @@ fn conversation_history_snapshot_shares_response_items_until_history_changes() {
     );
 }
 
+#[test_case(GuardianContextMode::Legacy; "legacy")]
+#[test_case(GuardianContextMode::Independent; "independent")]
+fn review_checkpoints_preserve_captured_and_replayed_source_envelopes(mode: GuardianContextMode) {
+    let mut message = retained_user_message_for_rollback_test("Do not publish.");
+    message.set_id(Some(ResponseItemId::with_suffix("msg", "original-source")));
+    let mut originals = vec![ResponseItemEnvelope {
+        item: message,
+        metadata: Some(CodexHarnessMetadata {
+            user_input_order: Some(0),
+            ..Default::default()
+        }),
+    }];
+    let mut history = ContextManager::with_guardian_context_mode(mode, &SessionSource::Cli);
+    history.record_annotated_items(&mut originals, TruncationPolicy::Tokens(10_000));
+    assert!(
+        originals[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.retained_source.as_ref())
+            .is_some()
+    );
+    assert_eq!(
+        history.guardian_history_checkpoint(),
+        Some(GuardianHistoryCheckpoint(originals.clone()))
+    );
+
+    let mut resumed = ContextManager::with_guardian_context_mode(mode, &SessionSource::Cli);
+    resumed.replay_annotated_item(&originals[0], TruncationPolicy::Tokens(10_000));
+    assert_eq!(resumed.annotated_items(), originals.as_slice());
+    assert_eq!(
+        resumed.guardian_history_checkpoint(),
+        Some(GuardianHistoryCheckpoint(originals))
+    );
+}
+
 #[test_case(None; "missing hash")]
 #[test_case(Some(""); "empty hash")]
 #[test_case(Some("other-producer"); "incompatible hash")]
@@ -443,8 +478,10 @@ fn plaintext_checkpoint_without_backup_preserves_root_instructions(
     );
 }
 
-#[test]
-fn legacy_checkpoint_rollback_keeps_answers_before_a_same_turn_steer() {
+#[test_case(GuardianContextMode::Legacy; "legacy")]
+#[test_case(GuardianContextMode::ThreadOwned; "thread_owned")]
+#[test_case(GuardianContextMode::Independent; "independent")]
+fn legacy_checkpoint_rollback_keeps_answers_before_a_same_turn_steer(mode: GuardianContextMode) {
     let mut checkpoint: codex_history::CompactedItem = serde_json::from_value(serde_json::json!({
         "message": "Legacy checkpoint without accepted-input metadata.",
         "replacement_history": [
@@ -472,7 +509,7 @@ fn legacy_checkpoint_rollback_keeps_answers_before_a_same_turn_steer() {
         .verified_answers()
         .cloned()
         .collect::<Vec<_>>();
-    let mut history = root_history();
+    let mut history = ContextManager::with_guardian_context_mode(mode, &SessionSource::Cli);
     history.replace_annotated(checkpoint.replacement_history.take().unwrap());
     history.restore_review_context(
         checkpoint.retained_context.as_ref(),
@@ -491,7 +528,104 @@ fn legacy_checkpoint_rollback_keeps_answers_before_a_same_turn_steer() {
                 .collect::<Vec<_>>(),
             expected[..remaining],
         );
+        assert!(!history.retained_context().user_messages_complete());
     }
+}
+
+#[test_case(GuardianContextMode::Legacy, Some(1); "legacy_ordered")]
+#[test_case(GuardianContextMode::ThreadOwned, Some(1); "thread_owned_ordered")]
+#[test_case(GuardianContextMode::Independent, Some(1); "independent_ordered")]
+#[test_case(GuardianContextMode::Legacy, None; "legacy_uncorrelated")]
+#[test_case(GuardianContextMode::ThreadOwned, None; "thread_owned_uncorrelated")]
+#[test_case(GuardianContextMode::Independent, None; "independent_uncorrelated")]
+fn native_agent_boundary_rolls_back_confirmed_evidence_by_acceptance_order(
+    mode: GuardianContextMode,
+    boundary_order: Option<u64>,
+) {
+    let mut history = ContextManager::with_guardian_context_mode(mode, &SessionSource::Cli);
+    let mut messages = Vec::new();
+    let mut answers = Vec::new();
+    for order in [0, 2] {
+        if order == 2 {
+            history.record_annotated_items(
+                &mut [ResponseItemEnvelope {
+                    item: ResponseItem::AgentMessage {
+                        id: Some(ResponseItemId::with_suffix("msg", "agent-boundary")),
+                        author: "/root/worker".to_owned(),
+                        recipient: "/root".to_owned(),
+                        content: Vec::new(),
+                        internal_chat_message_metadata_passthrough: None,
+                    },
+                    metadata: Some(CodexHarnessMetadata {
+                        user_input_order: boundary_order,
+                        ..Default::default()
+                    }),
+                }],
+                TruncationPolicy::Tokens(10_000),
+            );
+        }
+        // Nested Code Mode sends are confirmed events, not top-level source calls.
+        let message = codex_history::RetainedUserMessage {
+            turn_id: "shared-turn".to_owned(),
+            message_id: Some(format!("nested-send-{order}")),
+            text: format!("Confirmed delivery {order}"),
+            complete: true,
+            origin: codex_history::UserInputOrigin::User,
+            phase: None,
+        };
+        history.record_retained_context(&RetainedContextEvent::DeliveredAssistantMessage {
+            message: message.clone(),
+            acceptance_order: order,
+        });
+        messages.push(message);
+        let answer = codex_history::VerifiedAnswer {
+            turn_id: "shared-turn".to_owned(),
+            call_id: format!("ask-{order}"),
+            questions: vec![codex_history::VerifiedQuestionAnswer {
+                question: "Publish?".to_owned(),
+                answer: format!("Answer {order}"),
+            }],
+        };
+        history.record_retained_context(&RetainedContextEvent::VerifiedAnswer {
+            answer: answer.clone(),
+            acceptance_order: Some(order),
+        });
+        answers.push(answer);
+    }
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    let remaining = usize::from(boundary_order.is_some());
+    assert_eq!(
+        history
+            .retained_context()
+            .ordered_entries()
+            .filter_map(|(_, entry)| match entry {
+                RetainedContextEntry::AssistantMessage(message) => Some(message.clone()),
+                RetainedContextEntry::UserMessage(_) | RetainedContextEntry::VerifiedAnswer(_) =>
+                    None,
+            })
+            .collect::<Vec<_>>(),
+        messages[..remaining]
+    );
+    assert_eq!(
+        history
+            .retained_context()
+            .verified_answers()
+            .cloned()
+            .collect::<Vec<_>>(),
+        answers[..remaining]
+    );
+    assert!(
+        !history
+            .retained_context()
+            .ordered_entries()
+            .any(|(_, entry)| { matches!(entry, RetainedContextEntry::UserMessage(_)) })
+    );
+    assert_eq!(
+        history.retained_context().verified_answers_complete(),
+        boundary_order.is_some()
+    );
 }
 
 #[test]

@@ -145,10 +145,27 @@ async fn finalization_overflow_marks_the_reviewer_exhausted() {
 
 #[tokio::test]
 async fn compacted_review_restores_originals_once_and_persists_the_request_prefix() {
-    let (session, turn) = crate::session::tests::make_session_and_context().await;
-    let session = Arc::new(session);
+    let (session, turn, _events) =
+        crate::session::tests::make_session_and_context_with_auth_and_config_and_rx(
+            codex_login::CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            |config| {
+                config
+                    .features
+                    .set_enabled(Feature::GuardianThreadContext, /*enabled*/ true)
+                    .expect("test config should allow retained Guardian context");
+                config
+                    .features
+                    .set_enabled(
+                        Feature::GuardianReuseParentCompaction,
+                        /*enabled*/ true,
+                    )
+                    .expect("test config should allow thread-owned Guardian context");
+            },
+        )
+        .await;
     let step = session
-        .capture_step_context(Arc::new(turn), &tokio_util::sync::CancellationToken::new())
+        .capture_step_context(turn, &tokio_util::sync::CancellationToken::new())
         .await
         .unwrap();
     session

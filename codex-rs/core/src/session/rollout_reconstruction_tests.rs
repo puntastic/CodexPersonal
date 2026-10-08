@@ -5,6 +5,7 @@ use super::tests::make_session_and_context;
 use super::tests::raw_history_items;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
+use crate::context::GuardianContextMode;
 use codex_history::CompactedHistoryEntry;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
@@ -2543,7 +2544,9 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
         }
         GuardianContextMode::ThreadOwned => {
             features.enable(Feature::GuardianThreadContext).unwrap();
-            features.enable(Feature::GuardianReuseParentCompaction).unwrap();
+            features
+                .enable(Feature::GuardianReuseParentCompaction)
+                .unwrap();
         }
         GuardianContextMode::Independent => unreachable!("test covers legacy and parent review"),
     }
@@ -2616,7 +2619,8 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
                 assistant_message("assistant reply").into(),
             ])),
             GuardianContextMode::ThreadOwned => None,
-            GuardianContextMode::Independent => unreachable!("test covers legacy and parent review"),
+            GuardianContextMode::Independent =>
+                unreachable!("test covers legacy and parent review"),
         }
     );
 }

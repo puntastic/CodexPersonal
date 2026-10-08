@@ -1,8 +1,10 @@
 use crate::context::GuardianContextMode;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::ContextManager;
-use crate::session::tests::make_session_and_context;
+use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
+use codex_features::Feature;
 use codex_history::InitialHistory;
+use codex_login::CodexAuth;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -20,7 +22,28 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
     mode: GuardianContextMode,
     history_mode: ThreadHistoryMode,
 ) {
-    let (session, turn) = make_session_and_context().await;
+    let configure = |config: &mut crate::config::Config| {
+        config
+            .features
+            .set_enabled(
+                Feature::GuardianThreadContext,
+                mode != GuardianContextMode::Legacy,
+            )
+            .unwrap();
+        config
+            .features
+            .set_enabled(
+                Feature::GuardianReuseParentCompaction,
+                mode == GuardianContextMode::ThreadOwned,
+            )
+            .unwrap();
+    };
+    let (session, turn, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        configure,
+    )
+    .await;
     // This session has no live store. A checkpoint must still capture the complete context.
     assert!(session.live_thread().is_none());
     let instruction: ResponseItem = serde_json::from_value(json!({
@@ -35,10 +58,8 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
     let world_state = WorldStateSnapshot::from(baseline.as_object().unwrap());
     {
         let mut state = session.state.lock().await;
-        state.history = ContextManager::for_session(
-            &SessionSource::default(),
-            &crate::config::ManagedFeatures::from(codex_features::Features::with_defaults()),
-        );
+        state.history =
+            ContextManager::for_session(&SessionSource::default(), &turn.config.features);
         state
             .history
             .record_items([&instruction], turn.model_info().truncation_policy.into());
@@ -81,6 +102,10 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
         );
     }
     let expected = session.clone_history().await;
+    assert_eq!(
+        GuardianContextMode::from_history(expected.conversation_history_snapshot().as_ref()),
+        mode
+    );
     if mode == GuardianContextMode::Legacy {
         assert!(
             expected
@@ -102,16 +127,23 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
         .replace_history(Vec::new(), /*reference_context_item*/ None)
         .await;
     // Replay into a fresh session so preserved live state cannot mask missing checkpoint data.
-    let (fork, _) = make_session_and_context().await;
+    let (fork, fork_turn, _fork_rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        configure,
+    )
+    .await;
     fork.state.lock().await.session_configuration.history_mode = history_mode;
-    fork.state.lock().await.history = ContextManager::for_session(
-        &SessionSource::default(),
-        &crate::config::ManagedFeatures::from(codex_features::Features::with_defaults()),
-    );
+    fork.state.lock().await.history =
+        ContextManager::for_session(&SessionSource::default(), &fork_turn.config.features);
     fork.record_initial_history(InitialHistory::Forked(items))
         .await
         .expect("Guardian checkpoint should replay in a fresh session");
     let restored = fork.clone_history().await;
+    assert_eq!(
+        GuardianContextMode::from_history(restored.conversation_history_snapshot().as_ref()),
+        mode
+    );
     assert_eq!(restored.annotated_items(), expected.annotated_items());
     assert_eq!(restored.retained_context(), expected.retained_context());
     assert_eq!(

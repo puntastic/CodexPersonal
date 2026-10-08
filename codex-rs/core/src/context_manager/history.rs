@@ -146,6 +146,11 @@ pub(crate) enum HistoryReplacement {
     Reset,
 }
 
+enum HistoryItemRecording {
+    Original,
+    Replay,
+}
+
 impl ConversationHistorySnapshot for SharedConversationHistory {
     fn latest_compaction(&self) -> Option<codex_history::CompactionCheckpoint<'_>> {
         codex_history::CompactionCheckpoint::latest(&self.items)
@@ -379,13 +384,13 @@ impl ContextManager {
             });
         self.guardian_review_mode = if self.guardian_context_mode == GuardianContextMode::Legacy {
             GuardianContextMode::Legacy
-        } else if self.guardian_context_mode == GuardianContextMode::Independent
-        {
+        } else if self.guardian_context_mode == GuardianContextMode::Independent {
             GuardianContextMode::Independent
         } else if requires_parent_context {
             GuardianContextMode::ThreadOwned
         } else {
-            self.guardian_context_mode.for_checkpoint(&self.items, reviewer_compaction_hash)
+            self.guardian_context_mode
+                .for_checkpoint(&self.items, reviewer_compaction_hash)
         };
         self.restore_retained_context(retained_context);
         // Older retained checkpoints cleared oversized instructions. Recover their
@@ -520,7 +525,12 @@ impl ContextManager {
         I::Item: Deref<Target = ResponseItem>,
     {
         for item in items {
-            self.record_item_with_metadata(&item, /*metadata*/ None, policy);
+            self.record_item_with_metadata(
+                &item,
+                /*metadata*/ None,
+                policy,
+                HistoryItemRecording::Original,
+            );
         }
     }
 
@@ -532,9 +542,12 @@ impl ContextManager {
         policy: TruncationPolicy,
     ) {
         for envelope in items {
-            if let Some(source) =
-                self.record_item_with_metadata(&envelope.item, envelope.metadata.as_ref(), policy)
-            {
+            if let Some(source) = self.record_item_with_metadata(
+                &envelope.item,
+                envelope.metadata.as_ref(),
+                policy,
+                HistoryItemRecording::Original,
+            ) {
                 envelope.metadata.get_or_insert_default().retained_source = Some(source);
             }
         }
@@ -546,20 +559,12 @@ impl ContextManager {
         envelope: &ResponseItemEnvelope,
         policy: TruncationPolicy,
     ) {
-        let captured =
-            self.record_item_with_metadata(&envelope.item, envelope.metadata.as_ref(), policy);
-        if let Some(source) = envelope
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.retained_source.as_ref())
-            && captured.as_ref().is_some_and(|captured| {
-                captured.id == source.id && captured.complete == source.complete
-            })
-            && Arc::make_mut(&mut self.retained_context).restore_source_revision(source)
-            && let Some(recorded) = Arc::make_mut(&mut self.items).last_mut()
-        {
-            recorded.metadata.get_or_insert_default().retained_source = Some(source.clone());
-        }
+        self.record_item_with_metadata(
+            &envelope.item,
+            envelope.metadata.as_ref(),
+            policy,
+            HistoryItemRecording::Replay,
+        );
     }
 
     fn record_item_with_metadata(
@@ -567,6 +572,7 @@ impl ContextManager {
         item: &ResponseItem,
         metadata: Option<&CodexHarnessMetadata>,
         policy: TruncationPolicy,
+        recording: HistoryItemRecording,
     ) -> Option<codex_history::RetainedSource> {
         if !is_api_message(item, metadata) {
             return None;
@@ -585,23 +591,34 @@ impl ContextManager {
                 .unwrap_or_else(|| with_serialization_allowance(policy));
             truncate_function_output_payload(output, policy, estimate_audio_token_count);
         }
-        if let Some(review_history) = &mut self.review_history
-            && !is_guardian_context_message(item)
-        {
-            review_history.record(&processed);
-        }
         if let Some(metadata) = metadata
             && Arc::make_mut(&mut self.retained_context).record_sender_user_messages(metadata)
         {
             self.user_message_revision = self.user_message_revision.saturating_add(1);
         }
-        let source = self.record_retained_message(
+        let mut source = self.record_retained_message(
             item,
             metadata,
             user_authorization::RetainedMessageSource::Original,
         );
+        if matches!(recording, HistoryItemRecording::Replay)
+            && let Some(persisted) = metadata.and_then(|metadata| metadata.retained_source.as_ref())
+            && source.as_ref().is_some_and(|captured| {
+                captured.id == persisted.id && captured.complete == persisted.complete
+            })
+            && Arc::make_mut(&mut self.retained_context).restore_source_revision(persisted)
+        {
+            source = Some(persisted.clone());
+        }
         if let Some(source) = &source {
             processed.metadata.get_or_insert_default().retained_source = Some(source.clone());
+        }
+        // Review checkpoints must carry the same captured or replayed provenance as the
+        // durable original; exact-envelope references cannot match a pre-capture copy.
+        if let Some(review_history) = &mut self.review_history
+            && !is_guardian_context_message(item)
+        {
+            review_history.record(&processed);
         }
         Arc::make_mut(&mut self.items).push(processed);
         source
@@ -731,7 +748,9 @@ impl ContextManager {
         self.has_compacted_history = true;
         let promoted = self.guardian_context_mode != GuardianContextMode::Legacy
             && self.guardian_review_mode == GuardianContextMode::Legacy
-            && self.guardian_context_mode.for_checkpoint(&items, reviewer_compaction_hash)
+            && self
+                .guardian_context_mode
+                .for_checkpoint(&items, reviewer_compaction_hash)
                 == GuardianContextMode::ThreadOwned;
         if promoted {
             self.guardian_review_mode = GuardianContextMode::ThreadOwned;
@@ -829,9 +848,9 @@ impl ContextManager {
         // Without a compaction barrier, no observed boundary remains the documented no-op.
         if model_cut_idx.is_none() && review_cut_idx.is_none() {
             if has_compacted_history
-                    || snapshot
-                        .iter()
-                        .any(|item| is_compaction_barrier_item(&item.item))
+                || snapshot
+                    .iter()
+                    .any(|item| is_compaction_barrier_item(&item.item))
             {
                 self.replace_annotated(Vec::new());
                 self.reference_context_item = None;
@@ -860,17 +879,21 @@ impl ContextManager {
         }
         .map(codex_protocol::ResponseItemId::as_str)
         .map(str::to_owned);
+        // Native agent deliveries share the host acceptance counter without becoming user
+        // authorization rows. Legacy assistant-shaped instructions cannot prove that cutoff.
         let source = if review_boundary_covers_request {
             review_cut_idx.and_then(|index| {
                 let item = review_snapshot.as_ref()?.get(index)?;
-                crate::context::is_user_authorization_message(&item.item)
-                    .then(|| RetainedInputSource::from(item.metadata.as_ref()))
+                (crate::context::is_user_authorization_message(&item.item)
+                    || matches!(&item.item, ResponseItem::AgentMessage { .. }))
+                .then(|| RetainedInputSource::from(item.metadata.as_ref()))
             })
         } else if model_boundary_covers_request {
             model_cut_idx.and_then(|index| {
                 let item = &snapshot[index];
-                crate::context::is_user_authorization_message(&item.item)
-                    .then(|| RetainedInputSource::from(item.metadata.as_ref()))
+                (crate::context::is_user_authorization_message(&item.item)
+                    || matches!(&item.item, ResponseItem::AgentMessage { .. }))
+                .then(|| RetainedInputSource::from(item.metadata.as_ref()))
             })
         } else {
             None
@@ -895,9 +918,13 @@ impl ContextManager {
         // retained mode how many of the rolled-back instruction boundaries were real user
         // authorization messages. Inter-agent boundaries are deliberately not ledger rows.
         let source_window = match (&review_snapshot, review_cut_idx) {
-            (Some(items), Some(cut_idx)) if review_boundary_covers_request => {
-                Some((items.iter().map(|envelope| &envelope.item).collect::<Vec<_>>(), cut_idx))
-            }
+            (Some(items), Some(cut_idx)) if review_boundary_covers_request => Some((
+                items
+                    .iter()
+                    .map(|envelope| &envelope.item)
+                    .collect::<Vec<_>>(),
+                cut_idx,
+            )),
             (Some(_), _) => None,
             (None, _) if model_boundary_covers_request => model_cut_idx.map(|cut_idx| {
                 (
@@ -933,7 +960,21 @@ impl ContextManager {
                             .as_ref()
                             .map(|(items, cut_idx)| (items.as_slice(), *cut_idx)),
                     ),
-                    Some(count) => retained_context.rollback_latest_user_messages(count),
+                    Some(count) if retained_context.user_messages_complete() => {
+                        retained_context.rollback_latest_user_messages(count);
+                    }
+                    Some(_) => {
+                        // A legacy checkpoint can retain exact answer sources without a
+                        // complete instruction ledger. Keep only source-correlated answers;
+                        // do not infer message ordering from a shared turn ID.
+                        retained_context.discard_unordered_messages();
+                        retain_evidence_before_rollback_source(
+                            retained_context,
+                            source_window
+                                .as_ref()
+                                .map(|(items, cut_idx)| (items.as_slice(), *cut_idx)),
+                        );
+                    }
                     None => retained_context.discard_ambiguous_rollback(),
                 }
             }

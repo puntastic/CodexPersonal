@@ -2738,7 +2738,8 @@ async fn inter_agent_communication_waits_for_confirmed_delivery_persistence() {
     ]);
     let replayed = session
         .reconstruct_history_from_rollout(&replay_turn, &history)
-        .await;
+        .await
+        .expect("rollout reconstruction should succeed");
     let messages = replayed
         .retained_context
         .ordered_entries()
@@ -4356,7 +4357,7 @@ async fn failed_copied_fork_seed_does_not_make_parent_items_referenceable() {
 
 #[tokio::test]
 async fn failed_referenced_fork_suffix_append_keeps_only_inherited_sources_referenceable() {
-    let (mut session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+    let (mut session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
         |_| {},
@@ -4394,16 +4395,29 @@ async fn failed_referenced_fork_suffix_append_keeps_only_inherited_sources_refer
             ..Default::default()
         }),
     };
-    let inherited = message("referenced-inherited", "addressable through history_base");
-    let local = message(
-        "referenced-local",
-        "missing because the child append failed",
+    let mut parent_items = [
+        ResponseItemEnvelope::new(message(
+            "referenced-inherited",
+            "addressable through history_base",
+        )),
+        ResponseItemEnvelope::new(message(
+            "referenced-local",
+            "missing because the child append failed",
+        )),
+    ];
+    // Recorded envelopes already carry retained-source revisions. Keep both exact so only
+    // the failed append, not a replay annotation mismatch, excludes the local suffix.
+    let mut parent_history = ContextManager::new();
+    parent_history.record_annotated_items(
+        &mut parent_items,
+        turn_context.model_info().truncation_policy.into(),
     );
+    let [inherited, local] = parent_items;
 
     session
         .record_initial_history(InitialHistory::Forked(vec![
-            RolloutItem::ResponseItem(inherited.clone().into()),
-            RolloutItem::ResponseItem(local.clone().into()),
+            RolloutItem::ResponseItem(inherited.clone()),
+            RolloutItem::ResponseItem(local.clone()),
         ]))
         .await
         .expect("in-memory referenced fork reconstruction remains usable");
@@ -4412,17 +4426,17 @@ async fn failed_referenced_fork_suffix_append_keeps_only_inherited_sources_refer
     assert_eq!(
         state
             .persisted_history_items()
-            .get(inherited.id().expect("inherited id").as_str())
-            .map(|envelope| &envelope.item),
+            .get(inherited.item.id().expect("inherited id").as_str()),
         Some(&inherited),
         "the inherited reference-backed prefix remains addressable"
     );
     assert!(
         !state
             .persisted_history_items()
-            .contains_key(local.id().expect("local id").as_str()),
+            .contains_key(local.item.id().expect("local id").as_str()),
         "a failed local suffix append must not make the missing child record referenceable"
     );
+    assert!(state.history.annotated_items().contains(&local));
 }
 
 #[tokio::test]
@@ -5290,6 +5304,7 @@ async fn thread_rollback_drops_last_turn_from_history() {
     sess.set_previous_turn_settings(Some(PreviousTurnSettings {
         model: "stale-model".to_string(),
         comp_hash: None,
+        cyber_access_program: None,
         realtime_active: Some(tc.realtime_active),
     }))
     .await;
@@ -5484,6 +5499,7 @@ async fn thread_rollback_recomputes_previous_turn_settings_and_reference_context
     sess.set_previous_turn_settings(Some(PreviousTurnSettings {
         model: "stale-model".to_string(),
         comp_hash: None,
+        cyber_access_program: None,
         realtime_active: None,
     }))
     .await;
@@ -5501,6 +5517,7 @@ async fn thread_rollback_recomputes_previous_turn_settings_and_reference_context
         Some(PreviousTurnSettings {
             model: tc.model_info().slug.clone(),
             comp_hash: None,
+            cyber_access_program: None,
             realtime_active: Some(tc.realtime_active),
         })
     );
@@ -7643,7 +7660,9 @@ async fn standalone_settings_invalidate_continuation_before_delivering_acceptanc
 #[test_case(ThreadHistoryMode::PaginatedRefsV1; "refs v1")]
 #[test_case(ThreadHistoryMode::PaginatedRefsV2; "refs v2")]
 #[tokio::test]
-async fn compaction_persists_resume_metadata_and_companion_records(history_mode: ThreadHistoryMode) {
+async fn compaction_persists_resume_metadata_and_companion_records(
+    history_mode: ThreadHistoryMode,
+) {
     let (mut session, turn_context) = make_session_and_context().await;
     session
         .state
@@ -7651,7 +7670,8 @@ async fn compaction_persists_resume_metadata_and_companion_records(history_mode:
         .await
         .session_configuration
         .history_mode = history_mode;
-    let rollout_path = attach_thread_persistence_with_history_mode(&mut session, history_mode).await;
+    let rollout_path =
+        attach_thread_persistence_with_history_mode(&mut session, history_mode).await;
     let turn_context = Arc::new(turn_context);
     let turn_context_baseline = turn_context.to_turn_context_item();
     let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
