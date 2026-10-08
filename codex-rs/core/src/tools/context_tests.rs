@@ -320,13 +320,20 @@ fn mcp_mixed_media_response_keeps_truncation_detail_and_private_metadata_boundar
             arguments: "{}".to_string(),
         };
         let response = output.to_response_item("mixed-media", &payload);
-        let ResponseInputItem::FunctionCallOutput { output: response, .. } = response else {
+        let ResponseInputItem::FunctionCallOutput {
+            output: response, ..
+        } = response
+        else {
             panic!("expected FunctionCallOutput");
         };
         assert_eq!(response.success, Some(false));
         let items = response.content_items().expect("mixed result stays typed");
         assert_eq!(
-            items.iter().filter(|item| matches!(item, FunctionCallOutputContentItem::InputImage { .. })).cloned().collect::<Vec<_>>(),
+            items
+                .iter()
+                .filter(|item| matches!(item, FunctionCallOutputContentItem::InputImage { .. }))
+                .cloned()
+                .collect::<Vec<_>>(),
             vec![FunctionCallOutputContentItem::InputImage {
                 image: ImageReference::Inline {
                     image_url: "data:image/png;base64,AAA".to_string(),
@@ -334,7 +341,11 @@ fn mcp_mixed_media_response_keeps_truncation_detail_and_private_metadata_boundar
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             }]
         );
-        assert!(!items.iter().any(|item| matches!(item, FunctionCallOutputContentItem::InputAudio { .. })));
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, FunctionCallOutputContentItem::InputAudio { .. }))
+        );
         let text = response.body.to_text().expect("mixed output has text");
         assert!(text.starts_with("Wall time: 0.5000 seconds\nOutput:\n"));
         assert!(text.contains(marker));

@@ -61,7 +61,9 @@ def table_evidence(db, table):
     ordering = ", ".join(quote_identifier(name) for name in primary_key or columns)
     digest = hashlib.sha256(json.dumps(columns).encode("utf-8"))
     count = 0
-    for row in db.execute(f"SELECT * FROM {quote_identifier(table)} ORDER BY {ordering}"):
+    for row in db.execute(
+        f"SELECT * FROM {quote_identifier(table)} ORDER BY {ordering}"
+    ):
         digest.update(json.dumps([json_value(value) for value in row]).encode("utf-8"))
         digest.update(b"\n")
         count += 1
@@ -88,7 +90,9 @@ def schema(path):
             for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         result = {
-            "quick_check": "\n".join(row[0] for row in db.execute("PRAGMA quick_check")),
+            "quick_check": "\n".join(
+                row[0] for row in db.execute("PRAGMA quick_check")
+            ),
             "file_identity": [path.stat().st_dev, path.stat().st_ino],
         }
         ledger = db.execute("SELECT * FROM _sqlx_migrations ORDER BY version")
@@ -144,7 +148,9 @@ def schema(path):
                     "unique": indexes[name][2],
                     "keys": [
                         {"column": row[2], "descending": row[3], "collation": row[4]}
-                        for row in db.execute(f"PRAGMA index_xinfo({quote_identifier(name)})")
+                        for row in db.execute(
+                            f"PRAGMA index_xinfo({quote_identifier(name)})"
+                        )
                         if row[5]
                     ],
                 }
@@ -153,33 +159,58 @@ def schema(path):
 
 def validate_readback(before, after, *, primary=False):
     require(after["quick_check"] == "ok", "copied database quick_check failed")
-    require(before["file_identity"] == after["file_identity"], "copied database was replaced")
+    require(
+        before["file_identity"] == after["file_identity"],
+        "copied database was replaced",
+    )
     old = {row["version"]: row for row in before["migration_ledger"]}
     new = {row["version"]: row for row in after["migration_ledger"]}
-    require(all(new.get(version) == row for version, row in old.items()),
-            "existing migration ledger rows changed or disappeared")
-    require(all(row["success"] == 1 for row in new.values()), "unsuccessful migration ledger row")
+    require(
+        all(new.get(version) == row for version, row in old.items()),
+        "existing migration ledger rows changed or disappeared",
+    )
+    require(
+        all(row["success"] == 1 for row in new.values()),
+        "unsuccessful migration ledger row",
+    )
     if not primary:
         return
     require(set(new) - set(old) == {58} - set(old), "unexpected added state migrations")
-    require({55, 56, 57, 58} <= set(after["applied_migrations"]), "required state migrations missing")
-    require(after["creator_columns"] and after["attachments_table"], "required state schema missing")
-    require(before["row_evidence"] == after["row_evidence"], "thread or attachment evidence changed")
+    require(
+        {55, 56, 57, 58} <= set(after["applied_migrations"]),
+        "required state migrations missing",
+    )
+    require(
+        after["creator_columns"] and after["attachments_table"],
+        "required state schema missing",
+    )
+    require(
+        before["row_evidence"] == after["row_evidence"],
+        "thread or attachment evidence changed",
+    )
     for key in ARCHIVE_SORT_KEYS:
         name = f"idx_threads_archive_{key}_ms"
         actual = after["archive_indexes"].get(name)
         require(actual is not None, f"archive index missing: {name}")
-        expected_sql = (
-            f"CREATE INDEX {name} ON threads(archived, {key}_ms DESC, id DESC) WHERE archived = 1"
-        )
+        expected_sql = f"CREATE INDEX {name} ON threads(archived, {key}_ms DESC, id DESC) WHERE archived = 1"
         normalized = lambda sql: "".join(sql.split()).rstrip(";").lower()
-        require(normalized(actual["sql"]) == normalized(expected_sql), f"unexpected SQL for {name}")
-        require(actual["partial"] == 1 and actual["unique"] == 0, f"unexpected index kind: {name}")
-        require(actual["keys"] == [
-            {"column": "archived", "descending": 0, "collation": "BINARY"},
-            {"column": f"{key}_ms", "descending": 1, "collation": "BINARY"},
-            {"column": "id", "descending": 1, "collation": "BINARY"},
-        ], f"unexpected index column order or direction: {name}")
+        require(
+            normalized(actual["sql"]) == normalized(expected_sql),
+            f"unexpected SQL for {name}",
+        )
+        require(
+            actual["partial"] == 1 and actual["unique"] == 0,
+            f"unexpected index kind: {name}",
+        )
+        require(
+            actual["keys"]
+            == [
+                {"column": "archived", "descending": 0, "collation": "BINARY"},
+                {"column": f"{key}_ms", "descending": 1, "collation": "BINARY"},
+                {"column": "id", "descending": 1, "collation": "BINARY"},
+            ],
+            f"unexpected index column order or direction: {name}",
+        )
 
 
 def recovery_backups(home):
@@ -194,23 +225,38 @@ def list_metadata(request, *, check_attachments):
     # in the copied state. Never resume, read, or turn/start those threads.
     listed = request(2, "thread/list", {"limit": 1, "useStateDbOnly": True})
     rows = listed["data"]
-    require(isinstance(rows, list) and len(rows) <= 1, "unexpected bounded thread-list result")
+    require(
+        isinstance(rows, list) and len(rows) <= 1,
+        "unexpected bounded thread-list result",
+    )
     attachment_count = None
     archived_counts = {}
     if check_attachments and rows:
         attachments = request(
             3, "thread/attachment/list", {"threadId": rows[0]["id"], "limit": 1}
         )["data"]
-        require(isinstance(attachments, list) and len(attachments) <= 1,
-                "unexpected bounded attachment-list result")
+        require(
+            isinstance(attachments, list) and len(attachments) <= 1,
+            "unexpected bounded attachment-list result",
+        )
         attachment_count = len(attachments)
     for identifier, key in enumerate(ARCHIVE_SORT_KEYS, start=4):
-        archived = request(identifier, "thread/list", {
-            "limit": 2, "useStateDbOnly": True, "archived": True,
-            "modelProviders": [], "sortKey": key, "sortDirection": "desc",
-        })["data"]
-        require(isinstance(archived, list) and len(archived) <= 2,
-                f"unexpected bounded archive-list result for {key}")
+        archived = request(
+            identifier,
+            "thread/list",
+            {
+                "limit": 2,
+                "useStateDbOnly": True,
+                "archived": True,
+                "modelProviders": [],
+                "sortKey": key,
+                "sortDirection": "desc",
+            },
+        )["data"]
+        require(
+            isinstance(archived, list) and len(archived) <= 2,
+            f"unexpected bounded archive-list result for {key}",
+        )
         archived_counts[key] = len(archived)
     return {
         "db_only_threads_returned": len(rows),
@@ -358,18 +404,27 @@ def run_probe(args):
         "Companion checks cover integrity, file identity, and existing migration rows; "
         "they do not require logs or other companion rows to remain unchanged."
     )
-    require({55, 56, 57} <= set(report["before"]["applied_migrations"]),
-            "probe requires the previously qualified migrations55–57 baseline")
+    require(
+        {55, 56, 57} <= set(report["before"]["applied_migrations"]),
+        "probe requires the previously qualified migrations55–57 baseline",
+    )
     require(not recovery_backups(home), "recovery backup exists before startup")
     try:
         for startup_key, readback_key, executable, check_attachments in (
             ("candidate", "after_candidate", candidate, True),
             ("previous_after_migration", "after_previous", previous, False),
-            ("candidate_after_previous", "after_candidate_after_previous", candidate, True),
+            (
+                "candidate_after_previous",
+                "after_candidate_after_previous",
+                candidate,
+                True,
+            ),
         ):
             startup_error = None
             try:
-                report[startup_key] = startup(executable, home, check_attachments=check_attachments)
+                report[startup_key] = startup(
+                    executable, home, check_attachments=check_attachments
+                )
             except Exception as error:
                 startup_error = error
                 report[startup_key] = {"failure": str(error)}
@@ -393,8 +448,11 @@ def run_probe(args):
             # must survive both subsequent startups without additions or edits.
             if readback_key != "after_candidate":
                 for detail in [report, *databases.values()]:
-                    require(detail[readback_key]["migration_ledger"] == detail["after_candidate"]["migration_ledger"],
-                            "migration ledger changed after initial candidate startup")
+                    require(
+                        detail[readback_key]["migration_ledger"]
+                        == detail["after_candidate"]["migration_ledger"],
+                        "migration ledger changed after initial candidate startup",
+                    )
         report["passed"] = True
     except Exception as error:
         report["passed"] = False
@@ -406,14 +464,20 @@ def run_probe(args):
         for detail in [report, *databases.values()]:
             saved = Path(detail["backup"])
             detail["backup_files_sha256_final"] = backup_fingerprint(saved)
-            detail["backup_sha256_final"] = detail["backup_files_sha256_final"].get(saved.name)
-        untouched = all(detail["backup_files_sha256_final"] == detail["backup_files_sha256"]
-                        for detail in [report, *databases.values()])
+            detail["backup_sha256_final"] = detail["backup_files_sha256_final"].get(
+                saved.name
+            )
+        untouched = all(
+            detail["backup_files_sha256_final"] == detail["backup_files_sha256"]
+            for detail in [report, *databases.values()]
+        )
         report["untouched_backups_verified"] = untouched
         if not untouched:
             report["passed"] = False
             report["failure"] = "untouched backup changed"
-        (output / "receipt.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        (output / "receipt.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8"
+        )
         require(untouched, "untouched backup changed")
     return report
 

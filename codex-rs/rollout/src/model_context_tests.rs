@@ -288,7 +288,9 @@ fn guardian_reference_retains_an_older_guardian_only_source_carrier() {
             .expect("retained Guardian source should resolve")
             .expect("Guardian checkpoint")
             .0,
-        vec![codex_history::ResponseItemEnvelope::from(response("msg-guardian"))]
+        vec![codex_history::ResponseItemEnvelope::from(response(
+            "msg-guardian"
+        ))]
     );
     let RolloutItem::Compacted(carrier) = &rollout[selected_index - 1] else {
         panic!("expected compacted source carrier");
@@ -300,7 +302,9 @@ fn guardian_reference_retains_an_older_guardian_only_source_carrier() {
             .as_ref()
             .expect("Guardian-only source")
             .0,
-        vec![codex_history::ResponseItemEnvelope::from(response("msg-guardian"))]
+        vec![codex_history::ResponseItemEnvelope::from(response(
+            "msg-guardian"
+        ))]
     );
 }
 

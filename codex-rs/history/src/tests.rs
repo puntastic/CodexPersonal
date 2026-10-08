@@ -1278,21 +1278,31 @@ fn guardian_reference_reencoding_preserves_metadata_and_rejects_metadata_substit
             .reencode_item_with_integrity_references(&mut checkpoint)
             .expect("reencode metadata-bearing checkpoint");
         let encoded = serde_json::to_vec(&checkpoint).expect("serialize checkpoint");
-        let mut restored: RolloutItem = serde_json::from_slice(&encoded).expect("reload checkpoint");
+        let mut restored: RolloutItem =
+            serde_json::from_slice(&encoded).expect("reload checkpoint");
         let RolloutItem::Compacted(compacted) = &restored else {
             panic!("expected checkpoint");
         };
         assert_eq!(
-            compacted.guardian_history.as_ref().unwrap().is_reference_backed(),
+            compacted
+                .guardian_history
+                .as_ref()
+                .unwrap()
+                .is_reference_backed(),
             metadata_matches
         );
         let mut reader = CompactedHistoryResolver::default();
         reader.index_explicit_sources(&RolloutItem::ResponseItem(source.clone()));
-        reader.materialize_item(&mut restored).expect("resolve reloaded checkpoint");
+        reader
+            .materialize_item(&mut restored)
+            .expect("resolve reloaded checkpoint");
         let RolloutItem::Compacted(compacted) = restored else {
             panic!("expected checkpoint");
         };
-        assert_eq!(compacted.guardian_history, Some(GuardianHistoryCheckpoint(vec![saved])));
+        assert_eq!(
+            compacted.guardian_history,
+            Some(GuardianHistoryCheckpoint(vec![saved]))
+        );
     }
 }
 
@@ -1310,7 +1320,9 @@ fn guardian_source_filter_requires_the_complete_candidate_envelope() {
     );
     let mut altered = source;
     altered.metadata.as_mut().unwrap().user_input_order = Some(5);
-    assert!(CompactedHistoryResolver::filter_exact_guardian_sources(&rollout, &[altered]).is_empty());
+    assert!(
+        CompactedHistoryResolver::filter_exact_guardian_sources(&rollout, &[altered]).is_empty()
+    );
 }
 
 #[test]

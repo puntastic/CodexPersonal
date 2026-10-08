@@ -349,7 +349,10 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
         let mut env = exec_env_for_sandbox_permissions(&req.env, launch_sandbox_permissions);
         let snapshot_credential_context = if let Some(snapshot) = shell_snapshot.as_ref()
             && (managed_network.is_some()
-                || req.shell.as_ref().is_some_and(ShellInvocation::is_posix_login))
+                || req
+                    .shell
+                    .as_ref()
+                    .is_some_and(ShellInvocation::is_posix_login))
         {
             Some(
                 snapshot
@@ -599,13 +602,12 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
             ),
             environment_is_remote,
         );
-        let command = if requested_shell
-            .is_some_and(|shell| shell.shell_type == ShellType::PowerShell)
-        {
-            prefix_powershell_script_with_utf8(&command)
-        } else {
-            command
-        };
+        let command =
+            if requested_shell.is_some_and(|shell| shell.shell_type == ShellType::PowerShell) {
+                prefix_powershell_script_with_utf8(&command)
+            } else {
+                command
+            };
         let sidecar_permissions = metrics_sidecar
             .as_ref()
             .map(PluginMetricsSidecar::additional_permissions);

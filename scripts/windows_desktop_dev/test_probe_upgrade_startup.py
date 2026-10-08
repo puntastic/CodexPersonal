@@ -36,16 +36,31 @@ def create_database(path):
     for statement in statements:
         execute(path, statement)
     for version in (55, 56, 57):
-        execute(path, "INSERT INTO _sqlx_migrations VALUES (?, ?, ?, 1, ?, ?)",
-                (version, f"migration {version}", "2026-01-01T00:00:00Z", bytes([version]), version * 10))
+        execute(
+            path,
+            "INSERT INTO _sqlx_migrations VALUES (?, ?, ?, 1, ?, ?)",
+            (
+                version,
+                f"migration {version}",
+                "2026-01-01T00:00:00Z",
+                bytes([version]),
+                version * 10,
+            ),
+        )
 
 
 def migrate(path):
     for key in probe.ARCHIVE_SORT_KEYS:
-        execute(path, f"CREATE INDEX IF NOT EXISTS idx_threads_archive_{key}_ms "
-                f"ON threads(archived, {key}_ms DESC, id DESC) WHERE archived = 1")
-    execute(path, "INSERT OR IGNORE INTO _sqlx_migrations VALUES "
-            "(58, 'archive indexes', '2026-10-09T00:00:00Z', 1, X'58', 580)")
+        execute(
+            path,
+            f"CREATE INDEX IF NOT EXISTS idx_threads_archive_{key}_ms "
+            f"ON threads(archived, {key}_ms DESC, id DESC) WHERE archived = 1",
+        )
+    execute(
+        path,
+        "INSERT OR IGNORE INTO _sqlx_migrations VALUES "
+        "(58, 'archive indexes', '2026-10-09T00:00:00Z', 1, X'58', 580)",
+    )
 
 
 class ProbeTests(unittest.TestCase):
@@ -58,23 +73,41 @@ class ProbeTests(unittest.TestCase):
         self.before = probe.schema(self.source)
 
     def test_schema_preserves_full_ledger_and_logical_rows_across_index_migration(self):
-        self.assertEqual(self.before["migration_ledger"][0], {
-            "version": 55, "description": "migration 55", "installed_on": "2026-01-01T00:00:00Z",
-            "success": 1, "checksum": {"blob_hex": "37"}, "execution_time": 550,
-        })
+        self.assertEqual(
+            self.before["migration_ledger"][0],
+            {
+                "version": 55,
+                "description": "migration 55",
+                "installed_on": "2026-01-01T00:00:00Z",
+                "success": 1,
+                "checksum": {"blob_hex": "37"},
+                "execution_time": 550,
+            },
+        )
         migrate(self.source)
         after = probe.schema(self.source)
         probe.validate_readback(self.before, after, primary=True)
         self.assertEqual(self.before["row_evidence"], after["row_evidence"])
         # Physical insertion order cannot change the logical digest.
         execute(self.source, "DELETE FROM threads WHERE id='b'")
-        execute(self.source, "INSERT INTO threads VALUES ('b', 'cli', 'second', 'hello', NULL, NULL, 1, 20, 30, 40)")
-        self.assertEqual(self.before["row_evidence"], probe.schema(self.source)["row_evidence"])
+        execute(
+            self.source,
+            "INSERT INTO threads VALUES ('b', 'cli', 'second', 'hello', NULL, NULL, 1, 20, 30, 40)",
+        )
+        self.assertEqual(
+            self.before["row_evidence"], probe.schema(self.source)["row_evidence"]
+        )
 
     def test_changed_or_missing_existing_migration_rows_are_rejected(self):
         migrate(self.source)
         after = probe.schema(self.source)
-        for field in ("description", "installed_on", "success", "checksum", "execution_time"):
+        for field in (
+            "description",
+            "installed_on",
+            "success",
+            "checksum",
+            "execution_time",
+        ):
             with self.subTest(field=field):
                 changed = deepcopy(after)
                 changed["migration_ledger"][0][field] = "changed"
@@ -106,15 +139,22 @@ class ProbeTests(unittest.TestCase):
             "ON threads(archived, created_at_ms DESC, id DESC) WHERE archived = 0",
         ):
             execute(self.source, "DROP INDEX idx_threads_archive_created_at_ms")
-            execute(self.source, "CREATE INDEX idx_threads_archive_created_at_ms " + definition)
+            execute(
+                self.source,
+                "CREATE INDEX idx_threads_archive_created_at_ms " + definition,
+            )
             with self.assertRaisesRegex(RuntimeError, "unexpected SQL"):
-                probe.validate_readback(self.before, probe.schema(self.source), primary=True)
+                probe.validate_readback(
+                    self.before, probe.schema(self.source), primary=True
+                )
         migrate_after = probe.schema(self.source)
         migrate_after["archive_indexes"]["idx_threads_archive_created_at_ms"]["sql"] = (
             "CREATE INDEX idx_threads_archive_created_at_ms "
             "ON threads(archived, created_at_ms DESC, id DESC) WHERE archived = 1"
         )
-        migrate_after["archive_indexes"]["idx_threads_archive_created_at_ms"]["keys"].reverse()
+        migrate_after["archive_indexes"]["idx_threads_archive_created_at_ms"][
+            "keys"
+        ].reverse()
         with self.assertRaisesRegex(RuntimeError, "column order"):
             probe.validate_readback(self.before, migrate_after, primary=True)
 
@@ -141,28 +181,54 @@ class ProbeTests(unittest.TestCase):
 
         def request(identifier, method, params):
             calls.append((identifier, method, params))
-            return {"data": [] if method == "thread/attachment/list" else [{"id": "synthetic"}]}
+            return {
+                "data": []
+                if method == "thread/attachment/list"
+                else [{"id": "synthetic"}]
+            }
 
         result = probe.list_metadata(request, check_attachments=True)
-        self.assertEqual(result["db_only_archived_threads_returned"], dict.fromkeys(probe.ARCHIVE_SORT_KEYS, 1))
-        self.assertEqual([call[1] for call in calls], [
-            "thread/list", "thread/attachment/list", "thread/list", "thread/list", "thread/list",
-        ])
+        self.assertEqual(
+            result["db_only_archived_threads_returned"],
+            dict.fromkeys(probe.ARCHIVE_SORT_KEYS, 1),
+        )
+        self.assertEqual(
+            [call[1] for call in calls],
+            [
+                "thread/list",
+                "thread/attachment/list",
+                "thread/list",
+                "thread/list",
+                "thread/list",
+            ],
+        )
         for _, method, params in calls:
             self.assertLessEqual(params["limit"], 2)
             if method == "thread/list":
                 self.assertTrue(params["useStateDbOnly"])
-        self.assertEqual([call[2]["sortKey"] for call in calls[2:]], list(probe.ARCHIVE_SORT_KEYS))
+        self.assertEqual(
+            [call[2]["sortKey"] for call in calls[2:]], list(probe.ARCHIVE_SORT_KEYS)
+        )
         self.assertTrue(all(call[2]["archived"] for call in calls[2:]))
         calls.clear()
         previous = probe.list_metadata(request, check_attachments=False)
-        self.assertEqual(previous["db_only_archived_threads_returned"], result["db_only_archived_threads_returned"])
+        self.assertEqual(
+            previous["db_only_archived_threads_returned"],
+            result["db_only_archived_threads_returned"],
+        )
         self.assertEqual([call[1] for call in calls], ["thread/list"] * 4)
         with self.assertRaisesRegex(RuntimeError, "bounded thread-list"):
             probe.list_metadata(lambda *_: {"data": [{}, {}]}, check_attachments=True)
 
-    def run_synthetic_probe(self, *, damage_final=False, damage_backup=False,
-                            recover=False, fail_startup=False, damage_companion=False):
+    def run_synthetic_probe(
+        self,
+        *,
+        damage_final=False,
+        damage_backup=False,
+        recover=False,
+        fail_startup=False,
+        damage_companion=False,
+    ):
         executable = self.root / "not-an-executable"
         executable.touch()
         count = 0
@@ -176,19 +242,30 @@ class ProbeTests(unittest.TestCase):
                 migrate(home / self.source.name)
                 migrate(home / companion.name)
             if count == 2 and damage_companion:
-                execute(home / companion.name, "DELETE FROM _sqlx_migrations WHERE version=58")
+                execute(
+                    home / companion.name,
+                    "DELETE FROM _sqlx_migrations WHERE version=58",
+                )
             if count == 2 and fail_startup:
                 raise RuntimeError("synthetic startup failure")
             if count == 3 and damage_final:
                 execute(home / self.source.name, "DELETE FROM thread_attachments")
             if count == 3 and damage_backup:
-                execute(home.parent / self.source.name, "UPDATE threads SET title='tampered'")
+                execute(
+                    home.parent / self.source.name,
+                    "UPDATE threads SET title='tampered'",
+                )
             if recover:
                 (home / "db-backups").mkdir(exist_ok=True)
             return {"synthetic": True}
 
-        args = Namespace(candidate=executable, previous=executable, source_db=self.source,
-                         source_companion_db=[companion], output=self.root / "output")
+        args = Namespace(
+            candidate=executable,
+            previous=executable,
+            source_db=self.source,
+            source_companion_db=[companion],
+            output=self.root / "output",
+        )
         with patch.object(probe, "startup", side_effect=startup) as mocked:
             report = probe.run_probe(args)
         self.assertEqual(mocked.call_count, 3)
@@ -198,17 +275,27 @@ class ProbeTests(unittest.TestCase):
         original_hash = probe.file_hash(self.source)
         report = self.run_synthetic_probe()
         self.assertTrue(report["passed"])
-        for key in ("after_candidate", "after_previous", "after_candidate_after_previous"):
+        for key in (
+            "after_candidate",
+            "after_previous",
+            "after_candidate_after_previous",
+        ):
             self.assertEqual(report[key]["quick_check"], "ok")
-            self.assertEqual(report[key]["row_evidence"], report["before"]["row_evidence"])
-            self.assertEqual(report["companions"]["companion.sqlite"][key]["quick_check"], "ok")
+            self.assertEqual(
+                report[key]["row_evidence"], report["before"]["row_evidence"]
+            )
+            self.assertEqual(
+                report["companions"]["companion.sqlite"][key]["quick_check"], "ok"
+            )
         self.assertEqual(report["backup_sha256"], report["backup_sha256_final"])
         self.assertEqual(original_hash, probe.file_hash(self.source))
 
     def test_third_startup_data_loss_is_a_failure_with_readback_receipt(self):
         with self.assertRaisesRegex(RuntimeError, "evidence changed"):
             self.run_synthetic_probe(damage_final=True)
-        report = json.loads((self.root / "output" / "receipt.json").read_text(encoding="utf-8"))
+        report = json.loads(
+            (self.root / "output" / "receipt.json").read_text(encoding="utf-8")
+        )
         self.assertFalse(report["passed"])
         self.assertEqual(report["after_candidate_after_previous"]["attachment_rows"], 0)
         self.assertTrue(report["untouched_backups_verified"])
@@ -216,7 +303,9 @@ class ProbeTests(unittest.TestCase):
     def test_untouched_backup_tampering_fails_final_receipt(self):
         with self.assertRaisesRegex(RuntimeError, "untouched backup changed"):
             self.run_synthetic_probe(damage_backup=True)
-        report = json.loads((self.root / "output" / "receipt.json").read_text(encoding="utf-8"))
+        report = json.loads(
+            (self.root / "output" / "receipt.json").read_text(encoding="utf-8")
+        )
         self.assertFalse(report["passed"])
         self.assertFalse(report["untouched_backups_verified"])
 
@@ -231,10 +320,15 @@ class ProbeTests(unittest.TestCase):
     def test_failed_startup_still_reads_primary_and_companion_copies(self):
         with self.assertRaisesRegex(RuntimeError, "synthetic startup failure"):
             self.run_synthetic_probe(fail_startup=True)
-        report = json.loads((self.root / "output" / "receipt.json").read_text(encoding="utf-8"))
+        report = json.loads(
+            (self.root / "output" / "receipt.json").read_text(encoding="utf-8")
+        )
         self.assertFalse(report["passed"])
         self.assertEqual(report["after_previous"]["quick_check"], "ok")
-        self.assertEqual(report["companions"]["companion.sqlite"]["after_previous"]["quick_check"], "ok")
+        self.assertEqual(
+            report["companions"]["companion.sqlite"]["after_previous"]["quick_check"],
+            "ok",
+        )
         self.assertTrue(report["untouched_backups_verified"])
 
     def test_backup_fingerprint_detects_wal_changes_while_main_file_is_unchanged(self):

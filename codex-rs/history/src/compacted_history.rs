@@ -284,10 +284,7 @@ impl CompactedHistoryResolver {
                         }
                     } else {
                         for item in &guardian_history.0 {
-                            note_known_item(
-                                &mut self.guardian_known_items,
-                                item,
-                            );
+                            note_known_item(&mut self.guardian_known_items, item);
                         }
                     }
                 }
@@ -915,11 +912,7 @@ fn latest_sources_for_ids(
                         }
                     } else {
                         for item in guardian_history.0.iter().rev() {
-                            note_requested_item(
-                                &mut sources,
-                                requested_item_ids,
-                                item,
-                            );
+                            note_requested_item(&mut sources, requested_item_ids, item);
                         }
                     }
                 }

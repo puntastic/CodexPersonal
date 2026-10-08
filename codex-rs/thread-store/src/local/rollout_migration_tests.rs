@@ -2828,7 +2828,10 @@ async fn rollback_rewrite_removes_stale_guardian_evidence_from_newer_checkpoint(
         .into_iter()
         .map(codex_rollout::ResponseItemEnvelope::from)
         .collect::<Vec<_>>();
-    assert_eq!(guardian_histories, vec![expected_guardian.clone(), expected_guardian]);
+    assert_eq!(
+        guardian_histories,
+        vec![expected_guardian.clone(), expected_guardian]
+    );
     let mut cold_context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,

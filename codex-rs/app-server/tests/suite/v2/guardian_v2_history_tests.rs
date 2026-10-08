@@ -168,7 +168,10 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
     }
     let rejects_incomplete_score = matches!(
         (context_path, evidence_size),
-        (ContextPath::ThreadOwned | ContextPath::Independent, EvidenceSize::OversizedAnswer)
+        (
+            ContextPath::ThreadOwned | ContextPath::Independent,
+            EvidenceSize::OversizedAnswer
+        )
     );
     let classifier = Arc::new(MockResponsesState {
         luna_score: if rejects_incomplete_score || oversized_instruction || requires_sync {
@@ -759,7 +762,10 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
     {
         if line["type"] == "compacted" {
             let saved_review = &line["payload"]["guardian_history"];
-            assert_eq!(saved_review.is_null(), matches!(context_path, ContextPath::ThreadOwned));
+            assert_eq!(
+                saved_review.is_null(),
+                matches!(context_path, ContextPath::ThreadOwned)
+            );
             if independent {
                 assert!(saved_review.to_string().contains(EVIDENCE));
             }

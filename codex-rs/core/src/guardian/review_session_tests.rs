@@ -62,7 +62,10 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
         params.parent_history.history_version(),
         params.parent_history.review_history_version(),
         GuardianContextMode::from_history(
-            params.parent_history.conversation_history_snapshot().as_ref(),
+            params
+                .parent_history
+                .conversation_history_snapshot()
+                .as_ref(),
         ),
     )
     .with_environments(params.parent_context.environments())

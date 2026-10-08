@@ -6697,7 +6697,8 @@ const out = await tools.mcp__rmcp__image_scenario({
 if (out.structuredContent) text(out.structuredContent);
 const imageItem = out.content.find((item) => item.type === "image");
 image(imageItem);
-"#.replace("SCENARIO", scenario);
+"#
+    .replace("SCENARIO", scenario);
 
     let (_test, second_mock) = run_code_mode_turn_with_rmcp_model(
         &server,

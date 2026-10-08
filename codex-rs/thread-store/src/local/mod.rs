@@ -1992,7 +1992,8 @@ mod tests {
             .await
             .expect("same-path append should replace the stale snapshot with canonical history");
         assert_eq!(
-            serde_json::to_value(resumed_history.as_ref()).expect("serialize authoritative history"),
+            serde_json::to_value(resumed_history.as_ref())
+                .expect("serialize authoritative history"),
             serde_json::to_value(&fresh_context.items).expect("serialize fresh source history")
         );
         assert_eq!(

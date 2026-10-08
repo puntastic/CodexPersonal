@@ -17,13 +17,14 @@ impl RetainedContext {
         &mut self,
         mut keep: impl FnMut(&RetainedUserMessage) -> Option<bool>,
     ) {
-        self.assistant_messages.retain(|entry| match keep(&entry.value) {
-            Some(keep) => keep,
-            None => {
-                self.assistant_messages_incomplete = true;
-                false
-            }
-        });
+        self.assistant_messages
+            .retain(|entry| match keep(&entry.value) {
+                Some(keep) => keep,
+                None => {
+                    self.assistant_messages_incomplete = true;
+                    false
+                }
+            });
     }
 
     /// Reports observed storage loss or a retained message that cannot be delivered whole.

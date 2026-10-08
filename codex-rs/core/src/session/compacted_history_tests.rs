@@ -13,8 +13,8 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
-use super::compacted_history::encode_replacement_history;
 use super::compacted_history::encode_guardian_history;
+use super::compacted_history::encode_replacement_history;
 use super::compacted_history::normalize_copied_fork_rollout;
 use super::compacted_history::retained_checkpoint_reference_item_ids;
 
@@ -39,7 +39,10 @@ fn guardian_references_preserve_complete_delivery_metadata() {
     });
     let source_id = source.item.id().expect("source id").as_str().to_string();
     let persisted = HashMap::from([(source_id, source.clone())]);
-    for mode in [ThreadHistoryMode::PaginatedRefsV1, ThreadHistoryMode::PaginatedRefsV2] {
+    for mode in [
+        ThreadHistoryMode::PaginatedRefsV1,
+        ThreadHistoryMode::PaginatedRefsV2,
+    ] {
         let exact = encode_guardian_history(
             codex_history::GuardianHistoryCheckpoint(vec![source.clone()]),
             &persisted,
@@ -48,7 +51,11 @@ fn guardian_references_preserve_complete_delivery_metadata() {
         assert!(exact.is_reference_backed());
 
         let mut different = source.clone();
-        different.metadata.as_mut().unwrap().guardian_source_order_guidance = false;
+        different
+            .metadata
+            .as_mut()
+            .unwrap()
+            .guardian_source_order_guidance = false;
         let fallback = encode_guardian_history(
             codex_history::GuardianHistoryCheckpoint(vec![different.clone()]),
             &persisted,

@@ -88,7 +88,9 @@ fn test_get_command_respects_explicit_bash_shell() -> anyhow::Result<()> {
         Some(expected) => {
             let resolved = result.map_err(anyhow::Error::msg)?;
             assert_eq!(
-                resolved.shell.map(|invocation| (invocation.shell, invocation.use_login_shell)),
+                resolved
+                    .shell
+                    .map(|invocation| (invocation.shell, invocation.use_login_shell)),
                 Some((expected.clone(), true))
             );
             assert_eq!(
@@ -322,7 +324,9 @@ fn test_get_command_resolves_powershell_by_type() -> anyhow::Result<()> {
                 expected_shell.derive_exec_args("echo hello", /*use_login_shell*/ true)
             );
             assert_eq!(
-                resolved.shell.map(|invocation| (invocation.shell, invocation.use_login_shell)),
+                resolved
+                    .shell
+                    .map(|invocation| (invocation.shell, invocation.use_login_shell)),
                 Some((expected_shell, true))
             );
         }
