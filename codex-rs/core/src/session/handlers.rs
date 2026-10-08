@@ -359,7 +359,8 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
     // and in-flight approvals are cancelled; the pool can create a fresh reviewer.
     sess.services
         .agent_control
-        .rearm_budget_reminder(sess.thread_id());
+        .rearm_budget_reminder(sess.thread_id())
+        .await;
     sess.recompute_token_usage(turn_context.as_ref()).await;
 
     sess.persist_rollout_items(&[RolloutItem::EventMsg(rollback_msg.clone())])

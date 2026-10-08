@@ -88,8 +88,6 @@ async fn loads_model_context_from_the_exact_resolved_rollout() {
     let thread_uuid = Uuid::from_u128(/*v*/ 1011);
     let thread_id = ThreadId::from_string(&thread_uuid.to_string()).expect("thread id");
     let exact_rollout_uuid = Uuid::from_u128(/*v*/ 1012);
-    let exact_rollout_id =
-        ThreadId::from_string(&exact_rollout_uuid.to_string()).expect("rollout id");
     let initial_path = write_session_file_with_history_mode(
         home.path(),
         "2025-01-03T13-00-10",
@@ -119,10 +117,9 @@ async fn loads_model_context_from_the_exact_resolved_rollout() {
     );
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
 
-    let context =
-        load_latest_model_context_from_rollout(&store, thread_id, exact_rollout_id, exact_path)
-            .await
-            .expect("load exact rollout model context");
+    let context = load_from_rollout_path(&store, thread_id, exact_path.as_path())
+        .await
+        .expect("load exact rollout model context");
     let serialized = serde_json::to_string(&context.items).expect("serialize model context");
 
     assert!(

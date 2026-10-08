@@ -1297,6 +1297,23 @@ fn guardian_reference_reencoding_preserves_metadata_and_rejects_metadata_substit
 }
 
 #[test]
+fn guardian_source_filter_requires_the_complete_candidate_envelope() {
+    let mut source = identified_message("guardian-exact-source", "same visible evidence");
+    source.metadata = Some(CodexHarnessMetadata {
+        user_input_order: Some(4),
+        ..Default::default()
+    });
+    let rollout = vec![RolloutItem::ResponseItem(source.clone())];
+    assert_eq!(
+        CompactedHistoryResolver::filter_exact_guardian_sources(&rollout, &[source.clone()]),
+        vec![source.clone()]
+    );
+    let mut altered = source;
+    altered.metadata.as_mut().unwrap().user_input_order = Some(5);
+    assert!(CompactedHistoryResolver::filter_exact_guardian_sources(&rollout, &[altered]).is_empty());
+}
+
+#[test]
 fn v2_reference_round_trips_with_versioned_digest() -> Result<()> {
     let mut source = identified_message("v2-wire", "complete envelope");
     source.metadata = Some(CodexHarnessMetadata {

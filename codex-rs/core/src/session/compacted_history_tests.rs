@@ -14,6 +14,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 use super::compacted_history::encode_replacement_history;
+use super::compacted_history::encode_guardian_history;
 use super::compacted_history::normalize_copied_fork_rollout;
 use super::compacted_history::retained_checkpoint_reference_item_ids;
 
@@ -27,6 +28,35 @@ fn message(id: &str, text: &str) -> ResponseItemEnvelope {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     })
+}
+
+#[test]
+fn guardian_references_preserve_complete_delivery_metadata() {
+    let mut source = message("guardian", "review evidence");
+    source.metadata = Some(CodexHarnessMetadata {
+        guardian_source_order_guidance: true,
+        ..Default::default()
+    });
+    let source_id = source.item.id().expect("source id").as_str().to_string();
+    let persisted = HashMap::from([(source_id, source.clone())]);
+    for mode in [ThreadHistoryMode::PaginatedRefsV1, ThreadHistoryMode::PaginatedRefsV2] {
+        let exact = encode_guardian_history(
+            codex_history::GuardianHistoryCheckpoint(vec![source.clone()]),
+            &persisted,
+            mode,
+        );
+        assert!(exact.is_reference_backed());
+
+        let mut different = source.clone();
+        different.metadata.as_mut().unwrap().guardian_source_order_guidance = false;
+        let fallback = encode_guardian_history(
+            codex_history::GuardianHistoryCheckpoint(vec![different.clone()]),
+            &persisted,
+            mode,
+        );
+        assert!(!fallback.is_reference_backed());
+        assert_eq!(fallback.0, vec![different]);
+    }
 }
 
 #[test]

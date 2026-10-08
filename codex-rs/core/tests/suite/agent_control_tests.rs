@@ -193,6 +193,11 @@ impl AgentControl for TestAgentControl {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async {})
     }
+
+    fn rearm_budget_reminder(&self, _agent: ThreadId) -> BoxFuture<'_, ()> {
+        // This test controller has no shared rollout budget or pending reminders.
+        Box::pin(async {})
+    }
 }
 
 async fn test_with_host_control(

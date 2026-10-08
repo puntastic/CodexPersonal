@@ -31,10 +31,11 @@ async fn catalog_budget_fixture(
                 "[features.guardianv2]\nenabled = true\nreuse_parent_compaction = true\nmax_parent_compaction_tokens = 4096\n[features.guardianv2.review_scope]\ncomputer_use_only = false\n[features.guardianv2.transcript]\ninclude_images = true\n").unwrap();
         })
         .with_config(move |config| {
-            if matches!(evidence, BudgetEvidence::Checkpoint) {
+            if matches!(evidence, BudgetEvidence::Checkpoint | BudgetEvidence::UserInstructions) {
                 // The live approval path must reject an unannotated checkpoint even
                 // when the separate classifier snapshot has matching provenance.
                 config.features.enable(Feature::GuardianThreadContext).unwrap();
+                config.features.enable(Feature::GuardianReuseParentCompaction).unwrap();
             }
             // A smaller parent window must not replace Luna's catalog allowance.
             config.model_context_window = Some(1_000);

@@ -615,7 +615,9 @@ mod tests {
             .expect("primary state writes should remain available");
         runtime
             .insert_log(&LogEntry {
-                ts: 1,
+                // This tests fallback storage, not expiration of an epoch-old
+                // record by the startup diagnostic-log maintenance task.
+                ts: chrono::Utc::now().timestamp(),
                 ts_nanos: 0,
                 level: "WARN".to_string(),
                 target: "fallback-test".to_string(),

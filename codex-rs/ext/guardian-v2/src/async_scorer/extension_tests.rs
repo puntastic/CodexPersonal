@@ -1138,12 +1138,14 @@ async fn decide_approval_for_model(
     full_access: bool,
 ) -> Option<ApprovalDecision> {
     let action = json!({"tool": "exec_command", "command": ["pwd"]});
+    let permissions = codex_guardian_context::PermissionContext::default();
     let thread_store = fixture.test.codex.thread_extension_data();
     fixture
         .registry
         .decide_approval(&ApprovalDecisionInput {
             approval_id: "approval-1",
             tool_call_id: None,
+            permissions: Some(&permissions),
             action: &action,
             thread_id: fixture.test.session_configured.thread_id,
             thread_store,
@@ -1352,7 +1354,7 @@ async fn adaptive_policy_reuses_valid_evidence_and_falls_back_when_missing() -> 
     let progress = thread_store
         .get::<GuardianV2ScoreProgress>()
         .expect("Guardian v2 score progress");
-    let authorization = ScoreAuthorization::current(&fixture.test.codex).await;
+    let authorization = ScoreAuthorization::current(&fixture.test.codex, &Default::default()).await;
     seed_cached_score(&progress, thread_store, /*index*/ 1, authorization);
 
     assert_eq!(
@@ -1739,8 +1741,12 @@ async fn contributor_uses_configured_prompt_and_expires_scores_at_default_lag() 
     skip_if_no_network!(Ok(()));
 
     let configuration = r#"
+[features]
+guardian_reuse_parent_compaction = true
+
 [features.guardianv2]
 enabled = true
+thread_context = true
 classifier_instructions = "Use the experimental security classification prompt."
 review_threshold = 0.60
 reasoning_effort = "minimal"
@@ -2355,7 +2361,7 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
         conversation_history,
         r#"{"path":"README.md"}"#,
         Some(TEST_GUARDIAN_POLICY),
-        "",
+        "[features]\nguardian_reuse_parent_compaction = true\n[features.guardianv2]\nthread_context = true\n",
         /*model_defaults*/ None,
     )
     .await?;
@@ -2896,9 +2902,21 @@ mod cached_delivery;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn incompatible_compaction_blocks_cached_score_and_initial_cua_allowance() -> Result<()> {
+    assert_compaction_approval_policy(/*thread_context_enabled*/ true).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_incompatible_compaction_preserves_cached_score_and_initial_cua_allowance()
+-> Result<()> {
+    assert_compaction_approval_policy(/*thread_context_enabled*/ false).await
+}
+
+async fn assert_compaction_approval_policy(thread_context_enabled: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let fixture = GuardianFailureFixture::with_config("").await?;
+    let fixture = GuardianFailureFixture::with_config(&format!(
+        "[features]\nguardian_reuse_parent_compaction = true\n[features.guardianv2]\nthread_context = {thread_context_enabled}\n"
+    )).await?;
     let thread_store = fixture.test.codex.thread_extension_data();
     set_cached_score(
         thread_store,
@@ -2953,7 +2971,8 @@ async fn incompatible_compaction_blocks_cached_score_and_initial_cua_allowance()
         /*index*/ 1,
         score_authorization,
     );
-    // No new sample runs: the live checkpoint rejects cached and initial-call approvals.
+    // No new sample runs: only the opted-in parent-context path rejects these
+    // approvals. Legacy keeps its prior raw-history behavior.
     for (computer_use_only, prompt) in [
         (false, "review action"),
         (
@@ -2981,7 +3000,7 @@ async fn incompatible_compaction_blocks_cached_score_and_initial_cua_allowance()
                 /*metrics*/ None
             )
             .await,
-            None
+            (!thread_context_enabled).then_some(ReviewDecision::Approved)
         );
     }
     Ok(())
@@ -3622,7 +3641,8 @@ async fn assert_parent_compaction_reuse(parent_context_for_review: bool) -> Resu
     .await?;
     assert_eq!(previous_score.scores.get("action_risk"), Some(&0.0));
     // Raw injection did not attach producer provenance to the live checkpoint.
-    // The sample's mock snapshot cannot make that live checkpoint safe for approval.
+    // The sample's mock snapshot cannot make that live checkpoint safe for
+    // parent-context approval. Legacy omission remains a separate contract.
     assert_eq!(
         cached_approval(
             &registry,
@@ -3631,7 +3651,7 @@ async fn assert_parent_compaction_reuse(parent_context_for_review: bool) -> Resu
             /*metrics*/ None,
         )
         .await,
-        None,
+        (!parent_context_for_review).then_some(ReviewDecision::Approved),
     );
 
     let oversized_compaction = ResponseItem::Compaction {

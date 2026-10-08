@@ -1750,14 +1750,10 @@ impl Session {
                         &durable_fork_sources,
                         &pending_fork_history,
                     );
-                let pending_guardian_items = pending_fork_guardian_history
-                    .iter()
-                    .map(|envelope| envelope.item.clone())
-                    .collect::<Vec<_>>();
                 let durable_guardian_items =
                     codex_history::CompactedHistoryResolver::filter_exact_guardian_sources(
                         &durable_fork_sources,
-                        &pending_guardian_items,
+                        &pending_fork_guardian_history,
                     );
                 {
                     let mut state = self.state.lock().await;

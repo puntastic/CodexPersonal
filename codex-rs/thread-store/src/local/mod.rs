@@ -1040,7 +1040,10 @@ mod tests {
         )
         .await
         .expect("resume paginated thread from its requested rollout");
-        assert_eq!(supplied_history, history);
+        assert_eq!(
+            serde_json::to_value(supplied_history.as_ref()).expect("serialize resumed history"),
+            serde_json::to_value(history.as_ref()).expect("serialize expected history")
+        );
         let resumed_path = resumed
             .local_rollout_path()
             .await
@@ -1988,7 +1991,10 @@ mod tests {
             })
             .await
             .expect("same-path append should replace the stale snapshot with canonical history");
-        assert_eq!(*resumed_history, fresh_context.items);
+        assert_eq!(
+            serde_json::to_value(resumed_history.as_ref()).expect("serialize authoritative history"),
+            serde_json::to_value(&fresh_context.items).expect("serialize fresh source history")
+        );
         assert_eq!(
             tokio::fs::metadata(&rollout_path)
                 .await

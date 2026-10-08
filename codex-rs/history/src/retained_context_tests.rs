@@ -477,6 +477,9 @@ fn metadata_free_rollback_uses_the_retained_user_message_ledger() {
             .ordered_entries()
             .map(|(_, entry)| match entry {
                 RetainedContextEntry::UserMessage(message) => message.text.as_str(),
+                RetainedContextEntry::AssistantMessage(_) => {
+                    panic!("this fixture did not record assistant context")
+                }
                 RetainedContextEntry::VerifiedAnswer(answer) => answer.questions[0].answer.as_str(),
             })
             .collect::<Vec<_>>(),

@@ -2824,10 +2824,11 @@ async fn rollback_rewrite_removes_stale_guardian_evidence_from_newer_checkpoint(
             guardian_histories.push(history.0.clone());
         }
     }
-    assert_eq!(
-        guardian_histories,
-        vec![retained_guardian.clone(), retained_guardian]
-    );
+    let expected_guardian = retained_guardian
+        .into_iter()
+        .map(codex_rollout::ResponseItemEnvelope::from)
+        .collect::<Vec<_>>();
+    assert_eq!(guardian_histories, vec![expected_guardian.clone(), expected_guardian]);
     let mut cold_context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
@@ -3480,7 +3481,7 @@ async fn migration_keeps_empty_replay_anchor_from_rolled_back_turn() {
             .guardian_history
             .expect("retained Guardian checkpoint")
             .0,
-        vec![retained_guardian]
+        vec![codex_rollout::ResponseItemEnvelope::from(retained_guardian)]
     );
 }
 

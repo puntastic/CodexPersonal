@@ -187,11 +187,11 @@ impl CompactedHistoryResolver {
     /// sources and preserves their harness metadata for future V2 digest-bound checkpoints.
     pub fn filter_exact_guardian_sources(
         rollout_items: &[RolloutItem],
-        candidates: &[codex_protocol::models::ResponseItem],
+        candidates: &[ResponseItemEnvelope],
     ) -> Vec<ResponseItemEnvelope> {
         let requested_item_ids = candidates
             .iter()
-            .filter_map(codex_protocol::models::ResponseItem::id)
+            .filter_map(|candidate| candidate.item.id())
             .map(|item_id| item_id.as_str().to_string())
             .collect::<HashSet<_>>();
         let explicit_sources = latest_guardian_sources_for_ids(rollout_items, &requested_item_ids);
@@ -199,10 +199,10 @@ impl CompactedHistoryResolver {
         candidates
             .iter()
             .filter_map(|candidate| {
-                let item_id = candidate.id()?;
+                let item_id = candidate.item.id()?;
                 explicit_sources
                     .get(item_id.as_str())
-                    .filter(|source| source.item == *candidate)
+                    .filter(|source| *source == candidate)
                     .cloned()
             })
             .collect()

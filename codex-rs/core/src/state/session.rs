@@ -4,6 +4,7 @@ use codex_protocol::models::BaseInstructionsProvenance;
 #[cfg(test)]
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 

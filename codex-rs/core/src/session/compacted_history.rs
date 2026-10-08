@@ -7,7 +7,6 @@ use codex_history::ResponseItemEnvelope;
 use codex_history::RolloutItem;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
-use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 
 /// Storage representation for one complete compacted history.
@@ -88,9 +87,9 @@ pub(super) fn encode_replacement_history(
 
 /// Encodes a Guardian checkpoint against exact durable response-item sources.
 ///
-/// Guardian history intentionally carries response items rather than harness metadata. V2
-/// references nevertheless bind the complete persisted source envelope, so a later metadata-only
-/// substitution still fails closed before its response item can be restored as review evidence.
+/// Guardian history carries annotated envelopes. Only an exact complete source may be
+/// referenced; metadata differences stay inline rather than borrowing another delivery's proof.
+/// V2 additionally binds the durable envelope against later source substitution.
 pub(super) fn encode_guardian_history(
     checkpoint: GuardianHistoryCheckpoint,
     persisted_items: &HashMap<String, ResponseItemEnvelope>,
@@ -100,7 +99,7 @@ pub(super) fn encode_guardian_history(
         return checkpoint;
     }
 
-    let conflicting_item_ids = conflicting_response_item_ids(&checkpoint.0);
+    let conflicting_item_ids = conflicting_history_item_ids(&checkpoint.0);
     let mut has_reference = false;
     let entries = checkpoint
         .0
@@ -113,7 +112,7 @@ pub(super) fn encode_guardian_history(
                 } else {
                     persisted_items
                         .get(item_id.as_str())
-                        .filter(|source| source.item == item)
+                        .filter(|source| *source == &item)
                         .map(|source| (item_id.as_str().to_string(), source))
                 }
             });
@@ -125,14 +124,14 @@ pub(super) fn encode_guardian_history(
                             has_reference = true;
                             reference
                         }
-                        Err(_) => CompactedHistoryEntry::from(ResponseItemEnvelope::new(item)),
+                        Err(_) => CompactedHistoryEntry::from(item),
                     }
                 } else {
                     has_reference = true;
                     CompactedHistoryEntry::Reference { item_id }
                 }
             } else {
-                CompactedHistoryEntry::from(ResponseItemEnvelope::new(item))
+                CompactedHistoryEntry::from(item)
             }
         })
         .collect();
@@ -158,25 +157,6 @@ fn conflicting_history_item_ids(items: &[ResponseItemEnvelope]) -> HashSet<Strin
                     entry.insert(envelope);
                 }
                 std::collections::hash_map::Entry::Occupied(entry) if entry.get() != &envelope => {
-                    conflicting.insert(item_id.to_string());
-                }
-                std::collections::hash_map::Entry::Occupied(_) => {}
-            }
-        }
-    }
-    conflicting
-}
-
-fn conflicting_response_item_ids(items: &[ResponseItem]) -> HashSet<String> {
-    let mut first_by_id = HashMap::new();
-    let mut conflicting = HashSet::new();
-    for item in items {
-        if let Some(item_id) = item.id().map(codex_protocol::ResponseItemId::as_str) {
-            match first_by_id.entry(item_id) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(item);
-                }
-                std::collections::hash_map::Entry::Occupied(entry) if entry.get() != &item => {
                     conflicting.insert(item_id.to_string());
                 }
                 std::collections::hash_map::Entry::Occupied(_) => {}

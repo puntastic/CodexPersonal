@@ -145,6 +145,9 @@ pub trait AgentControl: Send + Sync {
         window: &'a str,
         reminder: RolloutBudgetReminder,
     ) -> BoxFuture<'a, ()>;
+
+    /// Rearm this agent's reminder after rollback removes the recorded delivery.
+    fn rearm_budget_reminder(&self, agent: ThreadId) -> BoxFuture<'_, ()>;
 }
 
 /// References resolve relative to the registered caller. IDs retain each operation's

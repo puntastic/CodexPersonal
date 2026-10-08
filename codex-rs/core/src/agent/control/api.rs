@@ -304,4 +304,10 @@ impl AgentControl for LocalAgentControl {
             LocalAgentControl::mark_budget_reminder_delivered(self, agent, window, reminder);
         })
     }
+
+    fn rearm_budget_reminder(&self, agent: ThreadId) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            LocalAgentControl::rearm_budget_reminder(self, agent);
+        })
+    }
 }
