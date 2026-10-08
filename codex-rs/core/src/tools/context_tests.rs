@@ -242,12 +242,17 @@ fn mcp_tool_output_code_mode_result_preserves_content_without_private_metadata(
     truncation_policy: TruncationPolicy,
 ) {
     let large_content = "large structured value ".repeat(1_000);
+    let content = vec![
+        json!({"type":"text", "text":"caption"}),
+        json!({
+            "type":"image", "mimeType":"image/png", "data":"AAA",
+            "_meta":{"codex/imageDetail":"original"},
+        }),
+        json!({"type":"audio", "mimeType":"audio/wav", "data":"AAA"}),
+    ];
     let output = McpToolOutput {
         result: CallToolResult {
-            content: vec![serde_json::json!({
-                "type": "text",
-                "text": "ignored",
-            })],
+            content: content.clone(),
             structured_content: Some(serde_json::json!({
                 "content": large_content,
             })),
@@ -271,10 +276,7 @@ fn mcp_tool_output_code_mode_result_preserves_content_without_private_metadata(
     assert_eq!(
         result,
         serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": "ignored",
-            }],
+            "content": content,
             "structuredContent": {
                 "content": "large structured value ".repeat(1_000),
             },
@@ -285,6 +287,71 @@ fn mcp_tool_output_code_mode_result_preserves_content_without_private_metadata(
         output.result.meta,
         Some(serde_json::json!({ "hive_dispatch_id": "private-dispatch-id" }))
     );
+}
+
+#[test]
+fn mcp_mixed_media_response_keeps_truncation_detail_and_private_metadata_boundaries() {
+    let structured = json!({"items": "large structured value ".repeat(1_000)});
+    for (truncation_policy, marker) in [
+        (TruncationPolicy::Bytes(128), "chars truncated"),
+        (TruncationPolicy::Tokens(32), "tokens truncated"),
+    ] {
+        let output = McpToolOutput {
+            result: CallToolResult {
+                content: vec![
+                    json!({"type":"text", "text":"caption after structured JSON"}),
+                    json!({
+                        "type":"image", "mimeType":"image/png", "data":"AAA",
+                        "_meta":{"codex/imageDetail":"original"},
+                    }),
+                    json!({"type":"audio", "mimeType":"audio/wav", "data":"AAA"}),
+                ],
+                structured_content: Some(structured.clone()),
+                is_error: Some(true),
+                meta: Some(json!({"hive_dispatch_id":"private-dispatch-id"})),
+            },
+            tool_input: json!({}),
+            result_metadata_capture_allowed: false,
+            wall_time: std::time::Duration::from_millis(500),
+            original_image_detail_supported: false,
+            truncation_policy,
+        };
+        let payload = ToolPayload::Function {
+            arguments: "{}".to_string(),
+        };
+        let response = output.to_response_item("mixed-media", &payload);
+        let ResponseInputItem::FunctionCallOutput { output: response, .. } = response else {
+            panic!("expected FunctionCallOutput");
+        };
+        assert_eq!(response.success, Some(false));
+        let items = response.content_items().expect("mixed result stays typed");
+        assert_eq!(
+            items.iter().filter(|item| matches!(item, FunctionCallOutputContentItem::InputImage { .. })).cloned().collect::<Vec<_>>(),
+            vec![FunctionCallOutputContentItem::InputImage {
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,AAA".to_string(),
+                },
+                detail: Some(DEFAULT_IMAGE_DETAIL),
+            }]
+        );
+        assert!(!items.iter().any(|item| matches!(item, FunctionCallOutputContentItem::InputAudio { .. })));
+        let text = response.body.to_text().expect("mixed output has text");
+        assert!(text.starts_with("Wall time: 0.5000 seconds\nOutput:\n"));
+        assert!(text.contains(marker));
+        assert!(text.contains("[omitted 1 audio items ...]"));
+        assert!(text.len() < 1_000);
+        assert!(!text.contains("private-dispatch-id"));
+        assert_eq!(output.tool_result_metadata(), None);
+        assert_eq!(
+            output.post_tool_use_response("mixed-media", &payload),
+            Some(serde_json::to_value(&output.result).expect("serialize original hook result"))
+        );
+        assert_eq!(
+            output.result.structured_content.as_ref(),
+            Some(&structured),
+            "model truncation must not mutate the original result or hook envelope"
+        );
+    }
 }
 
 #[test]

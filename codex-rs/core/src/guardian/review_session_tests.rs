@@ -27,10 +27,6 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
             codex_login::CodexAuth::from_api_key("Test API Key"),
             Vec::new(),
             |config| {
-                config
-                    .features
-                    .enable(Feature::GuardianThreadContext)
-                    .unwrap();
                 config.features.disable(Feature::TokenBudget).unwrap();
             },
         )
@@ -65,7 +61,9 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
         parent.inherited_instructions().await,
         params.parent_history.history_version(),
         params.parent_history.review_history_version(),
-        parent.guardian_context_mode,
+        GuardianContextMode::from_history(
+            params.parent_history.conversation_history_snapshot().as_ref(),
+        ),
     )
     .with_environments(params.parent_context.environments())
     .with_node_repl_policy_eligibility(
@@ -89,6 +87,7 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
             /*reference_context_item*/ None,
             /*world_state_baseline*/ None,
             crate::compact::CompactedHistoryMetadata {
+                input_goal_ids: Default::default(),
                 message: String::new(),
                 window_number,
                 window_ids,
@@ -199,6 +198,7 @@ fn turn_aborted_event(turn_id: &str) -> Event {
             turn_id: Some(turn_id.to_string()),
             started_at: None,
             reason: TurnAbortReason::Interrupted,
+            error: None,
             completed_at: None,
             duration_ms: None,
         }),
@@ -231,6 +231,7 @@ async fn test_review_params() -> GuardianReviewSessionParams {
         parent_context: GuardianReviewContext::from(Arc::new(turn)),
         spawn_config,
         node_repl_policy: GuardianNodeReplPolicy::from_messages(ResolvedModelMessages::bundled()),
+        category: GuardianScope::Shell,
         request: GuardianApprovalRequest::ExecCommand {
             id: "shell-1".to_string(),
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
@@ -300,7 +301,7 @@ async fn spawned_guardian_reuse_key_matches_inherited_instructions() {
         },
         /*parent_history_version*/ 0,
         /*review_history_version*/ 0,
-        parent.guardian_context_mode,
+        GuardianContextMode::from_history(parent.conversation_history_snapshot().await.as_ref()),
     );
     let expected_key = GuardianReviewSessionReuseKey {
         user_instructions: latest_global,
@@ -495,23 +496,17 @@ async fn summary_free_reuse_requires_unchanged_review_history() {
     assert_ne!(review_evidence_changed, cached);
 }
 
-#[test_case::test_case(true; "thread owned")]
-#[test_case::test_case(false; "legacy")]
+#[test_case::test_case(GuardianContextMode::ThreadOwned; "thread owned")]
+#[test_case::test_case(GuardianContextMode::Legacy; "legacy checkpoint")]
+#[test_case::test_case(GuardianContextMode::Independent; "independent ignores checkpoint")]
 #[tokio::test]
-async fn encrypted_parent_compaction_requires_original_item_id(thread_context_enabled: bool) {
+async fn encrypted_parent_compaction_requires_original_item_id(mode: GuardianContextMode) {
     let (session, _) = crate::session::tests::make_session_and_context().await;
     let mut features = session.get_config().await.features.clone();
     features
-        .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
-        .expect("context mode");
-    features
-        .set_enabled(
-            Feature::GuardianReuseParentCompaction,
-            !thread_context_enabled,
-        )
-        .expect("legacy checkpoint reuse is explicit; thread-owned review does not need it");
-    let policy =
-        ReviewContextPolicy::for_context(GuardianContextMode::from_features(&features), &features);
+        .enable(Feature::GuardianReuseParentCompaction)
+        .expect("exercise checkpoint reuse");
+    let policy = ReviewContextPolicy::for_context(mode, &features);
     let item = ResponseItem::Compaction {
         id: Some(codex_protocol::ResponseItemId::from_server(
             "cmp_guardian_parent_summary".to_string(),
@@ -532,7 +527,7 @@ async fn encrypted_parent_compaction_requires_original_item_id(thread_context_en
         policy
             .parent_compaction(&history)
             .expect("valid checkpoint"),
-        Some(item)
+        (mode != GuardianContextMode::Independent).then_some(item)
     );
     // The latest unusable checkpoint must not fall back to the older valid one.
     let mut items = history.annotated_items().to_vec();
@@ -546,7 +541,7 @@ async fn encrypted_parent_compaction_requires_original_item_id(thread_context_en
     );
     history.replace_annotated(items);
     let result = policy.parent_compaction(&history);
-    if thread_context_enabled {
+    if mode == GuardianContextMode::ThreadOwned {
         assert!(result.is_err());
     } else {
         assert_eq!(result.expect("legacy omission"), None);

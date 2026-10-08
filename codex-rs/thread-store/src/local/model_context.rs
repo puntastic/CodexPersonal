@@ -1,7 +1,7 @@
 //! Reconstructs model context and preserves source runtime metadata across fork cutoffs.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::Path;
 
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
@@ -48,22 +48,16 @@ pub(super) async fn load_latest_model_context(
         message: format!("no rollout found for thread id {}", params.thread_id),
     })?;
 
-    load_latest_model_context_from_rollout(
-        store,
-        params.thread_id,
-        resolved.rollout_id,
-        resolved.path,
-    )
-    .await
+    load_from_rollout_path(store, params.thread_id, &resolved.path).await
 }
 
-pub(super) async fn load_latest_model_context_from_rollout(
+pub(super) async fn load_from_rollout_path(
     store: &LocalThreadStore,
     thread_id: ThreadId,
-    rollout_id: ThreadId,
-    path: PathBuf,
+    path: &Path,
 ) -> ThreadStoreResult<StoredModelContext> {
-    let session_meta = codex_rollout::read_session_meta_line(path.as_path())
+    let before = super::history_revision::read(path).await;
+    let session_meta = codex_rollout::read_session_meta_line(path)
         .await
         .map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to read session metadata {}: {err}", path.display()),
@@ -80,15 +74,25 @@ pub(super) async fn load_latest_model_context_from_rollout(
     }
 
     let items = if session_meta.meta.history_mode.is_paginated() {
+        let rollout_id = thread_rollout_resolver::rollout_id_from_path_or_legacy_thread_id(
+            path,
+            thread_id,
+            session_meta.meta.history_mode,
+        )?;
         let lineage = store
-            .resolve_rollout_lineage_from_rollout(thread_id, rollout_id, path.clone())
+            .resolve_rollout_lineage_from_rollout(thread_id, rollout_id, path.to_path_buf())
             .await?;
         scan_model_context_from_lineage(lineage, session_meta).await?
     } else {
-        read_thread::load_history_items(path.as_path()).await?
+        read_thread::load_history_items(path).await?
     };
 
-    Ok(StoredModelContext { thread_id, items })
+    let after = super::history_revision::read(path).await;
+    Ok(StoredModelContext {
+        revision: before.filter(|revision| Some(revision) == after.as_ref()),
+        thread_id,
+        items,
+    })
 }
 
 /// Loads startup context from a fork's frozen inherited prefix.

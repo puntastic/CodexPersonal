@@ -68,6 +68,7 @@ enum EvidenceSize {
 enum ContextPath {
     Legacy,
     ThreadOwned,
+    Independent,
 }
 
 #[derive(Clone, Copy)]
@@ -85,6 +86,8 @@ enum ReviewCheckpoint {
     EmptyReviewerHash,
 }
 
+#[test_case(ContextPath::Independent, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "independent transcript ignores incompatible checkpoints")]
+#[test_case(ContextPath::Independent, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "independent transcript overrides Luna checkpoint reuse")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::EmptyContent; "empty checkpoint fails closed")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::DifferentReviewerHash; "different sync hash preserves retained evidence")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::UnknownReviewer; "unknown sync hash preserves retained evidence")]
@@ -124,6 +127,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
     let reuse_parent_compaction = matches!(checkpoint_reuse, CheckpointReuse::Enabled);
     let compatible =
         reuse_parent_compaction && parent_hash == Some("matching") && luna_hash == parent_hash;
+    let independent = matches!(context_path, ContextPath::Independent);
     let requires_sync = matches!(context_path, ContextPath::ThreadOwned) && !compatible;
     let oversized_instruction = matches!(evidence_size, EvidenceSize::OversizedInstruction);
     let reviewer_hash = match review_checkpoint {
@@ -164,7 +168,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
     }
     let rejects_incomplete_score = matches!(
         (context_path, evidence_size),
-        (ContextPath::ThreadOwned, EvidenceSize::OversizedAnswer)
+        (ContextPath::ThreadOwned | ContextPath::Independent, EvidenceSize::OversizedAnswer)
     );
     let classifier = Arc::new(MockResponsesState {
         luna_score: if rejects_incomplete_score || oversized_instruction || requires_sync {
@@ -272,7 +276,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
     let codex_home = TempDir::new()?;
     let thread_context_enabled = match context_path {
         ContextPath::Legacy => false,
-        ContextPath::ThreadOwned => true,
+        ContextPath::ThreadOwned | ContextPath::Independent => true,
     };
     let mut mock_config = MockResponsesConfig::new(&responses_url)
         .with_provider_name("OpenAI")
@@ -285,11 +289,13 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         .with_extra_config(&format!(
             "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[features.guardianv2]\nenabled = true\nthread_context = {thread_context_enabled}\npersist_scores = true\nreuse_parent_compaction = {reuse_parent_compaction}\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
         ));
-    // This gate controls legacy synchronous review, independently of Luna's nested
-    // reuse_parent_compaction setting. Thread-owned review must not depend on it.
+    // The host feature selects checkpoint-based versus independent reviewer history.
+    // Luna retains its separately configured checkpoint-reuse gate.
     mock_config = match context_path {
-        ContextPath::Legacy => mock_config.enable_feature(Feature::GuardianReuseParentCompaction),
-        ContextPath::ThreadOwned => {
+        ContextPath::Legacy | ContextPath::ThreadOwned => {
+            mock_config.enable_feature(Feature::GuardianReuseParentCompaction)
+        }
+        ContextPath::Independent => {
             mock_config.disable_feature(Feature::GuardianReuseParentCompaction)
         }
     };
@@ -553,8 +559,11 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
             let review = &reviews[index];
             let sync_input = review["input"].as_array().expect("request input array");
             let async_input = request["input"].as_array().expect("request input array");
-            assert_eq!(sync_input.contains(&checkpoint), index > 0);
-            assert_eq!(async_input.contains(&checkpoint), index > 0 && compatible);
+            assert_eq!(sync_input.contains(&checkpoint), index > 0 && !independent);
+            assert_eq!(
+                async_input.contains(&checkpoint),
+                index > 0 && compatible && !independent,
+            );
             let sync_text = sync_input
                 .iter()
                 .filter(|item| item["role"] == "user")
@@ -648,7 +657,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
                 }
             }
             for (consumer, text) in [("async", &content), ("sync", &sync_text)] {
-                if matches!(context_path, ContextPath::ThreadOwned) || index == 0 {
+                if !matches!(context_path, ContextPath::Legacy) || index == 0 {
                     let answers = text
                         .split_once(">>> TRUSTED USER ANSWERS START")
                         .unwrap_or_else(|| {
@@ -661,7 +670,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
                             assert!(answers.contains(&format!("user: {USER_INPUT_RESTRICTION}")));
                         }
                         EvidenceSize::OversizedAnswer => match context_path {
-                            ContextPath::ThreadOwned => {
+                            ContextPath::ThreadOwned | ContextPath::Independent => {
                                 assert!(
                                     answers.contains("some verified user answers are unavailable")
                                 );
@@ -675,40 +684,10 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
                         },
                     }
                 } else {
-                    if index == 4 {
-                        assert!(
-                            !text.contains(USER_INPUT_RESTRICTION),
-                            "rolled-back restriction remains in {consumer} review at step {index}: {text}"
-                        );
-                    }
-                    if index == 4 && matches!(context_path, ContextPath::ThreadOwned) {
-                        // This rollback crosses the checkpoint without a legacy review-window
-                        // backup. Checkpoint compatibility does not establish an exact cutoff:
-                        // ambiguous answers are discarded, but their incomplete-evidence notice stays.
-                        let answers = text
-                            .split_once(">>> TRUSTED USER ANSWERS START\n")
-                            .unwrap_or_else(|| {
-                                panic!("missing fail-closed answer section in {consumer} review at step {index}: {text}")
-                            })
-                            .1
-                            .split_once(">>> TRUSTED USER ANSWERS END")
-                            .expect("trusted answer section end")
-                            .0;
-                        assert_eq!(
-                            answers.trim(),
-                            "Host notice: some verified user answers are unavailable within the evidence budget. Do not treat the remaining answers as complete authorization for an action.",
-                            "only the incomplete-evidence notice may survive in {consumer} review at step {index}"
-                        );
-                        assert!(
-                            !text.contains("assistant: Can I keep using the browser?"),
-                            "rolled-back answer remains in {consumer} review at step {index}: {text}"
-                        );
-                    } else {
-                        assert!(
-                            !text.contains(">>> TRUSTED USER ANSWERS START"),
-                            "unexpected answer section in {consumer} review at step {index}: {text}"
-                        );
-                    }
+                    assert!(
+                        !text.contains(">>> TRUSTED USER ANSWERS START"),
+                        "unexpected answer section in {consumer} review at step {index}: {text}"
+                    );
                 }
             }
         }
@@ -774,13 +753,15 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
 
     app_server.shutdown_gracefully().await?;
     let rollout = std::fs::read_to_string(thread.path.as_ref().expect("saved rollout path"))?;
-    if matches!(context_path, ContextPath::ThreadOwned) {
-        for line in rollout
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        {
-            if line["type"] == "compacted" {
-                assert!(line["payload"]["guardian_history"].is_null());
+    for line in rollout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+    {
+        if line["type"] == "compacted" {
+            let saved_review = &line["payload"]["guardian_history"];
+            assert_eq!(saved_review.is_null(), matches!(context_path, ContextPath::ThreadOwned));
+            if independent {
+                assert!(saved_review.to_string().contains(EVIDENCE));
             }
         }
     }
@@ -793,8 +774,8 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
             .iter()
             .filter(|line| matches!(line.item, RolloutItem::RetainedContext(_)))
             .count(),
-        usize::from(matches!(context_path, ContextPath::ThreadOwned)),
-        "only the enabled path may persist a retained-answer event",
+        1,
+        "capture persists verified answers independently of the reviewer mode",
     );
     for line in &items {
         if let RolloutItem::Compacted(checkpoint) = &line.item {
@@ -812,22 +793,6 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
                         "every compaction records its producer provenance",
                     );
                 }
-            }
-        }
-    }
-    if matches!(context_path, ContextPath::Legacy) {
-        for line in &items {
-            if let RolloutItem::Compacted(checkpoint) = &line.item {
-                assert_eq!(
-                    checkpoint
-                        .retained_context
-                        .as_ref()
-                        .expect("retained context checkpoint")
-                        .verified_answers()
-                        .count(),
-                    0,
-                    "flag-off compaction must not populate retained answers",
-                );
             }
         }
     }

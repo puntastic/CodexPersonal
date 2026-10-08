@@ -83,8 +83,12 @@ impl Session {
         // The caller may be inside the task that cancellation must join.
         let _ = reply.send(active_turn.is_some());
         if let Some(active_turn) = active_turn {
-            self.finish_turn_abort(active_turn, TurnAbortReason::Interrupted)
-                .await;
+            self.finish_turn_abort(
+                active_turn,
+                TurnAbortReason::Interrupted,
+                /*error*/ None,
+            )
+            .await;
         }
     }
 }

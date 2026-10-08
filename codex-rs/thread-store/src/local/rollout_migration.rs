@@ -2730,7 +2730,7 @@ fn collect_response_item_ids(item: &RolloutItem, item_ids: &mut HashSet<String>)
                     }
                 } else {
                     for item in &guardian_history.0 {
-                        collect_response_item_id(item, item_ids);
+                        collect_response_item_envelope_id(item, item_ids);
                     }
                 }
             }

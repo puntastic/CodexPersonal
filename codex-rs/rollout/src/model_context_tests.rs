@@ -288,7 +288,7 @@ fn guardian_reference_retains_an_older_guardian_only_source_carrier() {
             .expect("retained Guardian source should resolve")
             .expect("Guardian checkpoint")
             .0,
-        vec![response("msg-guardian")]
+        vec![codex_history::ResponseItemEnvelope::from(response("msg-guardian"))]
     );
     let RolloutItem::Compacted(carrier) = &rollout[selected_index - 1] else {
         panic!("expected compacted source carrier");
@@ -300,7 +300,7 @@ fn guardian_reference_retains_an_older_guardian_only_source_carrier() {
             .as_ref()
             .expect("Guardian-only source")
             .0,
-        vec![response("msg-guardian")]
+        vec![codex_history::ResponseItemEnvelope::from(response("msg-guardian"))]
     );
 }
 
@@ -407,7 +407,9 @@ fn guardian_legacy_checkpoint(
     let RolloutItem::Compacted(mut compacted) = legacy_checkpoint(replacement_items) else {
         unreachable!();
     };
-    compacted.guardian_history = Some(GuardianHistoryCheckpoint(guardian_items));
+    compacted.guardian_history = Some(GuardianHistoryCheckpoint(
+        guardian_items.into_iter().map(Into::into).collect(),
+    ));
     RolloutItem::Compacted(compacted)
 }
 

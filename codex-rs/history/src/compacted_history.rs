@@ -286,7 +286,7 @@ impl CompactedHistoryResolver {
                         for item in &guardian_history.0 {
                             note_known_item(
                                 &mut self.guardian_known_items,
-                                &ResponseItemEnvelope::new(item.clone()),
+                                item,
                             );
                         }
                     }
@@ -371,7 +371,7 @@ impl CompactedHistoryResolver {
                             note_requested_item(
                                 &mut self.guardian_known_items,
                                 requested_item_ids,
-                                &ResponseItemEnvelope::new(item.clone()),
+                                item,
                             );
                         }
                     }
@@ -729,9 +729,9 @@ fn replace_guardian_known_items(
         };
         let envelope = previous
             .get(item_id)
-            .filter(|source| source.item == *item)
+            .filter(|source| item.metadata.is_none() && source.item == item.item)
             .cloned()
-            .unwrap_or_else(|| ResponseItemEnvelope::new(item.clone()));
+            .unwrap_or_else(|| item.clone());
         known_items.insert(item_id.to_string(), envelope);
     }
 }
@@ -750,27 +750,6 @@ fn conflicting_history_item_ids(items: &[ResponseItemEnvelope]) -> HashSet<Strin
                     entry.insert(envelope);
                 }
                 std::collections::hash_map::Entry::Occupied(entry) if entry.get() != &envelope => {
-                    conflicting.insert(item_id.to_string());
-                }
-                std::collections::hash_map::Entry::Occupied(_) => {}
-            }
-        }
-    }
-    conflicting
-}
-
-fn conflicting_response_item_ids(
-    items: &[codex_protocol::models::ResponseItem],
-) -> HashSet<String> {
-    let mut first_by_id = HashMap::new();
-    let mut conflicting = HashSet::new();
-    for item in items {
-        if let Some(item_id) = item.id().map(codex_protocol::ResponseItemId::as_str) {
-            match first_by_id.entry(item_id) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(item);
-                }
-                std::collections::hash_map::Entry::Occupied(entry) if entry.get() != &item => {
                     conflicting.insert(item_id.to_string());
                 }
                 std::collections::hash_map::Entry::Occupied(_) => {}
@@ -838,7 +817,7 @@ fn encode_guardian_with_references(
     known_items: &HashMap<String, ResponseItemEnvelope>,
     integrity_bound: bool,
 ) -> crate::GuardianHistoryCheckpoint {
-    let conflicting_item_ids = conflicting_response_item_ids(&checkpoint.0);
+    let conflicting_item_ids = conflicting_history_item_ids(&checkpoint.0);
     let mut has_reference = false;
     let entries = checkpoint
         .0
@@ -851,7 +830,7 @@ fn encode_guardian_with_references(
                 } else {
                     known_items
                         .get(item_id.as_str())
-                        .filter(|source| source.item == item)
+                        .filter(|source| *source == &item)
                         .map(|source| (item_id.as_str().to_string(), source))
                 }
             });
@@ -862,14 +841,14 @@ fn encode_guardian_with_references(
                             has_reference = true;
                             reference
                         }
-                        Err(_) => CompactedHistoryEntry::from(ResponseItemEnvelope::new(item)),
+                        Err(_) => CompactedHistoryEntry::from(item),
                     }
                 } else {
                     has_reference = true;
                     CompactedHistoryEntry::Reference { item_id }
                 }
             } else {
-                CompactedHistoryEntry::from(ResponseItemEnvelope::new(item))
+                CompactedHistoryEntry::from(item)
             }
         })
         .collect();
@@ -939,7 +918,7 @@ fn latest_sources_for_ids(
                             note_requested_item(
                                 &mut sources,
                                 requested_item_ids,
-                                &ResponseItemEnvelope::new(item.clone()),
+                                item,
                             );
                         }
                     }
@@ -1043,10 +1022,7 @@ fn resolve_guardian_history(
         return Ok(Some(checkpoint.clone()));
     };
 
-    let history = resolve_history_entries(known_items, entries)?
-        .into_iter()
-        .map(|envelope| envelope.item)
-        .collect();
+    let history = resolve_history_entries(known_items, entries)?;
     Ok(Some(crate::GuardianHistoryCheckpoint(history)))
 }
 

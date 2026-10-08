@@ -32,10 +32,24 @@ impl LocalThreadStore {
     pub(super) async fn resolve_rollout_lineage(
         &self,
         requested_thread_id: ThreadId,
+        initial_path: Option<PathBuf>,
     ) -> ThreadStoreResult<RolloutLineage> {
+        let initial_rollout = if let Some(path) = initial_path {
+            let meta = codex_rollout::read_session_meta_line(&path)
+                .await
+                .map_err(|err| malformed_lineage(requested_thread_id, &err.to_string()))?;
+            let rollout_id = thread_rollout_resolver::rollout_id_from_path_or_legacy_thread_id(
+                &path,
+                requested_thread_id,
+                meta.meta.history_mode,
+            )?;
+            Some((rollout_id, path))
+        } else {
+            None
+        };
         self.resolve_rollout_lineage_with_representation(
             requested_thread_id,
-            None,
+            initial_rollout,
             LineageRepresentation::Existing,
         )
         .await

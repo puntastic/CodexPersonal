@@ -4,6 +4,7 @@ mod catalog;
 mod credential_export;
 mod error;
 mod mantle;
+mod region;
 mod runtime;
 mod runtime_catalog;
 
@@ -43,10 +44,13 @@ use crate::shared_state::process_shared_state;
 use auth::resolve_provider_auth as resolve_bedrock_provider_auth;
 pub(crate) use auth_refresh::AwsAuthRecovery;
 use catalog::normalize_bedrock_catalog;
+use catalog::static_gov_model_catalog;
 pub(crate) use catalog::static_model_catalog;
 pub(crate) use credential_export::AwsCredentialExport;
 use mantle::bedrock_mantle_runtime_base_url;
+pub use mantle::is_amazon_bedrock_gov_cloud_region;
 pub use mantle::is_supported_amazon_bedrock_region;
+pub use region::resolve_amazon_bedrock_region;
 use runtime::bedrock_runtime_base_url;
 use runtime_catalog::static_runtime_model_catalog;
 
@@ -244,7 +248,25 @@ impl AmazonBedrockModelProvider {
 
     fn default_model_catalog(&self) -> ModelsResponse {
         match self.endpoint {
-            BedrockEndpoint::Mantle => static_model_catalog(),
+            BedrockEndpoint::Mantle => {
+                let endpoint = self
+                    .info
+                    .base_url
+                    .as_deref()
+                    .and_then(|base_url| url::Url::parse(base_url).ok());
+                let is_govcloud =
+                    endpoint
+                        .as_ref()
+                        .and_then(url::Url::host_str)
+                        .is_some_and(|host| {
+                            host.starts_with("bedrock-mantle.us-gov-") && host.ends_with(".api.aws")
+                        });
+                if is_govcloud {
+                    static_gov_model_catalog()
+                } else {
+                    static_model_catalog()
+                }
+            }
             BedrockEndpoint::Runtime => static_runtime_model_catalog(),
         }
     }

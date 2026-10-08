@@ -48,9 +48,9 @@ pub use executed_tool_calls::MAX_TOOL_RESULT_SOURCE_FIELD_BYTES;
 pub use executed_tool_calls::ToolResultMetadata;
 pub use executed_tool_calls::ToolResultSource;
 pub use executed_tool_calls::ToolResultSources;
-pub use executed_tool_calls::bound_executed_tool_calls_for_prompt;
-pub use executed_tool_calls::bound_executed_tool_calls_for_prompt_prioritizing_recent;
+pub use executed_tool_calls::bound_executed_tool_calls_for_message;
 pub use executed_tool_calls::executed_tool_call_metadata_bytes;
+pub use executed_tool_calls::normalize_executed_tool_call_arguments;
 pub use item_metadata::ContentItemKind;
 
 /// Controls the per-command sandbox override requested by a shell-like tool call.
@@ -873,10 +873,11 @@ pub enum ResponseInputItem {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+#[derive(derive_more::Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentItem {
     InputText {
+        #[debug("{:?} <{} bytes>", &text[..text.floor_char_boundary(/*index*/ 512)], text.len())]
         text: String,
     },
     InputImage {
@@ -2315,8 +2316,26 @@ impl CallToolResult {
         {
             match serde_json::to_string(structured_content) {
                 Ok(serialized_structured_content) => {
+                    let body = if content_items.iter().any(|item| {
+                        matches!(
+                            item,
+                            FunctionCallOutputContentItem::InputImage { .. }
+                                | FunctionCallOutputContentItem::InputAudio { .. }
+                        )
+                    }) {
+                        // Structured JSON supplements typed media; keep its adjoining content
+                        // in order instead of flattening away the image or audio payload.
+                        let mut items = Vec::with_capacity(content_items.len() + 1);
+                        items.push(FunctionCallOutputContentItem::InputText {
+                            text: serialized_structured_content,
+                        });
+                        items.extend(content_items);
+                        FunctionCallOutputBody::ContentItems(items)
+                    } else {
+                        FunctionCallOutputBody::Text(serialized_structured_content)
+                    };
                     return FunctionCallOutputPayload {
-                        body: FunctionCallOutputBody::Text(serialized_structured_content),
+                        body,
                         success: Some(self.success()),
                     };
                 }
@@ -3428,6 +3447,117 @@ mod tests {
                     serde_json::json!({"result":"structured"}).to_string(),
                 ),
                 success: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn preserves_structured_mcp_content_with_typed_media_and_adjoining_text() {
+        let structured_content = serde_json::json!({"result":"structured"});
+        for (media, expected_media) in [
+            (
+                serde_json::json!({
+                    "type":"image", "data":"BASE64", "mimeType":"image/png",
+                    "_meta": {"codex/imageDetail":"original"},
+                }),
+                FunctionCallOutputContentItem::InputImage {
+                    image: ImageReference::Inline {
+                        image_url: "data:image/png;base64,BASE64".to_string(),
+                    },
+                    detail: Some(ImageDetail::Original),
+                },
+            ),
+            (
+                serde_json::json!({"type":"audio", "data":"BASE64", "mimeType":"audio/wav"}),
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "data:audio/wav;base64,BASE64".to_string(),
+                },
+            ),
+        ] {
+            for is_error in [None, Some(false), Some(true)] {
+                let result = CallToolResult {
+                    content: vec![
+                        serde_json::json!({"type":"text", "text":"before"}),
+                        media.clone(),
+                        serde_json::json!({"type":"text", "text":"after"}),
+                    ],
+                    structured_content: Some(structured_content.clone()),
+                    is_error,
+                    meta: None,
+                };
+                assert_eq!(
+                    result.as_function_call_output_payload(),
+                    FunctionCallOutputPayload {
+                        body: FunctionCallOutputBody::ContentItems(vec![
+                            FunctionCallOutputContentItem::InputText {
+                                text: structured_content.to_string(),
+                            },
+                            FunctionCallOutputContentItem::InputText {
+                                text: "before".to_string(),
+                            },
+                            expected_media.clone(),
+                            FunctionCallOutputContentItem::InputText {
+                                text: "after".to_string(),
+                            },
+                        ]),
+                        success: Some(is_error != Some(true)),
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn structured_mcp_content_with_malformed_media_keeps_text_preference() {
+        let result = CallToolResult {
+            content: vec![
+                serde_json::json!({"type":"image", "mimeType":"image/png"}),
+                serde_json::json!({"type":"audio", "mimeType":"audio/wav"}),
+            ],
+            structured_content: Some(serde_json::json!({"result":"structured"})),
+            is_error: None,
+            meta: None,
+        };
+        assert_eq!(
+            result.as_function_call_output_payload(),
+            FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text(
+                    serde_json::json!({"result":"structured"}).to_string(),
+                ),
+                success: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn encrypted_mcp_content_keeps_precedence_over_structured_media() {
+        let result = CallToolResult {
+            content: vec![
+                serde_json::json!({
+                    "type":"text", "text":"enc_opaque",
+                    "_meta":{"codex/encryptedContent":true},
+                }),
+                serde_json::json!({"type":"image", "data":"BASE64", "mimeType":"image/png"}),
+            ],
+            structured_content: Some(serde_json::json!({"result":"ignored"})),
+            is_error: Some(true),
+            meta: None,
+        };
+        assert_eq!(
+            result.as_function_call_output_payload(),
+            FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::ContentItems(vec![
+                    FunctionCallOutputContentItem::EncryptedContent {
+                        encrypted_content: "enc_opaque".to_string(),
+                    },
+                    FunctionCallOutputContentItem::InputImage {
+                        image: ImageReference::Inline {
+                            image_url: "data:image/png;base64,BASE64".to_string(),
+                        },
+                        detail: Some(DEFAULT_IMAGE_DETAIL),
+                    },
+                ]),
+                success: Some(false),
             }
         );
     }

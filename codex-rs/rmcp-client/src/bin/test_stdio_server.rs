@@ -381,6 +381,7 @@ impl TestToolServer {
                     "enum": [
                         "image_only",
                         "image_only_original_detail",
+                        "structured_text_then_image",
                         "text_then_image",
                         "invalid_base64_then_image",
                         "invalid_image_bytes_then_image",
@@ -487,6 +488,7 @@ fn sync_barrier_map() -> &'static tokio::sync::Mutex<HashMap<String, SyncBarrier
 enum ImageScenario {
     ImageOnly,
     ImageOnlyOriginalDetail,
+    StructuredTextThenImage,
     TextThenImage,
     InvalidBase64ThenImage,
     InvalidImageBytesThenImage,
@@ -825,6 +827,7 @@ impl TestToolServer {
             .unwrap_or_else(|| "Here is the image:".to_string());
 
         let mut content = Vec::new();
+        let mut structured_content = None;
         match args.scenario {
             ImageScenario::ImageOnly => {
                 content.push(rmcp::model::ContentBlock::image(valid_data_b64, mime_type));
@@ -842,6 +845,15 @@ impl TestToolServer {
             ImageScenario::TextThenImage => {
                 content.push(rmcp::model::ContentBlock::text(caption));
                 content.push(rmcp::model::ContentBlock::image(valid_data_b64, mime_type));
+            }
+            ImageScenario::StructuredTextThenImage => {
+                structured_content = Some(json!({"result":"structured-image"}));
+                content.push(rmcp::model::ContentBlock::text(caption));
+                let mut meta = MetaObject::new();
+                meta.insert("codex/imageDetail".to_string(), json!("original"));
+                content.push(rmcp::model::ContentBlock::Image(
+                    rmcp::model::ImageContent::new(valid_data_b64, mime_type).with_meta(meta),
+                ));
             }
             ImageScenario::InvalidBase64ThenImage => {
                 content.push(rmcp::model::ContentBlock::image(
@@ -882,7 +894,9 @@ impl TestToolServer {
             }
         }
 
-        Ok(CallToolResult::success(content))
+        let mut result = CallToolResult::success(content);
+        result.structured_content = structured_content;
+        Ok(result)
     }
 
     async fn sync_result(args: SyncArgs) -> Result<CallToolResult, McpError> {

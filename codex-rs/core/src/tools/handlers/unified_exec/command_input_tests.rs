@@ -30,7 +30,7 @@ fn direct_argv_preserves_literal_arguments_without_a_shell() -> anyhow::Result<(
     )
     .map_err(anyhow::Error::msg)?;
     assert_eq!(resolved.command, argv);
-    assert_eq!(resolved.shell_type, None);
+    assert!(resolved.shell.is_none());
     Ok(())
 }
 

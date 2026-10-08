@@ -261,6 +261,87 @@ fn response_item_rollout_line_preserves_shape() -> Result<()> {
 }
 
 #[test]
+fn delivered_assistant_rollout_survives_an_earlier_read_and_rewrite() -> Result<()> {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum EarlierRolloutItem {
+        ResponseItem {
+            payload: ResponseItem,
+            metadata: CodexHarnessMetadata,
+        },
+    }
+
+    for complete in [true, false] {
+        let original = RetainedContextEvent::DeliveredAssistantMessage {
+            message: RetainedUserMessage {
+                origin: crate::UserInputOrigin::User,
+                turn_id: "root-turn".to_owned(),
+                message_id: Some("code-cell:message".to_owned()),
+                text: "May I deploy staging?".to_owned(),
+                complete,
+                phase: None,
+            },
+            acceptance_order: 7,
+        };
+        let wire = serde_json::to_value(RolloutItem::RetainedContext(original.clone()))?;
+        let earlier = serde_json::from_value::<EarlierRolloutItem>(wire)?;
+        let EarlierRolloutItem::ResponseItem { payload, metadata } = &earlier;
+        let ResponseItem::Message {
+            role,
+            content,
+            phase,
+            ..
+        } = payload
+        else {
+            panic!("older readers need an assistant message");
+        };
+        assert_eq!(role, "assistant");
+        // The preceding client's Guardian projection excludes commentary.
+        assert_eq!(phase, &None);
+        assert_eq!(metadata.user_input_order, Some(7));
+        let [ContentItem::OutputText { text }] = content.as_slice() else {
+            panic!("older readers need plain assistant text");
+        };
+        if complete {
+            assert_eq!(text, "May I deploy staging?");
+        } else {
+            assert!(!text.contains("deploy staging"));
+            assert!(text.contains("unavailable"));
+        }
+        let mut earlier_checkpoint = RetainedContext::default();
+        earlier_checkpoint.record_assistant_message(
+            RetainedUserMessage {
+                origin: crate::UserInputOrigin::User,
+                turn_id: payload.turn_id().unwrap().to_owned(),
+                message_id: payload.id().map(ToString::to_string),
+                text: text.clone(),
+                complete: true,
+                phase: None,
+            },
+            RetainedInputSource::Local(metadata.user_input_order),
+        );
+        let rewritten_checkpoint =
+            serde_json::from_value(serde_json::to_value(earlier_checkpoint)?)?;
+        let mut restored_checkpoint = RetainedContext::default();
+        restored_checkpoint.restore(Some(&rewritten_checkpoint), &[]);
+        let preserved = restored_checkpoint
+            .ordered_entries()
+            .find_map(|(_, entry)| match entry {
+                RetainedContextEntry::AssistantMessage(message) => Some(message.text.as_str()),
+                _ => None,
+            });
+        assert_eq!(preserved, Some(text.as_str()));
+
+        let rewritten = serde_json::to_value(earlier)?;
+        let RolloutItem::RetainedContext(restored) = serde_json::from_value(rewritten)? else {
+            panic!("new readers need the model-invisible delivery event");
+        };
+        assert_eq!(restored, original);
+    }
+    Ok(())
+}
+
+#[test]
 /// Keeps harness metadata beside, rather than inside, response-item payloads.
 fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()> {
     let response_item = response_message("developer");
@@ -665,10 +746,16 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
     };
     assert_eq!(*legacy_response, response_item);
 
-    let checkpoint = crate::GuardianHistoryCheckpoint(vec![response_item.clone()]);
-    assert!(
-        serde_json::to_value(&checkpoint)?.is_array(),
-        "legacy inline Guardian checkpoints must keep their array wire shape"
+    let checkpoint = crate::GuardianHistoryCheckpoint(vec![envelope.clone()]);
+    assert_eq!(
+        serde_json::from_value::<Vec<ResponseItem>>(serde_json::to_value(&checkpoint)?)?,
+        vec![response_item.clone()],
+    );
+    assert_eq!(
+        serde_json::from_value::<crate::GuardianHistoryCheckpoint>(serde_json::to_value(vec![
+            response_item.clone()
+        ])?)?,
+        crate::GuardianHistoryCheckpoint(vec![response_item.clone().into()]),
     );
     let compacted_line = serde_json::to_value(RolloutItem::Compacted(CompactedItem {
         message: "summary".to_string(),
@@ -1006,7 +1093,7 @@ fn guardian_v1_reference_resolves_from_an_older_top_level_source() {
             .expect("older source should resolve")
             .expect("Guardian checkpoint")
             .0,
-        vec![source.item]
+        vec![source]
     );
 }
 
@@ -1035,7 +1122,7 @@ fn guardian_v2_reference_binds_source_metadata_and_fails_closed() {
             .expect("exact envelope should resolve")
             .expect("Guardian checkpoint")
             .0,
-        vec![source.item.clone()]
+        vec![source.clone()]
     );
 
     let mut substituted = source.clone();
@@ -1073,7 +1160,7 @@ fn guardian_source_window_survives_model_rebase_without_sourcing_model_refs() {
     let first = guardian_checkpoint(
         "model rebase",
         vec![model_item],
-        GuardianHistoryCheckpoint(vec![guardian_source.item.clone()]),
+        GuardianHistoryCheckpoint(vec![guardian_source.item.clone().into()]),
     );
     let RolloutItem::Compacted(first) = &first else {
         panic!("expected first checkpoint");
@@ -1100,7 +1187,7 @@ fn guardian_source_window_survives_model_rebase_without_sourcing_model_refs() {
             .expect("Guardian's retained metadata-bearing source should survive")
             .expect("Guardian checkpoint")
             .0,
-        vec![guardian_source.item]
+        vec![guardian_source]
     );
     let RolloutItem::Compacted(model_reference) = entry_checkpoint(
         "invalid model lookup",
@@ -1122,7 +1209,7 @@ fn guardian_source_window_survives_model_rebase_without_sourcing_model_refs() {
 fn guardian_reencode_keeps_conflicting_same_id_occurrences_inline() {
     let source = identified_message("guardian-conflict", "older value");
     let changed = identified_message("guardian-conflict", "newer value");
-    let expected = vec![source.item.clone(), changed.item];
+    let expected = vec![source.clone(), changed];
     let mut checkpoint = guardian_checkpoint(
         "conflicting Guardian IDs",
         Vec::new(),
@@ -1164,8 +1251,49 @@ fn selected_guardian_checkpoint_resolves_source_outside_the_model_window() {
             .expect("older Guardian source should resolve")
             .expect("Guardian checkpoint")
             .0,
-        vec![source.item]
+        vec![source]
     );
+}
+
+#[test]
+fn guardian_reference_reencoding_preserves_metadata_and_rejects_metadata_substitution() {
+    let mut source = identified_message("guardian-metadata", "original evidence");
+    source.metadata = Some(CodexHarnessMetadata {
+        user_input_order: Some(4),
+        ..Default::default()
+    });
+    for metadata_matches in [true, false] {
+        let mut saved = source.clone();
+        if !metadata_matches {
+            saved.metadata.as_mut().unwrap().user_input_order = Some(5);
+        }
+        let mut checkpoint = guardian_checkpoint(
+            "metadata-bearing Guardian checkpoint",
+            Vec::new(),
+            GuardianHistoryCheckpoint(vec![saved.clone()]),
+        );
+        let mut resolver = CompactedHistoryResolver::default();
+        resolver.index_explicit_sources(&RolloutItem::ResponseItem(source.clone()));
+        resolver
+            .reencode_item_with_integrity_references(&mut checkpoint)
+            .expect("reencode metadata-bearing checkpoint");
+        let encoded = serde_json::to_vec(&checkpoint).expect("serialize checkpoint");
+        let mut restored: RolloutItem = serde_json::from_slice(&encoded).expect("reload checkpoint");
+        let RolloutItem::Compacted(compacted) = &restored else {
+            panic!("expected checkpoint");
+        };
+        assert_eq!(
+            compacted.guardian_history.as_ref().unwrap().is_reference_backed(),
+            metadata_matches
+        );
+        let mut reader = CompactedHistoryResolver::default();
+        reader.index_explicit_sources(&RolloutItem::ResponseItem(source.clone()));
+        reader.materialize_item(&mut restored).expect("resolve reloaded checkpoint");
+        let RolloutItem::Compacted(compacted) = restored else {
+            panic!("expected checkpoint");
+        };
+        assert_eq!(compacted.guardian_history, Some(GuardianHistoryCheckpoint(vec![saved])));
+    }
 }
 
 #[test]
@@ -2144,6 +2272,7 @@ fn copied_history_uses_persisted_history_mode() -> Result<()> {
         git: None,
     });
     let history = InitialHistory::Resumed(ResumedHistory {
+        history_revision: None,
         conversation_id: thread_id,
         history: Arc::new(vec![session_meta.clone()]),
         rollout_path: None,
@@ -2163,6 +2292,7 @@ fn copied_history_uses_persisted_history_mode() -> Result<()> {
     );
     assert_eq!(
         InitialHistory::Resumed(ResumedHistory {
+            history_revision: None,
             conversation_id: thread_id,
             history: Arc::new(Vec::new()),
             rollout_path: None,

@@ -1235,6 +1235,7 @@ async fn resume_paginated_conversation(
         InitialHistory::Resumed(ResumedHistory {
             conversation_id: model_context.thread_id,
             history: Arc::new(model_context.items),
+            history_revision: model_context.revision,
             rollout_path: Some(path),
         }),
         auth_manager,

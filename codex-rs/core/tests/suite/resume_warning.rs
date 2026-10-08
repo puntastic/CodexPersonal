@@ -72,6 +72,7 @@ fn resume_history(
     };
 
     InitialHistory::Resumed(ResumedHistory {
+        history_revision: None,
         conversation_id: thread_id,
         history: Arc::new(vec![
             RolloutItem::SessionMeta(session_meta),

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -14,7 +15,6 @@ use super::LocalThreadStore;
 use super::create_thread;
 use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
-use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -39,11 +39,12 @@ pub(super) async fn create_thread(
 pub(super) async fn resume_thread(
     store: &LocalThreadStore,
     params: ResumeThreadParams,
-) -> ThreadStoreResult<()> {
+) -> ThreadStoreResult<Arc<Vec<RolloutItem>>> {
     let ResumeThreadParams {
         thread_id,
         rollout_path,
         history,
+        history_revision,
         include_archived,
         metadata,
     } = params;
@@ -70,20 +71,17 @@ pub(super) async fn resume_thread(
         ensure_requested_rollout_is_current(store, thread_id, rollout_path.as_path()).await?;
         rollout_path
     } else {
-        let thread = super::read_thread::read_thread(
-            store,
-            ReadThreadParams {
-                thread_id,
-                include_archived,
-                include_history: false,
-            },
-        )
-        .await?;
-        thread
-            .rollout_path
-            .ok_or_else(|| ThreadStoreError::Internal {
-                message: format!("thread {thread_id} does not have a rollout path"),
-            })?
+        // Listing metadata can retain a missing/stale path. Resolve the actual
+        // surviving rollout, rather than treating the SQLite projection as it.
+        let resolved = if include_archived {
+            super::thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
+                .await?
+        } else {
+            super::thread_rollout_resolver::resolve_current(store, thread_id).await?
+        };
+        resolved
+            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?
+            .path
     };
     let canonical_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
         .await
@@ -139,41 +137,23 @@ pub(super) async fn resume_thread(
                 ),
             });
         }
-        if history_mode.is_paginated() {
-            let current_context = super::model_context::load_latest_model_context_from_rollout(
-                store,
-                thread_id,
-                rollout_id,
-                rollout_path.clone(),
-            )
-            .await?;
-            let matches_model_context = supplied_history_matches_current(
-                thread_id,
-                history,
-                current_context.items.as_slice(),
-            )?;
-            let matches_raw_rollout = if matches_model_context {
-                false
-            } else {
-                codex_rollout::rollout_items_match_file(rollout_path.as_path(), history)
-                    .await
-                    .map_err(|err| ThreadStoreError::Internal {
-                        message: format!(
-                            "failed to compare supplied replay with selected rollout for thread {thread_id}: {err}"
-                        ),
-                    })?
-            };
-            if !matches_model_context && !matches_raw_rollout {
-                return Err(ThreadStoreError::Conflict {
-                    message: format!(
-                        "supplied replay for thread {thread_id} is stale ({} items versus {} in the current model context); reload before resuming",
-                        history.len(),
-                        current_context.items.len()
-                    ),
-                });
-            }
-        }
     }
+    // A same-generation snapshot can legitimately lag a committed append. The
+    // writer owns the canonical read now: return it to the caller rather than
+    // accepting stale replay or requiring another racy read-before-resume.
+    let history = match history {
+        Some(history)
+            if history_revision.is_some()
+                && history_revision == super::history_revision::read(&rollout_path).await =>
+        {
+            history
+        }
+        _ => Arc::new(
+            super::model_context::load_from_rollout_path(store, thread_id, &rollout_path)
+                .await?
+                .items,
+        ),
+    };
     let cwd = metadata
         .cwd
         .clone()
@@ -198,39 +178,8 @@ pub(super) async fn resume_thread(
     })?;
     store
         .insert_live_recorder(thread_id, recorder, rollout_id, history_mode, writer_lock)
-        .await
-}
-
-/// Caller-supplied paginated replay is a snapshot taken before the writer lock. Reload the exact
-/// selected rollout while holding that lock and reject a same-path append or rewrite rather than
-/// opening a writer with stale model context. Comparing one serialized item at a time keeps the
-/// additional memory bound to the largest replay item instead of duplicating the whole context.
-fn supplied_history_matches_current(
-    thread_id: ThreadId,
-    supplied: &[RolloutItem],
-    current: &[RolloutItem],
-) -> ThreadStoreResult<bool> {
-    if supplied.len() != current.len() {
-        return Ok(false);
-    }
-    for (index, (supplied_item, current_item)) in supplied.iter().zip(current).enumerate() {
-        let supplied_item =
-            serde_json::to_value(supplied_item).map_err(|err| ThreadStoreError::Internal {
-                message: format!(
-                    "failed to compare supplied replay item {index} for thread {thread_id}: {err}"
-                ),
-            })?;
-        let current_item =
-            serde_json::to_value(current_item).map_err(|err| ThreadStoreError::Internal {
-                message: format!(
-                    "failed to compare canonical replay item {index} for thread {thread_id}: {err}"
-                ),
-            })?;
-        if supplied_item != current_item {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+        .await?;
+    Ok(history)
 }
 
 /// Reject a valid but superseded rollout selected before a revert. A missing, malformed, or

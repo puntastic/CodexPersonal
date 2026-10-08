@@ -139,7 +139,13 @@ impl TranscriptOverlay {
                 Line::from(notice.as_str()).dim().render(status, buf);
             } else {
                 self.view
-                    .status_line_with_navigation("Ctrl+Space select", self.motion)
+                    .status_line_with_navigation(
+                        &format!(
+                            "{} select",
+                            crate::key_hint::ctrl(KeyCode::Char(' ')).display_label()
+                        ),
+                        self.motion,
+                    )
                     .render(status, buf);
             }
             self.render_hints(hints, buf);
@@ -170,7 +176,22 @@ impl TranscriptOverlay {
     }
 
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
-        if matches!(event, TuiEvent::Resume) {
+        if let Some(completion) = tui.clipboard.poll()
+            && let Some(follow) =
+                self.view
+                    .finish_copy(&self.cells, completion, /*current*/ true)
+        {
+            self.notice = Some(match &completion.1 {
+                Ok(status) => status.message("selection"),
+                Err(error) => format!("Copy failed: {error}"),
+            });
+            if follow {
+                self.view.jump_to_latest();
+                self.is_done = self.browsing_footer.is_some();
+            }
+        }
+        if matches!(event, TuiEvent::Resume | TuiEvent::FocusLost) {
+            self.view.cancel_primary();
             self.view.end_drag();
         }
         // Apply a queued prompt jump before navigation can move away from it.
@@ -206,10 +227,7 @@ impl TranscriptOverlay {
                 self.draw(tui)?;
                 return Ok(());
             }
-            TuiEvent::FocusLost => {
-                self.view.end_drag();
-                None
-            }
+            TuiEvent::FocusLost => None,
         };
         if let Some(action) = action {
             self.apply_action(tui, action);
@@ -426,19 +444,20 @@ impl TranscriptOverlay {
     fn apply_action(&mut self, tui: &mut tui::Tui, action: ViewAction) {
         self.notice = None;
         let resume_following = matches!(action, ViewAction::CopyAndFollow(_));
+        let copy_on_select = matches!(action, ViewAction::CopyOnSelect(_));
         match action {
             ViewAction::Changed => {}
-            ViewAction::Copy(text) | ViewAction::CopyAndFollow(text) => {
+            ViewAction::PrimarySelection(text) => self.view.publish_primary(tui, &text),
+            ViewAction::Copy(text)
+            | ViewAction::CopyOnSelect(text)
+            | ViewAction::CopyAndFollow(text) => {
                 let result = self
                     .view
-                    .copy_selected_text_with(&self.cells, &text, |text| {
-                        tui.copy_transcript_selection(text)
-                    });
+                    .copy_selected_text(tui, &self.cells, &text, !copy_on_select);
                 if resume_following
-                    && matches!(result, Ok(crate::clipboard_copy::CopyStatus::Confirmed))
+                    && matches!(result, Ok(crate::clipboard_copy::CopyStatus::Pending(_)))
                 {
-                    self.view.jump_to_latest();
-                    self.is_done = self.browsing_footer.is_some();
+                    self.view.follow_pending_copy();
                 }
                 self.notice = Some(match result {
                     Ok(status) => status.message("selection"),

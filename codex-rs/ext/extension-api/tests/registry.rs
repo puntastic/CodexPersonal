@@ -217,6 +217,7 @@ async fn build_round_trips_every_contributor_category() {
     }))
     .expect("approval model");
     let input = codex_extension_api::ApprovalDecisionInput {
+        permissions: Some(&Default::default()),
         approval_id: "approval-1",
         tool_call_id: None,
         action: &serde_json::Value::Null,

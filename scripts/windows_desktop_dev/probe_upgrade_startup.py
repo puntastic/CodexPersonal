@@ -2,13 +2,17 @@
 
 The source opens read-only. A new output directory keeps an untouched backup and
 an isolated trial home. Neither package is selected for Desktop by this probe.
-The schema assertions target 0.157.1's state migrations55–57. Optional companion
-copies preserve history/memory recovery without claiming that startup exercised
-every lazy store or a model turn. No test resumes a real source rollout.
+The schema assertions target an upgrade from migrations55–57 through58. Optional
+companion copies preserve history/memory recovery without claiming that startup
+exercised every lazy store or a model turn. No test resumes a real source rollout.
+Green DB startup does not prove that an older reader can replay new V2
+retained_source metadata: dropping an unknown field before hash validation is
+a separate source-derived conditional compatibility risk, not exercised here.
 """
 
 import argparse
 from collections import deque
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -20,6 +24,50 @@ import threading
 import time
 
 
+ARCHIVE_SORT_KEYS = ("created_at", "updated_at", "recency_at")
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def file_hash(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def backup_fingerprint(path):
+    return {
+        file.name: file_hash(file)
+        for suffix in ("", "-wal", "-shm")
+        if (file := path.with_name(path.name + suffix)).exists()
+    }
+
+
+def quote_identifier(value):
+    return '"' + value.replace('"', '""') + '"'
+
+
+def json_value(value):
+    return {"blob_hex": value.hex()} if isinstance(value, bytes) else value
+
+
+def table_evidence(db, table):
+    """Hash logical rows, not SQLite pages; disclose no row contents."""
+    info = db.execute(f"PRAGMA table_info({quote_identifier(table)})").fetchall()
+    columns = [row[1] for row in info]
+    primary_key = [row[1] for row in sorted(info, key=lambda row: row[5]) if row[5]]
+    ordering = ", ".join(quote_identifier(name) for name in primary_key or columns)
+    digest = hashlib.sha256(json.dumps(columns).encode("utf-8"))
+    count = 0
+    for row in db.execute(f"SELECT * FROM {quote_identifier(table)} ORDER BY {ordering}"):
+        digest.update(json.dumps([json_value(value) for value in row]).encode("utf-8"))
+        digest.update(b"\n")
+        count += 1
+    return {"columns": columns, "rows": count, "sha256": digest.hexdigest()}
+
+
 def backup(source, target):
     deadline = time.monotonic() + 30
 
@@ -27,27 +75,30 @@ def backup(source, target):
         if time.monotonic() > deadline:
             raise TimeoutError("online SQLite backup exceeded 30 seconds")
 
-    with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as src:
-        with sqlite3.connect(target) as dst:
+    with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as src:
+        with closing(sqlite3.connect(target)) as dst:
             src.backup(dst, pages=512, progress=progress, sleep=0.05)
 
 
 def schema(path):
-    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
         db.execute("PRAGMA query_only=ON")
         tables = {
             row[0]
             for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         result = {
-            "quick_check": db.execute("PRAGMA quick_check").fetchone()[0],
-            "applied_migrations": [
-                row[0]
-                for row in db.execute(
-                    "SELECT version FROM _sqlx_migrations WHERE success=1 ORDER BY version"
-                )
-            ],
+            "quick_check": "\n".join(row[0] for row in db.execute("PRAGMA quick_check")),
+            "file_identity": [path.stat().st_dev, path.stat().st_ino],
         }
+        ledger = db.execute("SELECT * FROM _sqlx_migrations ORDER BY version")
+        fields = [column[0] for column in ledger.description]
+        result["migration_ledger"] = [
+            dict(zip(fields, (json_value(value) for value in row))) for row in ledger
+        ]
+        result["applied_migrations"] = [
+            row["version"] for row in result["migration_ledger"] if row["success"] == 1
+        ]
         if "threads" in tables:
             columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
             result["creator_columns"] = {
@@ -73,7 +124,99 @@ def schema(path):
                 if table in tables
                 else None
             )
+            result["row_evidence"] = {
+                name: table_evidence(db, name)
+                for name in ("threads", table)
+                if name in tables
+            }
+            result["archive_indexes"] = {}
+            indexes = {row[1]: row for row in db.execute("PRAGMA index_list(threads)")}
+            for key in ARCHIVE_SORT_KEYS:
+                name = f"idx_threads_archive_{key}_ms"
+                if name not in indexes:
+                    continue
+                result["archive_indexes"][name] = {
+                    "sql": db.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                        (name,),
+                    ).fetchone()[0],
+                    "partial": indexes[name][4],
+                    "unique": indexes[name][2],
+                    "keys": [
+                        {"column": row[2], "descending": row[3], "collation": row[4]}
+                        for row in db.execute(f"PRAGMA index_xinfo({quote_identifier(name)})")
+                        if row[5]
+                    ],
+                }
         return result
+
+
+def validate_readback(before, after, *, primary=False):
+    require(after["quick_check"] == "ok", "copied database quick_check failed")
+    require(before["file_identity"] == after["file_identity"], "copied database was replaced")
+    old = {row["version"]: row for row in before["migration_ledger"]}
+    new = {row["version"]: row for row in after["migration_ledger"]}
+    require(all(new.get(version) == row for version, row in old.items()),
+            "existing migration ledger rows changed or disappeared")
+    require(all(row["success"] == 1 for row in new.values()), "unsuccessful migration ledger row")
+    if not primary:
+        return
+    require(set(new) - set(old) == {58} - set(old), "unexpected added state migrations")
+    require({55, 56, 57, 58} <= set(after["applied_migrations"]), "required state migrations missing")
+    require(after["creator_columns"] and after["attachments_table"], "required state schema missing")
+    require(before["row_evidence"] == after["row_evidence"], "thread or attachment evidence changed")
+    for key in ARCHIVE_SORT_KEYS:
+        name = f"idx_threads_archive_{key}_ms"
+        actual = after["archive_indexes"].get(name)
+        require(actual is not None, f"archive index missing: {name}")
+        expected_sql = (
+            f"CREATE INDEX {name} ON threads(archived, {key}_ms DESC, id DESC) WHERE archived = 1"
+        )
+        normalized = lambda sql: "".join(sql.split()).rstrip(";").lower()
+        require(normalized(actual["sql"]) == normalized(expected_sql), f"unexpected SQL for {name}")
+        require(actual["partial"] == 1 and actual["unique"] == 0, f"unexpected index kind: {name}")
+        require(actual["keys"] == [
+            {"column": "archived", "descending": 0, "collation": "BINARY"},
+            {"column": f"{key}_ms", "descending": 1, "collation": "BINARY"},
+            {"column": "id", "descending": 1, "collation": "BINARY"},
+        ], f"unexpected index column order or direction: {name}")
+
+
+def recovery_backups(home):
+    # These are the two recovery roots used by state/runtime/recovery.rs. Only
+    # inspect this new trial's roots, never the original CODEX_HOME.
+    roots = (home / "db-backups", home.with_name(home.name + ".db-backups"))
+    return [str(path.relative_to(home.parent)) for path in roots if path.exists()]
+
+
+def list_metadata(request, *, check_attachments):
+    # DB-only listing avoids scanning/repairing original rollout paths retained
+    # in the copied state. Never resume, read, or turn/start those threads.
+    listed = request(2, "thread/list", {"limit": 1, "useStateDbOnly": True})
+    rows = listed["data"]
+    require(isinstance(rows, list) and len(rows) <= 1, "unexpected bounded thread-list result")
+    attachment_count = None
+    archived_counts = {}
+    if check_attachments and rows:
+        attachments = request(
+            3, "thread/attachment/list", {"threadId": rows[0]["id"], "limit": 1}
+        )["data"]
+        require(isinstance(attachments, list) and len(attachments) <= 1,
+                "unexpected bounded attachment-list result")
+        attachment_count = len(attachments)
+    for identifier, key in enumerate(ARCHIVE_SORT_KEYS, start=4):
+        archived = request(identifier, "thread/list", {
+            "limit": 2, "useStateDbOnly": True, "archived": True,
+            "modelProviders": [], "sortKey": key, "sortDirection": "desc",
+        })["data"]
+        require(isinstance(archived, list) and len(archived) <= 2,
+                f"unexpected bounded archive-list result for {key}")
+        archived_counts[key] = len(archived)
+    return {
+        "db_only_threads_returned": len(rows),
+        "attachment_rows_returned": attachment_count,
+        "db_only_archived_threads_returned": archived_counts,
+    }
 
 
 def startup(executable, home, *, check_attachments=False):
@@ -154,7 +297,7 @@ def startup(executable, home, *, check_attachments=False):
             {
                 "clientInfo": {
                     "name": "codex-personal-upgrade-probe",
-                    "version": "0.2.0",
+                    "version": "0.3.0",
                 },
                 "capabilities": {"experimentalApi": True},
             },
@@ -163,18 +306,7 @@ def startup(executable, home, *, check_attachments=False):
             raise RuntimeError("probe did not use its isolated CODEX_HOME")
         process.stdin.write(json.dumps({"method": "initialized"}) + "\n")
         process.stdin.flush()
-        # DB-only listing explicitly avoids scanning/repairing original rollouts
-        # whose paths survive in the copied state. Never resume those threads.
-        listed = request(2, "thread/list", {"limit": 1, "useStateDbOnly": True})
-        rows = listed["data"]
-        if not isinstance(rows, list) or len(rows) > 1:
-            raise RuntimeError("unexpected bounded thread-list result")
-        attachment_count = None
-        if check_attachments and rows:
-            attachments = request(
-                3, "thread/attachment/list", {"threadId": rows[0]["id"], "limit": 1}
-            )
-            attachment_count = len(attachments["data"])
+        metadata = list_metadata(request, check_attachments=check_attachments)
         process.stdin.close()
         process.wait(timeout=45)
         if process.returncode != 0:
@@ -182,9 +314,8 @@ def startup(executable, home, *, check_attachments=False):
         return {
             "user_agent": response["userAgent"],
             "exit_code": process.returncode,
-            "db_only_threads_returned": len(rows),
-            "attachment_rows_returned": attachment_count,
-            "scope": "initialize, DB-only thread metadata, and candidate attachment listing; no turn or real rollout resumed",
+            **metadata,
+            "scope": "initialize, DB-only thread metadata/archived sorts, and candidate attachment listing; no turn or real rollout resumed",
         }
     finally:
         if process.poll() is None:
@@ -194,65 +325,108 @@ def startup(executable, home, *, check_attachments=False):
             thread.join(timeout=1)
 
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--candidate", type=Path, required=True)
-parser.add_argument("--previous", type=Path, required=True)
-parser.add_argument("--source-db", type=Path, required=True)
-parser.add_argument("--source-companion-db", type=Path, action="append", default=[])
-parser.add_argument("--output", type=Path, required=True)
-args = parser.parse_args()
-source = args.source_db.resolve(strict=True)
-candidate = args.candidate.resolve(strict=True)
-previous = args.previous.resolve(strict=True)
-output = args.output.resolve()
-output.mkdir(parents=True, exist_ok=False)
-saved = output / source.name
-home = output / "isolated-home"
-home.mkdir()
-backup(source, saved)
-backup(saved, home / source.name)
-companions = {}
-for path in args.source_companion_db:
-    companion = path.resolve(strict=True)
-    if companion.name == source.name or companion.name in companions:
-        raise ValueError("duplicate companion database name")
-    preserved = output / companion.name
-    backup(companion, preserved)
-    backup(preserved, home / companion.name)
-    with preserved.open("rb") as stream:
-        digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    companions[companion.name] = {
-        "backup": str(preserved),
-        "backup_sha256": digest,
-        "before": schema(preserved),
-    }
-with saved.open("rb") as stream:
-    saved_hash = hashlib.file_digest(stream, "sha256").hexdigest()
-report = {
-    "backup": str(saved),
-    "backup_sha256": saved_hash,
-    "before": schema(saved),
-    "companions": companions,
-}
-report["candidate"] = startup(candidate, home, check_attachments=True)
-report["after_candidate"] = schema(home / source.name)
-for name, detail in companions.items():
-    detail["after_candidate"] = schema(home / name)
-report["previous_after_migration"] = startup(previous, home)
-report["after_previous"] = schema(home / source.name)
-for name, detail in companions.items():
-    detail["after_previous"] = schema(home / name)
-    assert detail["after_candidate"]["quick_check"] == "ok"
-    assert detail["after_previous"]["quick_check"] == "ok"
-assert report["after_candidate"]["quick_check"] == "ok"
-assert {55, 56, 57} <= set(report["after_candidate"]["applied_migrations"])
-assert report["after_candidate"]["creator_columns"]
-assert report["after_candidate"]["attachments_table"]
-assert (
-    report["after_candidate"]["attachment_rows"] == report["before"]["attachment_rows"]
-)
-assert report["after_candidate"]["guardian_projection"][2] == 0
-assert report["after_previous"]["quick_check"] == "ok"
-report["candidate_after_previous"] = startup(candidate, home, check_attachments=True)
-(output / "receipt.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-print(json.dumps(report))
+def run_probe(args):
+    source = args.source_db.resolve(strict=True)
+    candidate = args.candidate.resolve(strict=True)
+    previous = args.previous.resolve(strict=True)
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    home = output / "isolated-home"
+    home.mkdir()
+    databases = {}
+    for path in [source, *args.source_companion_db]:
+        path = path.resolve(strict=True)
+        if path.name in databases:
+            raise ValueError("duplicate database name")
+        saved = output / path.name
+        backup(path, saved)
+        backup(saved, home / path.name)
+        before = schema(home / path.name)
+        require(before["quick_check"] == "ok", "input database copy failed quick_check")
+        databases[path.name] = {
+            "backup": str(saved),
+            "backup_sha256": file_hash(saved),
+            "backup_files_sha256": backup_fingerprint(saved),
+            "before": before,
+        }
+    report = databases.pop(source.name)
+    report["companions"] = databases
+    report["scope_limit"] = (
+        "DB startup/schema/metadata only; no model turn or real rollout resumed. "
+        "This does not establish old-reader replay of new V2 retained_source metadata: "
+        "unknown-field dropping before hash validation is a separate source-derived conditional risk. "
+        "Companion checks cover integrity, file identity, and existing migration rows; "
+        "they do not require logs or other companion rows to remain unchanged."
+    )
+    require({55, 56, 57} <= set(report["before"]["applied_migrations"]),
+            "probe requires the previously qualified migrations55–57 baseline")
+    require(not recovery_backups(home), "recovery backup exists before startup")
+    try:
+        for startup_key, readback_key, executable, check_attachments in (
+            ("candidate", "after_candidate", candidate, True),
+            ("previous_after_migration", "after_previous", previous, False),
+            ("candidate_after_previous", "after_candidate_after_previous", candidate, True),
+        ):
+            startup_error = None
+            try:
+                report[startup_key] = startup(executable, home, check_attachments=check_attachments)
+            except Exception as error:
+                startup_error = error
+                report[startup_key] = {"failure": str(error)}
+            found = recovery_backups(home)
+            report[startup_key]["recovery_backups"] = found
+            # A failed process still earns a readback attempt for each copy.
+            for name, detail in [(source.name, report), *databases.items()]:
+                try:
+                    detail[readback_key] = schema(home / name)
+                except Exception as error:
+                    detail[readback_key] = {"failure": str(error)}
+                    if startup_error is None:
+                        startup_error = error
+            if startup_error is not None:
+                raise startup_error
+            require(not found, "startup created a recovery backup/rebuilt database")
+            validate_readback(report["before"], report[readback_key], primary=True)
+            for detail in databases.values():
+                validate_readback(detail["before"], detail[readback_key])
+            # After the first migration, the full ledger (including migration58)
+            # must survive both subsequent startups without additions or edits.
+            if readback_key != "after_candidate":
+                for detail in [report, *databases.values()]:
+                    require(detail[readback_key]["migration_ledger"] == detail["after_candidate"]["migration_ledger"],
+                            "migration ledger changed after initial candidate startup")
+        report["passed"] = True
+    except Exception as error:
+        report["passed"] = False
+        report["failure"] = str(error)
+        raise
+    finally:
+        # Check the untouched backups even on a failed rehearsal, and write the
+        # final readbacks before returning a successful receipt.
+        for detail in [report, *databases.values()]:
+            saved = Path(detail["backup"])
+            detail["backup_files_sha256_final"] = backup_fingerprint(saved)
+            detail["backup_sha256_final"] = detail["backup_files_sha256_final"].get(saved.name)
+        untouched = all(detail["backup_files_sha256_final"] == detail["backup_files_sha256"]
+                        for detail in [report, *databases.values()])
+        report["untouched_backups_verified"] = untouched
+        if not untouched:
+            report["passed"] = False
+            report["failure"] = "untouched backup changed"
+        (output / "receipt.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        require(untouched, "untouched backup changed")
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--previous", type=Path, required=True)
+    parser.add_argument("--source-db", type=Path, required=True)
+    parser.add_argument("--source-companion-db", type=Path, action="append", default=[])
+    parser.add_argument("--output", type=Path, required=True)
+    print(json.dumps(run_probe(parser.parse_args())))
+
+
+if __name__ == "__main__":
+    main()

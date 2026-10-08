@@ -335,6 +335,7 @@ struct SessionPickerViewPersistence {
 
 struct SessionPickerRunOptions {
     use_theme_colors: bool,
+    copy_on_select: bool,
     show_all: bool,
     filter_cwd: Option<PathBuf>,
     local_filter_cwd: Option<PathBuf>,
@@ -441,10 +442,11 @@ async fn run_resume_picker_with_launch_context(
         app_server.remote_cwd_override(),
     );
     let local_filter_cwd = local_picker_cwd_filter(&cwd_filter, uses_remote_filesystem);
-    let provider_filter = picker_provider_filter(config, uses_remote_workspace);
+    let provider_filter = picker_provider_filter(config, &app_server).await?;
     let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
         use_theme_colors: local_settings.tui.status_line_use_colors,
+        copy_on_select: local_settings.copy_on_select(&codex_terminal_detection::terminal_info()),
         show_all,
         filter_cwd: cwd_filter,
         local_filter_cwd,
@@ -500,10 +502,11 @@ pub async fn run_fork_picker_with_app_server(
         app_server.remote_cwd_override(),
     );
     let local_filter_cwd = local_picker_cwd_filter(&cwd_filter, uses_remote_filesystem);
-    let provider_filter = picker_provider_filter(config, uses_remote_workspace);
+    let provider_filter = picker_provider_filter(config, &app_server).await?;
     let runtime_keymap = picker_runtime_keymap(local_settings)?;
     let options = SessionPickerRunOptions {
         use_theme_colors: local_settings.tui.status_line_use_colors,
+        copy_on_select: local_settings.copy_on_select(&codex_terminal_detection::terminal_info()),
         show_all,
         filter_cwd: cwd_filter,
         local_filter_cwd,
@@ -558,6 +561,7 @@ async fn run_session_picker_with_loader(
     );
     state.local_filter_cwd = options.local_filter_cwd;
     state.use_theme_colors = options.use_theme_colors;
+    state.copy_on_select = options.copy_on_select;
     state.worktrees_enabled = options.worktrees_enabled;
     state.density = options.initial_density;
     state.view_persistence = options.view_persistence;
@@ -582,6 +586,7 @@ async fn run_session_picker_with_loader(
     loop {
         tokio::select! {
             Some(ev) = tui_events.next() => {
+                alt.tui.clipboard.poll();
                 let screen_size = alt.tui.screen_size_for_event(&ev)?;
                 let ev = if let TuiEvent::Key(key) = ev {
                     let Some(key) = state.route_key_chord(key) else {
@@ -653,12 +658,14 @@ fn local_picker_cwd_filter(
     }
 }
 
-fn picker_provider_filter(config: &Config, uses_remote_workspace: bool) -> ProviderFilter {
-    if uses_remote_workspace {
-        ProviderFilter::Any
-    } else {
-        ProviderFilter::MatchDefault(config.model_provider_id.to_string())
-    }
+async fn picker_provider_filter(
+    config: &Config,
+    app_server: &AppServerSession,
+) -> Result<ProviderFilter> {
+    Ok(app_server
+        .history_model_provider(config)
+        .await?
+        .map_or(ProviderFilter::Any, ProviderFilter::MatchDefault))
 }
 
 fn picker_runtime_keymap(config: &crate::local_settings::LocalSettings) -> Result<RuntimeKeymap> {
@@ -827,6 +834,7 @@ impl Drop for AltScreenGuard<'_> {
 struct PickerState {
     clock_format: ClockFormat,
     use_theme_colors: bool,
+    copy_on_select: bool,
     // Resolve local filesystem membership once per cwd for each page-loading cycle.
     local_cwd_matches: HashMap<PathBuf, bool>,
     requester: FrameRequester,
@@ -1027,6 +1035,7 @@ impl PickerState {
         Self {
             clock_format: ClockFormat::system(),
             use_theme_colors: true,
+            copy_on_select: false,
             requester,
             relative_time_reference: None,
             pagination: PaginationState::new(),
@@ -1128,7 +1137,11 @@ impl PickerState {
         else {
             return;
         };
-        let mut overlay = Overlay::new_transcript(cells.clone(), self.keymap.pager.clone());
+        let mut overlay = Overlay::new_transcript(
+            cells.clone(),
+            self.keymap.pager.clone(),
+            self.copy_on_select,
+        );
         if let Overlay::Transcript(view) = &mut overlay {
             view.set_keymap_bindings(&self.keymap);
         }
@@ -2401,7 +2414,7 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
                 priority: 0,
             },
             PickerFooterHint {
-                key: "ctrl+c".to_string(),
+                key: crate::key_hint::ctrl(KeyCode::Char('c')).display_label(),
                 wide_label: String::from("quit"),
                 compact_label: String::from("quit"),
                 priority: 1,
@@ -2450,7 +2463,7 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
     }
     if !state.filtered_rows.is_empty() && state.archive_shortcut_available() {
         first_row_hints.push(PickerFooterHint {
-            key: "ctrl+a".to_string(),
+            key: crate::key_hint::ctrl(KeyCode::Char('a')).display_label(),
             wide_label: String::from("archive"),
             compact_label: String::from("archive"),
             priority: 2,
@@ -2466,7 +2479,7 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
     }
     first_row_hints.extend([
         PickerFooterHint {
-            key: "ctrl+c".to_string(),
+            key: crate::key_hint::ctrl(KeyCode::Char('c')).display_label(),
             wide_label: ctrl_c_label.to_string(),
             compact_label: ctrl_c_label.to_string(),
             priority: 2,
@@ -2494,19 +2507,19 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
     }
     let mut second_row_hints = vec![
         PickerFooterHint {
-            key: "ctrl+o".to_string(),
+            key: crate::key_hint::ctrl(KeyCode::Char('o')).display_label(),
             wide_label: density_label.to_string(),
             compact_label: density_compact_label.to_string(),
             priority: 3,
         },
         PickerFooterHint {
-            key: "ctrl+t".to_string(),
+            key: crate::key_hint::ctrl(KeyCode::Char('t')).display_label(),
             wide_label: String::from("transcript"),
             compact_label: String::from("preview"),
             priority: 4,
         },
         PickerFooterHint {
-            key: "ctrl+e".to_string(),
+            key: crate::key_hint::ctrl(KeyCode::Char('e')).display_label(),
             wide_label: String::from("expand"),
             compact_label: String::from("exp"),
             priority: 6,
@@ -3865,7 +3878,7 @@ mod tests {
         ));
         let mut local = crate::latest_session_lookup_params(
             /*uses_remote_filesystem*/ false,
-            /*uses_remote_workspace*/ false,
+            /*model_provider*/ None,
             &config,
             Some(&primary),
             /*include_non_interactive*/ false,
@@ -3876,7 +3889,7 @@ mod tests {
         assert_eq!(
             crate::latest_session_lookup_params(
                 /*uses_remote_filesystem*/ true,
-                /*uses_remote_workspace*/ false,
+                /*model_provider*/ None,
                 &config,
                 Some(&primary),
                 /*include_non_interactive*/ false,
@@ -4296,6 +4309,37 @@ mod tests {
     }
 
     #[test]
+    fn picker_renders_server_provider_history() {
+        let cwd = PathBuf::from("/project");
+        let mut row = make_row(
+            "/session.jsonl",
+            "2025-01-02T11:00:00Z",
+            "Other provider session",
+        );
+        row.cwd = Some(cwd.clone());
+        let mut state = PickerState::new(
+            FrameRequester::test_dummy(),
+            page_only_loader(|_| {}),
+            ProviderFilter::MatchDefault("server-provider".to_string()),
+            /*show_all*/ false,
+            Some(cwd),
+            SessionPickerAction::Resume,
+        );
+        state.ingest_page(page(
+            vec![row],
+            /*next_cursor*/ None,
+            /*num_scanned_files*/ 1,
+            /*reached_scan_cap*/ false,
+        ));
+        state.relative_time_reference = Some(parse_timestamp_str("2025-01-02T12:00:00Z").unwrap());
+        state.update_viewport(/*rows*/ 12, /*width*/ 80);
+        assert_snapshot!(
+            "resume_picker_shared_provider_history",
+            render_picker_list(&state, /*width*/ 80, /*height*/ 12)
+        );
+    }
+
+    #[test]
     fn remote_thread_list_params_omit_provider_filter() {
         let params = thread_list_params(
             Some(String::from("cursor-1")),
@@ -4531,11 +4575,11 @@ mod tests {
 
         let wide = footer_lines_text(&state, /*width*/ 220);
         assert!(wide.contains("esc exit"));
-        assert!(wide.contains("ctrl+c exit"));
+        assert!(wide.contains("⌃c exit"));
 
         let compact = footer_lines_text(&state, /*width*/ 119);
         assert!(compact.contains("esc exit"));
-        assert!(compact.contains("ctrl+c exit"));
+        assert!(compact.contains("⌃c exit"));
 
         state.query = String::from("picker");
 
@@ -4554,14 +4598,14 @@ mod tests {
             SessionPickerAction::Resume,
         );
 
-        assert!(footer_lines_text(&state, /*width*/ 220).contains("ctrl+o dense view"));
-        assert!(footer_lines_text(&state, /*width*/ 220).contains("ctrl+t transcript"));
-        assert!(footer_lines_text(&state, /*width*/ 220).contains("ctrl+e expand"));
+        assert!(footer_lines_text(&state, /*width*/ 220).contains("⌃o dense view"));
+        assert!(footer_lines_text(&state, /*width*/ 220).contains("⌃t transcript"));
+        assert!(footer_lines_text(&state, /*width*/ 220).contains("⌃e expand"));
         state.keymap.list.move_left = vec![crate::key_hint::ctrl(KeyCode::Char('h'))];
         state.keymap.list.move_right = vec![crate::key_hint::ctrl(KeyCode::Char('l'))];
         let remapped_footer = footer_lines_text(&state, /*width*/ 220);
         assert!(
-            remapped_footer.contains("ctrl+h/ctrl+l change option"),
+            remapped_footer.contains("⌃h/⌃l change option"),
             "{remapped_footer}"
         );
         state.keymap.list.move_left.clear();
@@ -4570,7 +4614,7 @@ mod tests {
 
         state.density = SessionListDensity::Dense;
 
-        assert!(footer_lines_text(&state, /*width*/ 220).contains("ctrl+o comfortable view"));
+        assert!(footer_lines_text(&state, /*width*/ 220).contains("⌃o comfortable view"));
     }
 
     #[test]
@@ -4590,9 +4634,9 @@ mod tests {
         assert!(rendered.contains("esc new"));
         assert!(rendered.contains("tab focus"));
         assert!(rendered.contains("←/→ option"));
-        assert!(rendered.contains("ctrl+o dense"));
-        assert!(rendered.contains("ctrl+t preview"));
-        assert!(rendered.contains("ctrl+e exp"));
+        assert!(rendered.contains("⌃o dense"));
+        assert!(rendered.contains("⌃t preview"));
+        assert!(rendered.contains("⌃e exp"));
         assert!(!rendered.contains("focus sort/filter"));
     }
 
@@ -4658,7 +4702,7 @@ mod tests {
         assert!(lines.iter().all(|line| line.width() <= width as usize));
         assert_eq!(
             rendered,
-            " enter resume   esc new   ctrl+c quit\n ctrl+o comfy   ctrl+t preview"
+            " enter resume   esc new   ⌃c quit\n ⌃o comfy   ⌃t preview   ↑/↓ browse"
         );
     }
 
@@ -4678,7 +4722,7 @@ mod tests {
         let rendered = footer_lines_text(&state, /*width*/ 80);
 
         assert!(rendered.contains("loading transcript"));
-        assert!(rendered.contains("ctrl+c quit"));
+        assert!(rendered.contains("⌃c quit"));
         assert!(!rendered.contains("enter"));
     }
 
