@@ -238,7 +238,8 @@ impl CompactedHistoryResolver {
     /// Indexes only source values carried directly by one rollout item.
     ///
     /// Unlike [`Self::index_item`], this does not validate or follow references in an entry-backed
-    /// checkpoint. It is used while scanning an older prefix for possible suppliers: a dangling
+    /// checkpoint. Guardian references still preserve the pre-checkpoint source window instead
+    /// of borrowing same-ID model rewrites. It is used while scanning an older prefix for possible suppliers: a dangling
     /// reference in an unrelated historical checkpoint must not prevent a newer selected
     /// checkpoint from resolving against independently complete inline sources.
     pub fn index_explicit_sources(&mut self, rollout_item: &RolloutItem) {
@@ -248,10 +249,16 @@ impl CompactedHistoryResolver {
                 note_known_item(&mut self.guardian_known_items, envelope);
             }
             RolloutItem::Compacted(compacted) => {
+                let inherited_guardian_ids = inherited_guardian_reference_ids(compacted);
                 if let Some(replacement_history) = &compacted.replacement_history {
                     for envelope in replacement_history {
                         note_known_item(&mut self.known_items, envelope);
-                        note_known_item(&mut self.guardian_known_items, envelope);
+                        if !envelope
+                            .id()
+                            .is_some_and(|id| inherited_guardian_ids.contains(id.as_str()))
+                        {
+                            note_known_item(&mut self.guardian_known_items, envelope);
+                        }
                     }
                 } else if let Some(entries) = &compacted.replacement_history_entries {
                     for entry in entries {
@@ -264,15 +271,21 @@ impl CompactedHistoryResolver {
                             };
                             self.known_items
                                 .insert(item_id.as_str().to_string(), envelope.clone());
-                            self.guardian_known_items
-                                .insert(item_id.as_str().to_string(), envelope);
+                            if !inherited_guardian_ids.contains(item_id.as_str()) {
+                                self.guardian_known_items
+                                    .insert(item_id.as_str().to_string(), envelope);
+                            }
                         }
                     }
                 }
                 if let Some(guardian_history) = &compacted.guardian_history {
                     if let Some(entries) = guardian_history.entries() {
                         for entry in entries {
-                            if let CompactedHistoryEntry::Inline { item, metadata } = entry {
+                            if let CompactedHistoryEntry::Inline { item, metadata } = entry
+                                && !item
+                                    .id()
+                                    .is_some_and(|id| inherited_guardian_ids.contains(id.as_str()))
+                            {
                                 note_known_item(
                                     &mut self.guardian_known_items,
                                     &ResponseItemEnvelope {
@@ -306,8 +319,9 @@ impl CompactedHistoryResolver {
     ///
     /// This is the bounded form for multi-pass repair: callers can retain the union of IDs used by
     /// checkpoints that will actually be resolved, then scan arbitrarily large or malformed
-    /// historical prefixes without cloning unrelated inline payloads. References are deliberately
-    /// ignored and no checkpoint is validated by this source-carrier pass.
+    /// historical prefixes without cloning unrelated inline payloads. References provide no new
+    /// source, but keep Guardian's pre-checkpoint source window distinct from same-ID model
+    /// rewrites. No checkpoint is validated by this source-carrier pass.
     pub fn index_explicit_sources_for_ids(
         &mut self,
         rollout_item: &RolloutItem,
@@ -319,14 +333,20 @@ impl CompactedHistoryResolver {
                 note_requested_item(&mut self.guardian_known_items, requested_item_ids, envelope);
             }
             RolloutItem::Compacted(compacted) => {
+                let inherited_guardian_ids = inherited_guardian_reference_ids(compacted);
                 if let Some(replacement_history) = &compacted.replacement_history {
                     for envelope in replacement_history {
                         note_requested_item(&mut self.known_items, requested_item_ids, envelope);
-                        note_requested_item(
-                            &mut self.guardian_known_items,
-                            requested_item_ids,
-                            envelope,
-                        );
+                        if !envelope
+                            .id()
+                            .is_some_and(|id| inherited_guardian_ids.contains(id.as_str()))
+                        {
+                            note_requested_item(
+                                &mut self.guardian_known_items,
+                                requested_item_ids,
+                                envelope,
+                            );
+                        }
                     }
                 } else if let Some(entries) = &compacted.replacement_history_entries {
                     for entry in entries {
@@ -343,8 +363,10 @@ impl CompactedHistoryResolver {
                                 };
                                 self.known_items
                                     .insert(item_id.to_string(), envelope.clone());
-                                self.guardian_known_items
-                                    .insert(item_id.to_string(), envelope);
+                                if !inherited_guardian_ids.contains(item_id) {
+                                    self.guardian_known_items
+                                        .insert(item_id.to_string(), envelope);
+                                }
                             }
                         }
                     }
@@ -352,7 +374,11 @@ impl CompactedHistoryResolver {
                 if let Some(guardian_history) = &compacted.guardian_history {
                     if let Some(entries) = guardian_history.entries() {
                         for entry in entries {
-                            if let CompactedHistoryEntry::Inline { item, metadata } = entry {
+                            if let CompactedHistoryEntry::Inline { item, metadata } = entry
+                                && !item
+                                    .id()
+                                    .is_some_and(|id| inherited_guardian_ids.contains(id.as_str()))
+                            {
                                 note_requested_item(
                                     &mut self.guardian_known_items,
                                     requested_item_ids,
@@ -625,6 +651,8 @@ pub fn resolve_checkpoint_at_detailed(
 /// later Guardian references, but they are never allowed to source model replacement-history
 /// references. Only the selected checkpoint is validated, so a superseded dangling Guardian
 /// reference does not prevent a later valid checkpoint from being restored.
+/// Older Guardian references preserve the pre-checkpoint source boundary; they cannot make a
+/// same-ID model rewrite into Guardian evidence or authorize searching past a newer substitution.
 pub fn resolve_guardian_checkpoint_at(
     rollout_items: &[RolloutItem],
     checkpoint_index: usize,
@@ -876,6 +904,39 @@ fn latest_guardian_sources_for_ids(
     latest_sources_for_ids(rollout_items, requested_item_ids, true)
 }
 
+/// A Guardian reference retains the pre-checkpoint value, not a same-ID model rewrite.
+/// Last occurrence wins just as it does when a complete Guardian window is materialized.
+/// This mask is not a source or digest lookup: missing and substituted older sources
+/// remain missing or substituted and the selected reference still validates strictly.
+fn inherited_guardian_reference_ids(compacted: &crate::CompactedItem) -> HashSet<String> {
+    let mut seen = HashSet::new();
+    let mut inherited = HashSet::new();
+    if let Some(entries) = compacted
+        .guardian_history
+        .as_ref()
+        .and_then(crate::GuardianHistoryCheckpoint::entries)
+    {
+        for entry in entries.iter().rev() {
+            let (item_id, reference) = match entry {
+                CompactedHistoryEntry::Inline { item, .. } => {
+                    (item.id().map(codex_protocol::ResponseItemId::as_str), false)
+                }
+                CompactedHistoryEntry::Reference { item_id }
+                | CompactedHistoryEntry::ReferenceV2 { item_id, .. } => {
+                    (Some(item_id.as_str()), true)
+                }
+            };
+            if let Some(item_id) = item_id
+                && seen.insert(item_id)
+                && reference
+            {
+                inherited.insert(item_id.to_owned());
+            }
+        }
+    }
+    inherited
+}
+
 fn latest_sources_for_ids(
     rollout_items: &[RolloutItem],
     requested_item_ids: &HashSet<String>,
@@ -892,6 +953,11 @@ fn latest_sources_for_ids(
                 note_requested_item(&mut sources, requested_item_ids, envelope);
             }
             RolloutItem::Compacted(compacted) => {
+                let inherited_guardian_ids = if include_guardian_sources {
+                    inherited_guardian_reference_ids(compacted)
+                } else {
+                    HashSet::new()
+                };
                 // Guardian is serialized after replacement history. Visit it first during the
                 // reverse scan so same-ID inline evidence matches chronological indexing.
                 if include_guardian_sources
@@ -899,7 +965,11 @@ fn latest_sources_for_ids(
                 {
                     if let Some(entries) = guardian_history.entries() {
                         for entry in entries.iter().rev() {
-                            if let CompactedHistoryEntry::Inline { item, metadata } = entry {
+                            if let CompactedHistoryEntry::Inline { item, metadata } = entry
+                                && !item
+                                    .id()
+                                    .is_some_and(|id| inherited_guardian_ids.contains(id.as_str()))
+                            {
                                 note_requested_item(
                                     &mut sources,
                                     requested_item_ids,
@@ -918,7 +988,12 @@ fn latest_sources_for_ids(
                 }
                 if let Some(replacement_history) = &compacted.replacement_history {
                     for envelope in replacement_history.iter().rev() {
-                        note_requested_item(&mut sources, requested_item_ids, envelope);
+                        if !envelope
+                            .id()
+                            .is_some_and(|id| inherited_guardian_ids.contains(id.as_str()))
+                        {
+                            note_requested_item(&mut sources, requested_item_ids, envelope);
+                        }
                     }
                 } else if let Some(entries) = &compacted.replacement_history_entries {
                     for entry in entries.iter().rev() {
@@ -930,6 +1005,7 @@ fn latest_sources_for_ids(
                             };
                             if requested_item_ids.contains(item_id)
                                 && !sources.contains_key(item_id)
+                                && !inherited_guardian_ids.contains(item_id)
                             {
                                 sources.insert(
                                     item_id.to_string(),
