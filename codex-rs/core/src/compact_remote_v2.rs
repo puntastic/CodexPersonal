@@ -11,6 +11,8 @@ use crate::compact::InitialContextInjection;
 use crate::compact::build_compaction_initial_context;
 use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
+use crate::compact_delegated_input::is_admitted_delegated_input;
+use crate::compact_delegated_input::retain_delegated_input;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
 use crate::compact_remote_history::HistoryItemGroup;
@@ -45,6 +47,8 @@ use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
 #[cfg(test)]
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
@@ -526,7 +530,16 @@ fn build_v2_compacted_history(
         truncate_retained_messages(retained, RETAINED_MESSAGE_TOKEN_BUDGET, image_budget);
     let retained_image_count = retained
         .iter()
-        .map(|envelope| retained_input_image_count(&envelope.item))
+        .map(|envelope| match &envelope.item {
+            ResponseItem::FunctionCallOutput { output, .. } => match &output.body {
+                FunctionCallOutputBody::ContentItems(items) => items
+                    .iter()
+                    .filter(|item| matches!(item, FunctionCallOutputContentItem::InputImage { .. }))
+                    .count(),
+                FunctionCallOutputBody::Text(_) => 0,
+            },
+            _ => retained_input_image_count(&envelope.item),
+        })
         .sum::<usize>();
     retained.push(ResponseItemEnvelope::new(compaction_output));
     (retained, retained_image_count)
@@ -559,6 +572,9 @@ fn is_retained_for_remote_compaction_v2(
     retain_client_developer_messages: bool,
 ) -> bool {
     let item = &envelope.item;
+    if is_admitted_delegated_input(item, envelope.metadata.as_ref()) {
+        return true;
+    }
     if let ResponseItem::AgentMessage {
         author,
         recipient,
@@ -641,6 +657,25 @@ fn truncate_retained_messages(
             .attached_notice
             .as_ref()
             .map_or(0, |notice| message_text_token_count(&notice.item).max(1));
+        if is_admitted_delegated_input(&group.source.item, group.source.metadata.as_ref()) {
+            let Some(retained) = retain_delegated_input(
+                &group.source.item,
+                group.source.metadata.as_ref(),
+                remaining.saturating_sub(notice_tokens),
+            ) else {
+                break;
+            };
+            if let Some(notice) = group.attached_notice {
+                truncated_reversed.push(notice);
+            }
+            truncated_reversed.push(retained.envelope);
+            remaining =
+                remaining.saturating_sub(retained.token_count.saturating_add(notice_tokens));
+            if retained.global_budget_exhausted {
+                break;
+            }
+            continue;
+        }
         // Client-authored developer messages already charge non-text content via
         // the serialized estimate. Preserve their text-only boundary correction.
         let content_tokens = if charge_images {
@@ -1032,6 +1067,50 @@ mod tests {
 
         let (_, retained_image_count) = build_without_metadata(input, output);
 
+        assert_eq!(retained_image_count, 2);
+    }
+
+    #[test]
+    fn build_v2_compacted_history_counts_images_in_retained_delegated_input() {
+        let input: ResponseItem = serde_json::from_value(serde_json::json!({
+            "type": "function_call_output", "id": "fco_delivery",
+            "namespace": "codex_app", "name": "send_message_to_thread",
+            "output": [
+                {"type": "input_text", "text": "inspect these frames"},
+                {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                {"type": "input_image", "image_url": "data:image/png;base64,def"}
+            ]
+        }))
+        .unwrap();
+        let metadata: CodexHarnessMetadata = serde_json::from_value(serde_json::json!({
+            "sender_user_messages": {
+                "receiver_turn_id": "receiver-turn", "receiver_message_id": "fco_delivery",
+                "text": "Host: sender context unavailable"
+            }
+        }))
+        .unwrap();
+        let output = ResponseItem::Compaction {
+            id: None,
+            encrypted_content: "opaque".to_owned(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let (history, retained_image_count) = build_v2_compacted_history(
+            vec![input.clone()],
+            vec![Some(metadata.clone())],
+            output.clone(),
+            /*retain_client_developer_messages*/ false,
+            RetainedImageBudget::Disabled,
+        );
+        assert_eq!(
+            history,
+            vec![
+                ResponseItemEnvelope {
+                    item: input,
+                    metadata: Some(metadata)
+                },
+                ResponseItemEnvelope::new(output),
+            ]
+        );
         assert_eq!(retained_image_count, 2);
     }
 
