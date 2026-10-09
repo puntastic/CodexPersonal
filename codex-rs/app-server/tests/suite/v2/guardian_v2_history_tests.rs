@@ -104,11 +104,11 @@ enum ReviewCheckpoint {
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some(""), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "empty producer preserves retained evidence")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "source call evicted")]
 #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "incomplete answers reject fresh low score")]
-#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy answers remain runtime only")]
+#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy verified answers survive resume")]
 #[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("different"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy incompatible checkpoint still samples")]
 #[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), None, 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy unknown Luna compatibility still samples")]
 #[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 140, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy source call evicted")]
-#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "legacy answer truncation")]
+#[test_case(ContextPath::Legacy, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedAnswer, ReviewCheckpoint::Valid; "legacy incomplete answers reject fresh low score")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardians_retain_evidence_after_compaction_and_resume(
     context_path: ContextPath,
@@ -166,13 +166,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         | ReviewCheckpoint::UnknownReviewer
         | ReviewCheckpoint::EmptyReviewerHash => {}
     }
-    let rejects_incomplete_score = matches!(
-        (context_path, evidence_size),
-        (
-            ContextPath::ThreadOwned | ContextPath::Independent,
-            EvidenceSize::OversizedAnswer
-        )
-    );
+    let rejects_incomplete_score = matches!(evidence_size, EvidenceSize::OversizedAnswer);
     let classifier = Arc::new(MockResponsesState {
         luna_score: if rejects_incomplete_score || oversized_instruction || requires_sync {
             0.0
@@ -660,37 +654,18 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
                 }
             }
             for (consumer, text) in [("async", &content), ("sync", &sync_text)] {
-                if !matches!(context_path, ContextPath::Legacy) || index == 0 {
-                    let answers = text
-                        .split_once(">>> TRUSTED USER ANSWERS START")
-                        .unwrap_or_else(|| {
-                            panic!("missing {consumer} answers at step {index}: {text}")
-                        })
-                        .1;
-                    match evidence_size {
-                        EvidenceSize::Normal | EvidenceSize::OversizedInstruction => {
-                            assert!(answers.contains("assistant: Can I keep using the browser?"));
-                            assert!(answers.contains(&format!("user: {USER_INPUT_RESTRICTION}")));
-                        }
-                        EvidenceSize::OversizedAnswer => match context_path {
-                            ContextPath::ThreadOwned | ContextPath::Independent => {
-                                assert!(
-                                    answers.contains("some verified user answers are unavailable")
-                                );
-                            }
-                            ContextPath::Legacy => {
-                                assert!(answers.contains("<truncated omitted_approx_tokens="));
-                                assert!(
-                                    !answers.contains("some verified user answers are unavailable")
-                                );
-                            }
-                        },
+                let answers = text
+                    .split_once(">>> TRUSTED USER ANSWERS START")
+                    .unwrap_or_else(|| panic!("missing {consumer} answers at step {index}: {text}"))
+                    .1;
+                match evidence_size {
+                    EvidenceSize::Normal | EvidenceSize::OversizedInstruction => {
+                        assert!(answers.contains("assistant: Can I keep using the browser?"));
+                        assert!(answers.contains(&format!("user: {USER_INPUT_RESTRICTION}")));
                     }
-                } else {
-                    assert!(
-                        !text.contains(">>> TRUSTED USER ANSWERS START"),
-                        "unexpected answer section in {consumer} review at step {index}: {text}"
-                    );
+                    EvidenceSize::OversizedAnswer => {
+                        assert!(answers.contains("some verified user answers are unavailable"));
+                    }
                 }
             }
         }

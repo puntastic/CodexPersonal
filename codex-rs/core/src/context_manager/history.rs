@@ -161,6 +161,10 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
             .then_some(&self.retained_context)
     }
 
+    fn verified_answer_context(&self) -> Option<&RetainedContext> {
+        Some(&self.retained_context)
+    }
+
     fn uses_parent_context_for_review(&self) -> bool {
         self.guardian_review_mode == GuardianContextMode::ThreadOwned
     }

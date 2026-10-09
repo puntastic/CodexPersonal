@@ -30,6 +30,13 @@ pub trait ConversationHistorySnapshot: Send + Sync {
         None
     }
 
+    /// Host-owned ledger for verified question/answer evidence and its completeness.
+    /// Hosts may expose answers while retained instruction delivery remains disabled;
+    /// this access does not select a reviewer history or enable checkpoint reuse.
+    fn verified_answer_context(&self) -> Option<&RetainedContext> {
+        self.retained_context()
+    }
+
     /// Whether review uses the parent checkpoint and model window instead of a legacy transcript.
     /// Checkpoint compatibility is independent of access to retained user evidence.
     fn uses_parent_context_for_review(&self) -> bool {

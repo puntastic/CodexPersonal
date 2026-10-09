@@ -213,6 +213,53 @@ fn conversation_history_snapshot_shares_response_items_until_history_changes() {
 }
 
 #[test_case(GuardianContextMode::Legacy; "legacy")]
+#[test_case(GuardianContextMode::ThreadOwned; "thread_owned")]
+#[test_case(GuardianContextMode::Independent; "independent")]
+fn verified_answer_snapshots_do_not_enable_retained_instruction_delivery(
+    mode: GuardianContextMode,
+) {
+    let mut history = ContextManager::with_guardian_context_mode(mode, &SessionSource::Cli);
+    let before = history.conversation_history_snapshot();
+    let answer = RetainedContextEvent::VerifiedAnswer {
+        answer: codex_history::VerifiedAnswer {
+            turn_id: "turn".to_owned(),
+            call_id: "ask".to_owned(),
+            questions: vec![codex_history::VerifiedQuestionAnswer {
+                question: "Publish?".to_owned(),
+                answer: "Only privately.".to_owned(),
+            }],
+        },
+        acceptance_order: Some(history.reserve_input_order()),
+    };
+    assert!(history.record_retained_context(&answer));
+    let after = history.conversation_history_snapshot();
+    let evidence = crate::context::GuardianReviewEvidence::default();
+    assert!(
+        evidence
+            .user_input_snapshot(before.as_ref())
+            .fragments
+            .is_empty()
+    );
+    let answers = evidence.user_input_snapshot(after.as_ref());
+    assert_eq!(
+        answers.fragments,
+        vec!["Retained source order: 0\nassistant: Publish?\nuser: Only privately.\n".to_owned()],
+    );
+    assert_eq!(
+        answers.authorization_version,
+        crate::codex_thread::GuardianAuthorizationVersion {
+            user_message_revision: before.user_message_revision() + 1,
+            retained_context_complete: true,
+        },
+    );
+    assert_eq!(GuardianContextMode::from_history(after.as_ref()), mode);
+    assert_eq!(
+        after.retained_context().is_some(),
+        mode != GuardianContextMode::Legacy,
+    );
+}
+
+#[test_case(GuardianContextMode::Legacy; "legacy")]
 #[test_case(GuardianContextMode::Independent; "independent")]
 fn review_checkpoints_preserve_captured_and_replayed_source_envelopes(mode: GuardianContextMode) {
     let mut message = retained_user_message_for_rollback_test("Do not publish.");

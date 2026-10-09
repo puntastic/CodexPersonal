@@ -48,7 +48,7 @@ impl GuardianReviewEvidence {
         &self,
         history: &dyn ConversationHistorySnapshot,
     ) -> GuardianUserInputSnapshot {
-        match history.retained_context() {
+        match history.verified_answer_context() {
             Some(context) => {
                 let answers = codex_guardian_context::render_verified_answers(context);
                 let authorization_version = GuardianAuthorizationVersion {
