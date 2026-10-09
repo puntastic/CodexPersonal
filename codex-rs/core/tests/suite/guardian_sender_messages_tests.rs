@@ -37,7 +37,7 @@ async fn guardian_receives_sender_user_messages_with_thread_context(
             config
                 .features
                 .enable(Feature::GuardianThreadContext)
-                .unwrap();
+                .expect("test config should allow retained Guardian context");
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
         })

@@ -810,11 +810,8 @@ async fn maybe_request_codex_apps_auth_elicitation(
             connector_id,
         )
     });
-    let Some(plan) =
-        build_auth_elicitation_plan(call_id, result, connector_id, connector_name, install_url)
-    else {
-        return None;
-    };
+    let plan =
+        build_auth_elicitation_plan(call_id, result, connector_id, connector_name, install_url)?;
 
     let request_id = rmcp::model::RequestId::String(plan.elicitation.elicitation_id.clone().into());
     let request = ElicitationRequest::Url {

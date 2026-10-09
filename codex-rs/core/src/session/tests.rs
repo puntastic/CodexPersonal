@@ -7748,7 +7748,7 @@ async fn compaction_persists_resume_metadata_and_companion_records(
     assert!(materialized.unresolved_item_ids.is_empty());
     let compaction_items = materialized
         .rollout_items
-        .into_iter()
+        .iter()
         .skip_while(|item| !matches!(item, RolloutItem::Compacted(_)))
         .collect::<Vec<_>>();
     let [
