@@ -95,7 +95,10 @@ fn admission_requires_exact_host_binding_not_delegation_text() {
             "{field}"
         );
     }
-    assert!(!is_admitted_delegated_input(&original.item, /*metadata*/ None));
+    assert!(!is_admitted_delegated_input(
+        &original.item,
+        /*metadata*/ None
+    ));
     assert!(!is_admitted_delegated_input(
         &original.item,
         Some(&CodexHarnessMetadata::default())
@@ -155,8 +158,12 @@ fn truncation_caps_the_whole_item_and_invalidates_only_completion_proofs() {
         .sender_user_messages
         .take();
     original.metadata = Some(metadata.clone());
-    let retained =
-        retain_delegated_input(&original.item, original.metadata.as_ref(), /*available_tokens*/ 20_000).unwrap();
+    let retained = retain_delegated_input(
+        &original.item,
+        original.metadata.as_ref(),
+        /*available_tokens*/ 20_000,
+    )
+    .unwrap();
     assert!(retained.token_count <= MAX_RETAINED_DELEGATED_INPUT_TOKENS);
     assert!(!retained.global_budget_exhausted);
     let ResponseItem::FunctionCallOutput { output, .. } = &retained.envelope.item else {
@@ -175,11 +182,22 @@ fn truncation_caps_the_whole_item_and_invalidates_only_completion_proofs() {
     metadata.mark_retained_sources_incomplete();
     expected.metadata = Some(metadata);
     assert_eq!(retained.envelope, expected);
-    let global_boundary =
-        retain_delegated_input(&original.item, original.metadata.as_ref(), /*available_tokens*/ 100).unwrap();
+    let global_boundary = retain_delegated_input(
+        &original.item,
+        original.metadata.as_ref(),
+        /*available_tokens*/ 100,
+    )
+    .unwrap();
     assert!(global_boundary.token_count <= 100);
     assert!(global_boundary.global_budget_exhausted);
-    assert!(retain_delegated_input(&original.item, original.metadata.as_ref(), /*available_tokens*/ 1).is_none());
+    assert!(
+        retain_delegated_input(
+            &original.item,
+            original.metadata.as_ref(),
+            /*available_tokens*/ 1
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -193,8 +211,12 @@ fn oversized_non_text_keeps_an_explicit_same_type_omission() {
             encrypted_content: "e".repeat(/*n*/ 100_000),
         },
     ]);
-    let retained =
-        retain_delegated_input(&original.item, original.metadata.as_ref(), /*available_tokens*/ 10_000).unwrap();
+    let retained = retain_delegated_input(
+        &original.item,
+        original.metadata.as_ref(),
+        /*available_tokens*/ 10_000,
+    )
+    .unwrap();
     let ResponseItem::FunctionCallOutput { output, .. } = &mut original.item else {
         unreachable!()
     };
@@ -236,8 +258,12 @@ fn oversized_media_preserves_short_task_text_before_older_tasks_can_return() {
         .guardian_source_order_guidance = true;
     assert!(estimate_item_token_count(&original.item) > 10_000);
 
-    let retained =
-        retain_delegated_input(&original.item, original.metadata.as_ref(), /*available_tokens*/ 20_000).unwrap();
+    let retained = retain_delegated_input(
+        &original.item,
+        original.metadata.as_ref(),
+        /*available_tokens*/ 20_000,
+    )
+    .unwrap();
     let mut expected = original.clone();
     let ResponseItem::FunctionCallOutput { output, .. } = &mut expected.item else {
         unreachable!()
@@ -259,8 +285,10 @@ fn oversized_media_preserves_short_task_text_before_older_tasks_can_return() {
     assert!(!retained.global_budget_exhausted);
 
     let old = message("user", "old task");
-    let history =
-        truncate_retained_messages_for_remote_compaction(vec![old.clone(), original], /*max_tokens*/ 20_000);
+    let history = truncate_retained_messages_for_remote_compaction(
+        vec![old.clone(), original],
+        /*max_tokens*/ 20_000,
+    );
     assert_eq!(history, vec![old, expected]);
 }
 
@@ -285,8 +313,11 @@ fn local_compaction_keeps_delegated_inputs_and_corrections_in_order() {
         correction,
     ];
     let summary_text = format!("{SUMMARY_PREFIX}\nsummary");
-    let mut history =
-        build_compacted_history(Vec::new(), &collect_annotated_inputs(&inputs), &summary_text);
+    let mut history = build_compacted_history(
+        Vec::new(),
+        &collect_annotated_inputs(&inputs),
+        &summary_text,
+    );
     let summary = history.pop().unwrap();
     assert_eq!(history, inputs);
     let initial = message("developer", "initial context");
@@ -333,8 +364,10 @@ fn remote_budget_preserves_order_and_distinguishes_item_cap_from_global_boundary
     assert_eq!(retained.first(), Some(&old));
     assert_eq!(retained.len(), 2);
     assert!(estimate_item_token_count(&retained[1].item) <= 10_000);
-    let boundary =
-        truncate_retained_messages_for_remote_compaction(vec![old.clone(), oversized], /*max_tokens*/ 100);
+    let boundary = truncate_retained_messages_for_remote_compaction(
+        vec![old.clone(), oversized],
+        /*max_tokens*/ 100,
+    );
     assert_eq!(boundary.len(), 1);
     assert!(matches!(
         boundary[0].item,
@@ -342,7 +375,10 @@ fn remote_budget_preserves_order_and_distinguishes_item_cap_from_global_boundary
     ));
     assert!(estimate_item_token_count(&boundary[0].item) <= 100);
     assert_eq!(
-        truncate_retained_messages_for_remote_compaction(vec![old, delivery("new")], /*max_tokens*/ 1),
+        truncate_retained_messages_for_remote_compaction(
+            vec![old, delivery("new")],
+            /*max_tokens*/ 1
+        ),
         Vec::new()
     );
 }

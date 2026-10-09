@@ -82,7 +82,9 @@ fn builder(
                 .expect("history database enabled");
             match sender_context {
                 SenderContext::Available => config.features.enable(Feature::GuardianThreadContext),
-                SenderContext::Unavailable => config.features.disable(Feature::GuardianThreadContext),
+                SenderContext::Unavailable => {
+                    config.features.disable(Feature::GuardianThreadContext)
+                }
             }
             .expect("fixture controls private sender context without changing approval policy");
             if let CompactionMode::LocalText = mode {
@@ -331,7 +333,13 @@ async fn delegated_input_survives_compaction_and_cold_resume(
             .iter()
             .find_map(|item| match item {
                 RolloutItem::ResponseItem(envelope)
-                    if envelope.item.id().is_some_and(|source_id| source_id.as_str() == id) => Some(envelope),
+                    if envelope
+                        .item
+                        .id()
+                        .is_some_and(|source_id| source_id.as_str() == id) =>
+                {
+                    Some(envelope)
+                }
                 _ => None,
             })
             .context("original persisted delivery")
@@ -341,11 +349,16 @@ async fn delegated_input_survives_compaction_and_cold_resume(
         // envelopes so this case cannot fabricate metadata from the compaction result.
         for id in ["new-assignment", "new-correction"] {
             let snapshot = original_delivery(id)?
-                .metadata.as_ref()
+                .metadata
+                .as_ref()
                 .and_then(|metadata| metadata.sender_user_messages.as_deref())
                 .context("host-attached snapshot with private sender context unavailable")?;
             assert_eq!(snapshot.receiver_message_id, id);
-            assert!(snapshot.text.contains("Host: No sender user messages are available."));
+            assert!(
+                snapshot
+                    .text
+                    .contains("Host: No sender user messages are available.")
+            );
             assert!(!snapshot.text.contains("SENDER_PRIVATE_CONTEXT"));
             admitted_snapshots.push(snapshot.clone());
         }
@@ -393,10 +406,18 @@ async fn delegated_input_survives_compaction_and_cold_resume(
         .context("compacted replacement history")?;
     // The client omits unprefixed fixture IDs from provider requests. Bind stored
     // identity to admission, while checking model-visible bodies independently.
-    for (id, delivery) in ["new-assignment", "new-correction"].into_iter().zip(&expected) {
+    for (id, delivery) in ["new-assignment", "new-correction"]
+        .into_iter()
+        .zip(&expected)
+    {
         let retained = checkpoint
             .iter()
-            .find(|envelope| envelope.item.id().is_some_and(|source_id| source_id.as_str() == id))
+            .find(|envelope| {
+                envelope
+                    .item
+                    .id()
+                    .is_some_and(|source_id| source_id.as_str() == id)
+            })
             .context("materialized delegated delivery")?;
         let ResponseItem::FunctionCallOutput { output, .. } = &retained.item else {
             panic!("materialized delivery changed type");

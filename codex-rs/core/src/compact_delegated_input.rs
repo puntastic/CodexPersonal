@@ -90,7 +90,9 @@ pub(crate) fn retain_delegated_input(
         }
         let mut marker_only = envelope.item.clone();
         let mut omission_marker = OMITTED;
-        let mut payload_budget = limit.saturating_sub(marker_tokens).saturating_sub(/*rhs*/ 1);
+        let mut payload_budget = limit
+            .saturating_sub(marker_tokens)
+            .saturating_sub(/*rhs*/ 1);
         let mut previous_tokens = usize::MAX;
         loop {
             let ResponseItem::FunctionCallOutput { output, .. } = &mut envelope.item else {
@@ -139,7 +141,9 @@ pub(crate) fn retain_delegated_input(
                             text: omission_marker.to_owned(),
                         },
                     ]);
-                    payload_budget = limit.saturating_sub(marker_tokens).saturating_sub(/*rhs*/ 1);
+                    payload_budget = limit
+                        .saturating_sub(marker_tokens)
+                        .saturating_sub(/*rhs*/ 1);
                     previous_tokens = usize::MAX;
                     continue;
                 }
