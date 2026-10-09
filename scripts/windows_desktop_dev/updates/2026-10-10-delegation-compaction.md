@@ -126,3 +126,26 @@ rollback is not history rollback. The older reader has the reproduced source
 boundary defect and must not be assumed to reopen every later checkpoint merely
 because the wire schema is unchanged. Preserve the old package and appropriate
 history recovery copies when separately qualifying adoption.
+
+### Candidate package completed
+
+The canonical 0.161.0 `dev-small` build completed at
+`2026-10-09T19:25:27Z` with clean, unchanged source
+`8399793e3f65d9c9d931da6a47a0c5a420faa128`. Later receipt edits are documentation
+only, not a different compiled source. It used locked dependencies,
+`CARGO_INCREMENTAL=0`, two build jobs and Remote compatibility version `0.161.0`.
+
+- Package fingerprint:
+  `5328848f19ce219673d8f9aa5a6fda77e9ac3ec6597719091f6e8908648f2301`.
+- `codex.exe` SHA256:
+  `9b1bedb3b434c9db159aba28d14069fad18ac16a8c05bfed181ccd8eefcbf9b5`.
+- Local package relative to this checkout:
+  `codex-rs/target/desktop-dev/packages/8399793e3f65-dev-small-20261009-191813474-32e7f4fbd0b7`.
+- Version smoke: `codex-cli 0.161.0`; provenance status `stable`.
+- Exact build manifest: `codex-dev-build.json` beside the package manifest.
+
+Read-only verification at 19:27 UTC still reports the previous selected package
+`d65ecbf9c50f0db7707357817621d9d8d1cf14a2b1ea6f1345ce4516ccd047a8`, consistent
+selectors and no pending deployment transaction. This candidate has not been
+deployed or selected. Restarting alone will not activate it. The package remains
+local; a repository copy of the source is not an off-machine binary backup.
