@@ -6,6 +6,8 @@ use std::time::Instant;
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
+use crate::compact_delegated_input::is_admitted_delegated_input;
+use crate::compact_delegated_input::retain_delegated_input;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
@@ -360,9 +362,9 @@ async fn run_compact_task_inner_impl(
         get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default()
     };
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
-    let user_messages = collect_annotated_user_messages(history_items);
+    let inputs = collect_annotated_inputs(history_items);
 
-    let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
+    let mut new_history = build_compacted_history(Vec::new(), &inputs, &summary_text);
     if let Some(summary_item) = new_history.last_mut() {
         // This replacement history skips `record_conversation_items`; only the appended summary
         // belongs to this compaction turn.
@@ -537,44 +539,48 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct CompactedUserMessage<'a> {
+pub(crate) struct CompactedInput<'a> {
     // Flattened text is only for the existing budget and truncation policy.
     // Whole text messages retain their exact content parts and annotations.
     // Borrow from the history snapshot until selected output is materialized.
-    message: String,
+    // None denotes an admitted delegated output, which retains its original type.
+    message: Option<String>,
     original: &'a ResponseItem,
     harness_metadata: Option<&'a CodexHarnessMetadata>,
 }
 
 #[cfg(test)]
-pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<CompactedUserMessage<'_>> {
+pub(crate) fn collect_inputs(items: &[ResponseItem]) -> Vec<CompactedInput<'_>> {
     items
         .iter()
-        .filter_map(|item| compacted_user_message(item, /*harness_metadata*/ None))
+        .filter_map(|item| compacted_input(item, /*harness_metadata*/ None))
         .collect()
 }
 
-pub(crate) fn collect_annotated_user_messages(
-    items: &[ResponseItemEnvelope],
-) -> Vec<CompactedUserMessage<'_>> {
+pub(crate) fn collect_annotated_inputs(items: &[ResponseItemEnvelope]) -> Vec<CompactedInput<'_>> {
     items
         .iter()
-        .filter_map(|envelope| compacted_user_message(&envelope.item, envelope.metadata.as_ref()))
+        .filter_map(|envelope| compacted_input(&envelope.item, envelope.metadata.as_ref()))
         .collect()
 }
 
-fn compacted_user_message<'a>(
+fn compacted_input<'a>(
     item: &'a ResponseItem,
     harness_metadata: Option<&'a CodexHarnessMetadata>,
-) -> Option<CompactedUserMessage<'a>> {
-    let Some(TurnItem::UserMessage(user)) = crate::event_mapping::parse_turn_item(item) else {
-        return None;
+) -> Option<CompactedInput<'a>> {
+    let message = if is_admitted_delegated_input(item, harness_metadata) {
+        None
+    } else {
+        let Some(TurnItem::UserMessage(user)) = crate::event_mapping::parse_turn_item(item) else {
+            return None;
+        };
+        let message = user.message();
+        if is_summary_message(&message) {
+            return None;
+        }
+        Some(message)
     };
-    let message = user.message();
-    if is_summary_message(&message) {
-        return None;
-    }
-    Some(CompactedUserMessage {
+    Some(CompactedInput {
         message,
         original: item,
         harness_metadata,
@@ -589,7 +595,7 @@ pub(crate) fn is_summary_message(message: &str) -> bool {
 /// model-expected boundary.
 ///
 /// Placement rules:
-/// - Prefer immediately before the last real user or agent message.
+/// - Prefer immediately before the last real user, agent, or admitted delegated input.
 /// - If no real user messages remain, insert before the compaction summary so
 ///   the summary stays last.
 /// - If there are no user messages, insert before the last compaction item so
@@ -602,6 +608,10 @@ pub(crate) fn insert_initial_context_before_last_real_user_or_summary(
     let mut last_user_or_summary_index = None;
     let mut last_real_user_index = None;
     for (i, item) in compacted_history.iter().enumerate().rev() {
+        if is_admitted_delegated_input(&item.item, item.metadata.as_ref()) {
+            last_real_user_index = Some(i);
+            break;
+        }
         if let ResponseItem::AgentMessage { content, .. } = &item.item
             && !matches!(
                 content.first(),
@@ -655,12 +665,12 @@ pub(crate) fn insert_initial_context_before_last_real_user_or_summary(
 
 pub(crate) fn build_compacted_history(
     initial_context: Vec<ResponseItemEnvelope>,
-    user_messages: &[CompactedUserMessage<'_>],
+    inputs: &[CompactedInput<'_>],
     summary_text: &str,
 ) -> Vec<ResponseItemEnvelope> {
     build_compacted_history_with_limit(
         initial_context,
-        user_messages,
+        inputs,
         summary_text,
         COMPACT_USER_MESSAGE_MAX_TOKENS,
     )
@@ -668,18 +678,31 @@ pub(crate) fn build_compacted_history(
 
 fn build_compacted_history_with_limit(
     mut history: Vec<ResponseItemEnvelope>,
-    user_messages: &[CompactedUserMessage<'_>],
+    inputs: &[CompactedInput<'_>],
     summary_text: &str,
     max_tokens: usize,
 ) -> Vec<ResponseItemEnvelope> {
     let mut selected_messages = Vec::new();
     if max_tokens > 0 {
         let mut remaining = max_tokens;
-        for message in user_messages.iter().rev() {
+        for message in inputs.iter().rev() {
             if remaining == 0 {
                 break;
             }
-            let tokens = approx_token_count(&message.message);
+            let Some(text) = &message.message else {
+                let Some(retained) =
+                    retain_delegated_input(message.original, message.harness_metadata, remaining)
+                else {
+                    break;
+                };
+                selected_messages.push(retained.envelope);
+                remaining = remaining.saturating_sub(retained.token_count);
+                if retained.global_budget_exhausted {
+                    break;
+                }
+                continue;
+            };
+            let tokens = approx_token_count(text);
             let ResponseItem::Message {
                 id,
                 content,
@@ -706,7 +729,7 @@ fn build_compacted_history_with_limit(
                     *kinds = vec![ContentItemKind("user.text".to_owned())];
                 }
                 vec![ContentItem::InputText {
-                    text: truncate_text(&message.message, TruncationPolicy::Tokens(remaining)),
+                    text: truncate_text(text, TruncationPolicy::Tokens(remaining)),
                 }]
             };
             if tokens > remaining

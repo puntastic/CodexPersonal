@@ -223,9 +223,9 @@ fn user_message(text: &str) -> ResponseItem {
     }
 }
 
-fn compacted_user_message<'a>(text: &str, original: &'a ResponseItem) -> CompactedUserMessage<'a> {
-    CompactedUserMessage {
-        message: text.to_string(),
+fn compacted_user_message<'a>(text: &str, original: &'a ResponseItem) -> CompactedInput<'a> {
+    CompactedInput {
+        message: Some(text.to_string()),
         original,
         harness_metadata: None,
     }
@@ -265,7 +265,7 @@ fn content_items_to_text_ignores_image_only_content() {
 }
 
 #[test]
-fn collect_user_messages_extracts_user_text_only() {
+fn collect_inputs_extracts_user_text_only() {
     let items = vec![
         ResponseItem::Message {
             id: Some(ResponseItemId::with_suffix("msg", "assistant")),
@@ -288,7 +288,7 @@ fn collect_user_messages_extracts_user_text_only() {
         ResponseItem::Other,
     ];
 
-    let collected = collect_user_messages(&items);
+    let collected = collect_inputs(&items);
 
     assert_eq!(vec![compacted_user_message("first", &items[1])], collected,);
 }
@@ -303,7 +303,7 @@ fn collect_user_messages_extracts_user_text_only() {
     {"type": "input_text", "text": "first"},
     {"type": "input_image", "image_url": "file://image.png"}
 ]), "first", false; "omitted media")]
-fn collect_annotated_user_messages_extracts_user_text_only(
+fn collect_annotated_inputs_extracts_user_text_only(
     input_content: serde_json::Value,
     expected_text: &str,
     preserve_content: bool,
@@ -329,7 +329,7 @@ fn collect_annotated_user_messages_extracts_user_text_only(
         ResponseItemEnvelope::new(ResponseItem::Other),
     ];
 
-    let collected = collect_annotated_user_messages(&items);
+    let collected = collect_annotated_inputs(&items);
 
     if !preserve_content {
         item = user_message(expected_text);
@@ -340,8 +340,8 @@ fn collect_annotated_user_messages_extracts_user_text_only(
     };
     assert_eq!(
         collected,
-        vec![CompactedUserMessage {
-            message: expected_text.to_owned(),
+        vec![CompactedInput {
+            message: Some(expected_text.to_owned()),
             original: &items[0].item,
             harness_metadata: items[0].metadata.as_ref(),
         }]
@@ -358,7 +358,7 @@ fn collect_annotated_user_messages_extracts_user_text_only(
 }
 
 #[test]
-fn collect_user_messages_filters_session_prefix_entries() {
+fn collect_inputs_filters_session_prefix_entries() {
     let items = vec![
         ResponseItem::Message {
             id: None,
@@ -394,7 +394,7 @@ do things
         },
     ];
 
-    let collected = collect_user_messages(&items);
+    let collected = collect_inputs(&items);
 
     assert_eq!(
         vec![compacted_user_message("real user message", &items[2])],
@@ -403,7 +403,7 @@ do things
 }
 
 #[test]
-fn collect_user_messages_filters_legacy_warnings() {
+fn collect_inputs_filters_legacy_warnings() {
     let items = vec![
         user_message(
             "Warning: The maximum number of unified exec processes you can keep open is 60 and you currently have 61 processes open. Reuse older processes or close them to prevent automatic pruning of old processes",
@@ -417,7 +417,7 @@ fn collect_user_messages_filters_legacy_warnings() {
         user_message("real user message"),
     ];
 
-    let collected = collect_user_messages(&items);
+    let collected = collect_inputs(&items);
 
     assert_eq!(
         vec![compacted_user_message("real user message", &items[3])],
@@ -438,7 +438,7 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages() {
     original.metadata = Some(CodexHarnessMetadata::default());
     let history = super::build_compacted_history_with_limit(
         Vec::new(),
-        &collect_annotated_user_messages(std::slice::from_ref(&original)),
+        &collect_annotated_inputs(std::slice::from_ref(&original)),
         "SUMMARY",
         max_tokens,
     );
@@ -479,7 +479,7 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages() {
 fn build_token_limited_compacted_history_appends_summary_message() {
     let initial_context: Vec<ResponseItemEnvelope> = Vec::new();
     let original = user_message("first user message");
-    let user_messages = collect_user_messages(std::slice::from_ref(&original));
+    let user_messages = collect_inputs(std::slice::from_ref(&original));
     let summary_text = "summary text";
 
     let history = build_compacted_history(initial_context, &user_messages, summary_text);
@@ -520,7 +520,7 @@ fn build_compacted_history_preserves_user_message_passthrough_metadata() {
     };
     let history = build_compacted_history(
         Vec::new(),
-        &collect_annotated_user_messages(std::slice::from_ref(&original)),
+        &collect_annotated_inputs(std::slice::from_ref(&original)),
         "summary text",
     );
 

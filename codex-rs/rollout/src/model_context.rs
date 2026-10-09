@@ -346,6 +346,7 @@ impl ModelContextScan {
                 // the reverse scan, claim Guardian-only requests there first. These sources may
                 // never satisfy model replacement-history references.
                 let mut guardian_found_ids = HashSet::new();
+                let mut guardian_inherited_ids = HashSet::new();
                 let retained_guardian =
                     compacted.guardian_history.as_ref().and_then(|checkpoint| {
                         if let Some(entries) = checkpoint.entries() {
@@ -353,14 +354,29 @@ impl ModelContextScan {
                                 .iter()
                                 .rev()
                                 .filter_map(|entry| {
-                                    let CompactedHistoryEntry::Inline { item, .. } = entry else {
-                                        return None;
+                                    let item_id = match entry {
+                                        CompactedHistoryEntry::Inline { item, .. } => {
+                                            item.id()?.as_str()
+                                        }
+                                        CompactedHistoryEntry::Reference { item_id }
+                                        | CompactedHistoryEntry::ReferenceV2 { item_id, .. } => {
+                                            item_id.as_str()
+                                        }
                                     };
-                                    let item_id = item.id()?;
-                                    let item_id = item_id.as_str();
-                                    (self.unresolved_guardian_reference_ids.contains(item_id)
-                                        && guardian_found_ids.insert(item_id.to_string()))
-                                    .then(|| entry.clone())
+                                    if !self.unresolved_guardian_reference_ids.contains(item_id)
+                                        || guardian_found_ids.contains(item_id)
+                                        || guardian_inherited_ids.contains(item_id)
+                                    {
+                                        return None;
+                                    }
+                                    if matches!(entry, CompactedHistoryEntry::Inline { .. }) {
+                                        guardian_found_ids.insert(item_id.to_owned());
+                                    } else {
+                                        // Preserve this scope boundary while looking for its older
+                                        // source; a same-ID model inline value is not that source.
+                                        guardian_inherited_ids.insert(item_id.to_owned());
+                                    }
+                                    Some(entry.clone())
                                 })
                                 .collect::<Vec<_>>();
                             retained.reverse();
@@ -387,8 +403,9 @@ impl ModelContextScan {
                     self.unresolved_guardian_reference_ids.remove(&item_id);
                 }
 
-                // Replacement-history inline values are ordinary rollout sources and can satisfy
-                // either source window. Last occurrence wins within the stored sequence.
+                // Replacement-history inline values can satisfy either source window unless the
+                // checkpoint's Guardian reference explicitly carries its pre-checkpoint value.
+                // Last occurrence wins within the stored sequence.
                 let mut replacement_found_ids = HashSet::new();
                 let retained_replacement_history =
                     compacted
@@ -402,9 +419,10 @@ impl ModelContextScan {
                                     let item_id = envelope.item.id()?;
                                     let item_id = item_id.as_str();
                                     ((self.unresolved_reference_ids.contains(item_id)
-                                        || self
-                                            .unresolved_guardian_reference_ids
-                                            .contains(item_id))
+                                        || (!guardian_inherited_ids.contains(item_id)
+                                            && self
+                                                .unresolved_guardian_reference_ids
+                                                .contains(item_id)))
                                         && replacement_found_ids.insert(item_id.to_string()))
                                     .then(|| envelope.clone())
                                 })
@@ -426,7 +444,10 @@ impl ModelContextScan {
                                 let item_id = item.id()?;
                                 let item_id = item_id.as_str();
                                 ((self.unresolved_reference_ids.contains(item_id)
-                                    || self.unresolved_guardian_reference_ids.contains(item_id))
+                                    || (!guardian_inherited_ids.contains(item_id)
+                                        && self
+                                            .unresolved_guardian_reference_ids
+                                            .contains(item_id)))
                                     && replacement_found_ids.insert(item_id.to_string()))
                                 .then(|| entry.clone())
                             })
@@ -434,9 +455,32 @@ impl ModelContextScan {
                         retained.reverse();
                         (!retained.is_empty()).then_some(retained)
                     });
+                let retained_guardian = retained_guardian.and_then(|checkpoint| {
+                    let Some(entries) = checkpoint.entries() else {
+                        return Some(checkpoint);
+                    };
+                    // The reference is only needed in the returned carrier when it masks a
+                    // same-ID model source actually retained there. Ref-only intermediate
+                    // checkpoints must not accumulate while searching for the older source.
+                    let retained = entries
+                        .iter()
+                        .filter(|entry| match entry {
+                            CompactedHistoryEntry::Inline { .. } => true,
+                            CompactedHistoryEntry::Reference { item_id }
+                            | CompactedHistoryEntry::ReferenceV2 { item_id, .. } => {
+                                replacement_found_ids.contains(item_id)
+                            }
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    (!retained.is_empty())
+                        .then(|| GuardianHistoryCheckpoint::from_entries(retained))
+                });
                 for item_id in replacement_found_ids {
                     self.unresolved_reference_ids.remove(&item_id);
-                    self.unresolved_guardian_reference_ids.remove(&item_id);
+                    if !guardian_inherited_ids.contains(&item_id) {
+                        self.unresolved_guardian_reference_ids.remove(&item_id);
+                    }
                 }
 
                 if retained_guardian.is_none()

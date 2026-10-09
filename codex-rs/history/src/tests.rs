@@ -1233,6 +1233,75 @@ fn guardian_reencode_keeps_conflicting_same_id_occurrences_inline() {
 }
 
 #[test]
+fn selected_checkpoint_keeps_same_id_model_and_guardian_sources_distinct() {
+    let original = identified_message("shared-delivery", "complete original delivery");
+    let shortened = identified_message("shared-delivery", "shortened model delivery");
+    let mut first = entry_checkpoint(
+        "first shortening",
+        vec![CompactedHistoryEntry::from(shortened.clone())],
+    );
+    let RolloutItem::Compacted(compacted) = &mut first else {
+        unreachable!()
+    };
+    compacted.guardian_history = Some(GuardianHistoryCheckpoint::from_entries(vec![
+        integrity_reference(&original),
+    ]));
+    let mut selected = entry_checkpoint("selected", vec![integrity_reference(&shortened)]);
+    let RolloutItem::Compacted(compacted) = &mut selected else {
+        unreachable!()
+    };
+    compacted.guardian_history = Some(GuardianHistoryCheckpoint::from_entries(vec![
+        integrity_reference(&original),
+    ]));
+    let rollout = vec![RolloutItem::ResponseItem(original.clone()), first, selected];
+    let materialized = materialize_compacted_histories(&rollout);
+    assert!(materialized.unresolved_item_ids.is_empty());
+    assert_eq!(
+        resolve_checkpoint_at_detailed(&rollout, /*checkpoint_index*/ 2).unwrap(),
+        Some(vec![shortened.clone()]),
+    );
+    assert_eq!(
+        resolve_guardian_checkpoint_at_detailed(&rollout, /*checkpoint_index*/ 2).unwrap(),
+        Some(GuardianHistoryCheckpoint(vec![original.clone()])),
+    );
+    let RolloutItem::Compacted(selected) = &rollout[2] else {
+        unreachable!()
+    };
+    let requested = std::collections::HashSet::from([original.id().unwrap().to_string()]);
+    let mut all_sources = CompactedHistoryResolver::default();
+    let mut selected_sources = CompactedHistoryResolver::default();
+    for item in &rollout[..2] {
+        all_sources.index_explicit_sources(item);
+        selected_sources.index_explicit_sources_for_ids(item, &requested);
+    }
+    for resolver in [all_sources, selected_sources] {
+        assert_eq!(
+            resolver.resolve_compacted_item(selected).unwrap(),
+            Some(vec![shortened.clone()])
+        );
+        assert_eq!(
+            resolver
+                .resolve_guardian_history_detailed(selected)
+                .unwrap(),
+            Some(GuardianHistoryCheckpoint(vec![original.clone()]))
+        );
+    }
+
+    // A real newer source remains authoritative for lookup, even when its digest
+    // conflicts with the selected reference. Do not hunt backwards for a match.
+    let substituted = identified_message("shared-delivery", "newer genuine source");
+    let mut mismatched = rollout.clone();
+    mismatched.insert(1, RolloutItem::ResponseItem(substituted.clone()));
+    let error =
+        resolve_guardian_checkpoint_at_detailed(&mismatched, /*checkpoint_index*/ 3).unwrap_err();
+    assert_eq!(error.digest_mismatches().len(), 1);
+    assert_eq!(
+        error.digest_mismatches()[0].actual(),
+        &CompactedHistoryDigest::from_envelope(&substituted).unwrap()
+    );
+}
+
+#[test]
 fn selected_guardian_checkpoint_resolves_source_outside_the_model_window() {
     let source = identified_message("guardian-static", "older visual evidence");
     let source_id = source.item.id().expect("source id").as_str().to_string();

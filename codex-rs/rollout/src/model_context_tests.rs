@@ -332,6 +332,141 @@ fn guardian_only_inline_source_cannot_satisfy_a_model_reference() {
 }
 
 #[test]
+fn same_id_model_and_guardian_references_keep_distinct_source_boundaries() {
+    let original: ResponseItemEnvelope =
+        response_with_text("shared-delivery", "complete original").into();
+    let shortened: ResponseItemEnvelope =
+        response_with_text("shared-delivery", "shortened model").into();
+    let original_reference =
+        CompactedHistoryEntry::reference_v2("shared-delivery".to_owned(), &original).unwrap();
+    let shortened_reference =
+        CompactedHistoryEntry::reference_v2("shared-delivery".to_owned(), &shortened).unwrap();
+    let selected =
+        guardian_entry_checkpoint(vec![shortened_reference], vec![original_reference.clone()]);
+    let first = guardian_entry_checkpoint(
+        vec![CompactedHistoryEntry::from(shortened.clone())],
+        vec![original_reference],
+    );
+    let mut scan = ModelContextScan::default();
+    assert_eq!(scan.push(selected), ModelContextScanProgress::Continue);
+    assert_eq!(
+        scan.push(first),
+        ModelContextScanProgress::Continue,
+        "shortened model source must not satisfy Guardian's original source demand"
+    );
+    assert_eq!(
+        scan.push(RolloutItem::ResponseItem(original.clone())),
+        ModelContextScanProgress::Complete
+    );
+    let rollout = scan.finish(session_meta());
+    let selected_index = rollout.len() - 1;
+    assert_eq!(
+        codex_history::resolve_checkpoint_at_detailed(&rollout, selected_index).unwrap(),
+        Some(vec![shortened])
+    );
+    assert_eq!(
+        codex_history::resolve_guardian_checkpoint_at_detailed(&rollout, selected_index).unwrap(),
+        Some(GuardianHistoryCheckpoint(vec![original]))
+    );
+}
+
+#[test]
+fn inherited_guardian_reference_does_not_search_past_a_newer_mismatching_source() {
+    let original: ResponseItemEnvelope = response_with_text("shared-delivery", "original").into();
+    let substituted: ResponseItemEnvelope =
+        response_with_text("shared-delivery", "newer source").into();
+    let shortened: ResponseItemEnvelope =
+        response_with_text("shared-delivery", "shortened model").into();
+    let original_reference =
+        CompactedHistoryEntry::reference_v2("shared-delivery".to_owned(), &original).unwrap();
+    let shortened_reference =
+        CompactedHistoryEntry::reference_v2("shared-delivery".to_owned(), &shortened).unwrap();
+    let selected =
+        guardian_entry_checkpoint(vec![shortened_reference], vec![original_reference.clone()]);
+    let first = guardian_entry_checkpoint(
+        vec![CompactedHistoryEntry::from(shortened.clone())],
+        vec![original_reference],
+    );
+    let mut scan = ModelContextScan::default();
+    assert_eq!(scan.push(selected), ModelContextScanProgress::Continue);
+    assert_eq!(scan.push(first), ModelContextScanProgress::Continue);
+    assert_eq!(
+        scan.push(RolloutItem::ResponseItem(substituted.clone())),
+        ModelContextScanProgress::Complete
+    );
+    let rollout = scan.finish(session_meta());
+    let selected_index = rollout.len() - 1;
+    assert_eq!(
+        codex_history::resolve_checkpoint_at_detailed(&rollout, selected_index).unwrap(),
+        Some(vec![shortened])
+    );
+    let error = codex_history::resolve_guardian_checkpoint_at_detailed(&rollout, selected_index)
+        .unwrap_err();
+    assert_eq!(error.digest_mismatches().len(), 1);
+    assert_eq!(
+        error.digest_mismatches()[0].actual(),
+        &codex_history::CompactedHistoryDigest::from_envelope(&substituted).unwrap()
+    );
+}
+
+#[test]
+fn guardian_reference_only_boundaries_do_not_accumulate_in_bounded_context() {
+    let original: ResponseItemEnvelope =
+        response_with_text("shared-delivery", "complete original").into();
+    let original_reference =
+        CompactedHistoryEntry::reference_v2("shared-delivery".to_owned(), &original).unwrap();
+    let selected = guardian_entry_checkpoint(
+        vec![inline("current-model")],
+        vec![original_reference.clone()],
+    );
+    let mut scan = ModelContextScan::default();
+    assert_eq!(
+        scan.push(selected.clone()),
+        ModelContextScanProgress::Continue
+    );
+    let retained_before_search = retained_item_count(&scan);
+    for index in 0..128 {
+        let unused_model: ResponseItemEnvelope = response_with_text(
+            "shared-delivery",
+            &format!("unused shortened model {index}"),
+        )
+        .into();
+        let intermediate = guardian_entry_checkpoint(
+            vec![CompactedHistoryEntry::from(unused_model)],
+            vec![original_reference.clone()],
+        );
+        assert_eq!(scan.push(intermediate), ModelContextScanProgress::Continue);
+        assert_eq!(
+            retained_item_count(&scan),
+            retained_before_search,
+            "a reference boundary without a retained model shadow must not add a carrier"
+        );
+    }
+    assert_eq!(
+        scan.push(RolloutItem::ResponseItem(original.clone())),
+        ModelContextScanProgress::Complete
+    );
+    let meta = session_meta();
+    let rollout = scan.finish(meta.clone());
+    assert_eq!(
+        serde_json::to_value(&rollout).unwrap(),
+        serde_json::to_value(vec![
+            RolloutItem::SessionMeta(meta),
+            RolloutItem::ResponseItem(original.clone()),
+            selected,
+        ])
+        .unwrap()
+    );
+    assert_eq!(
+        codex_history::resolve_guardian_checkpoint_at_detailed(
+            &rollout, /*checkpoint_index*/ 2
+        )
+        .unwrap(),
+        Some(GuardianHistoryCheckpoint(vec![original]))
+    );
+}
+
+#[test]
 fn guardian_only_compacted_item_is_not_a_model_context_base() {
     let mut scan = ModelContextScan::default();
     let mut guardian_only = guardian_legacy_checkpoint(Vec::new(), vec![response("guardian")]);

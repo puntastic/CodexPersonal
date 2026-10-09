@@ -159,7 +159,11 @@ async fn guardian_revalidates_owning_session_before_allow(
             config
                 .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())
                 .expect("set sandbox policy");
+            // Select thread-owned review independently of production defaults. Legacy
+            // cases below still start from an incompatible checkpoint before promotion.
             for feature in [
+                Feature::GuardianThreadContext,
+                Feature::GuardianReuseParentCompaction,
                 Feature::CodeMode,
                 Feature::CodeModeInterrupt,
                 Feature::DefaultModeRequestUserInput,
