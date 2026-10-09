@@ -132,6 +132,7 @@ use wiremock::matchers::body_partial_json;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
+use super::rmcp_client::mcp_test_audio_data_url;
 use super::rmcp_client::remote_aware_environment_id;
 use super::rmcp_client::remote_aware_stdio_server_bin;
 
@@ -6720,7 +6721,7 @@ image(imageItem);
         assert_eq!(items.len(), 3);
         assert_eq!(
             serde_json::from_str::<Value>(text_item(&items, /*index*/ 1))?,
-            json!({"result":"structured-image"})
+            serde_json::json!({"result":"structured-image"})
         );
         2
     } else {
@@ -6750,6 +6751,97 @@ image(imageItem);
         Some("original")
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_can_forward_structured_mcp_audio_with_audio_helper() -> Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let rmcp_test_server_bin = remote_aware_stdio_server_bin()?;
+    let environment_id = remote_aware_environment_id();
+    let mut builder = test_codex()
+        .with_model_info_override("rmcp-audio-test-model", |model| {
+            model.input_modalities = vec![InputModality::Text, InputModality::Audio];
+            model.supports_search_tool = false;
+        })
+        .with_config(move |config| {
+            let _ = config.features.enable(Feature::CodeMode);
+            let mut servers = config.mcp_servers.get().clone();
+            servers.insert(
+                "rmcp".to_string(),
+                serde_json::from_value(serde_json::json!({
+                    "command": rmcp_test_server_bin,
+                    "environment_id": environment_id,
+                    "cwd": config.cwd,
+                }))
+                .expect("test MCP server config should be valid"),
+            );
+            config
+                .mcp_servers
+                .set(servers)
+                .expect("test config should allow MCP servers");
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    wait_for_mcp_server(&test.codex, "rmcp").await?;
+
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_custom_tool_call(
+                "call-1",
+                "exec",
+                r#"
+const out = await tools.mcp__rmcp__audio_scenario({});
+text(out.structuredContent);
+text(out.content.find((item) => item.type === "text").text);
+audio(out.content.find((item) => item.type === "audio"));
+"#,
+            ),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let second_mock = responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+    test.submit_turn("use exec to forward the rmcp structured audio result")
+        .await?;
+
+    let req = second_mock.single_request();
+    let items = custom_tool_output_items(&req, "call-1");
+    let (_, success) = custom_tool_output_body_and_success(&req, "call-1");
+    assert_ne!(success, Some(false));
+    assert_regex_match(
+        concat!(
+            r"(?s)\A",
+            r"Script completed\nWall time \d+\.\d seconds\nOutput:\n\z"
+        ),
+        text_item(&items, /*index*/ 0),
+    );
+    assert_eq!(
+        &items[1..],
+        &[
+            serde_json::json!({
+                "type": "input_text",
+                "text": serde_json::json!({"result":"structured-audio"}).to_string(),
+            }),
+            serde_json::json!({"type": "input_text", "text": "Here is the audio:"}),
+            serde_json::json!({"type": "input_audio", "audio_url": mcp_test_audio_data_url()}),
+        ]
+    );
+    server.verify().await;
     Ok(())
 }
 

@@ -161,6 +161,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for HistoryTool {
                     .call(Some(arguments.clone()), meta, /*timeout*/ None)
                     .await?;
                 Ok(Box::new(McpToolOutput {
+                    presentation: result.presentation(),
                     result,
                     tool_input: arguments,
                     result_metadata_capture_allowed: false,

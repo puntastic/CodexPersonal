@@ -2275,6 +2275,30 @@ impl<'de> Deserialize<'de> for FunctionCallOutputPayload {
     }
 }
 
+/// Internal presentation policy retained when model sanitization removes typed media.
+/// This is not part of the MCP result or its serialized envelope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum McpToolResultPresentation {
+    PreferStructured,
+    PreserveMediaContext,
+}
+
+impl McpToolResultPresentation {
+    fn from_content_items(items: &[FunctionCallOutputContentItem]) -> Self {
+        if items.iter().any(|item| {
+            matches!(
+                item,
+                FunctionCallOutputContentItem::InputImage { .. }
+                    | FunctionCallOutputContentItem::InputAudio { .. }
+            )
+        }) {
+            Self::PreserveMediaContext
+        } else {
+            Self::PreferStructured
+        }
+    }
+}
+
 impl CallToolResult {
     pub fn from_result(result: Result<Self, String>) -> Self {
         match result {
@@ -2300,6 +2324,21 @@ impl CallToolResult {
     }
 
     pub fn as_function_call_output_payload(&self) -> FunctionCallOutputPayload {
+        self.as_function_call_output_payload_with_presentation(
+            McpToolResultPresentation::PreferStructured,
+        )
+    }
+
+    /// Capture before sanitizing content so media captions and omission markers
+    /// can still accompany structured output on text-only models.
+    pub fn presentation(&self) -> McpToolResultPresentation {
+        McpToolResultPresentation::from_content_items(&convert_mcp_content_to_items(&self.content))
+    }
+
+    pub fn as_function_call_output_payload_with_presentation(
+        &self,
+        presentation: McpToolResultPresentation,
+    ) -> FunctionCallOutputPayload {
         let content_items = convert_mcp_content_to_items(&self.content);
         if content_items
             .iter()
@@ -2316,15 +2355,12 @@ impl CallToolResult {
         {
             match serde_json::to_string(structured_content) {
                 Ok(serialized_structured_content) => {
-                    let body = if content_items.iter().any(|item| {
-                        matches!(
-                            item,
-                            FunctionCallOutputContentItem::InputImage { .. }
-                                | FunctionCallOutputContentItem::InputAudio { .. }
-                        )
-                    }) {
-                        // Structured JSON supplements typed media; keep its adjoining content
-                        // in order instead of flattening away the image or audio payload.
+                    let body = if presentation == McpToolResultPresentation::PreserveMediaContext
+                        || McpToolResultPresentation::from_content_items(&content_items)
+                            == McpToolResultPresentation::PreserveMediaContext
+                    {
+                        // Structured JSON supplements typed media or its omission markers;
+                        // preserve adjoining content even after unsupported media is removed.
                         let mut items = Vec::with_capacity(content_items.len() + 1);
                         items.push(FunctionCallOutputContentItem::InputText {
                             text: serialized_structured_content,
@@ -3429,6 +3465,40 @@ mod tests {
                 success: Some(true),
             }
         );
+    }
+
+    #[test]
+    fn mcp_result_presentation_uses_typed_media_conversion() {
+        for (content, expected) in [
+            (
+                serde_json::json!({"type":"text", "text":"caption"}),
+                McpToolResultPresentation::PreferStructured,
+            ),
+            (
+                serde_json::json!({"type":"image", "mimeType":"image/png"}),
+                McpToolResultPresentation::PreferStructured,
+            ),
+            (
+                serde_json::json!({"type":"audio", "data":42}),
+                McpToolResultPresentation::PreferStructured,
+            ),
+            (
+                serde_json::json!({"type":"image", "data":"AAA", "mime_type":"image/png"}),
+                McpToolResultPresentation::PreserveMediaContext,
+            ),
+            (
+                serde_json::json!({"type":"audio", "data":"data:audio/wav;base64,AAA"}),
+                McpToolResultPresentation::PreserveMediaContext,
+            ),
+        ] {
+            let result = CallToolResult {
+                content: vec![content],
+                structured_content: Some(serde_json::json!({"result":"structured"})),
+                is_error: None,
+                meta: None,
+            };
+            assert_eq!(result.presentation(), expected);
+        }
     }
 
     #[test]

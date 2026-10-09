@@ -604,6 +604,7 @@ fn post_tool_use_feedback_output_preserves_fallback_token_limit_override(
         },
         result: Box::new(PostToolUseFeedbackOutput {
             original: Box::new(crate::tools::context::McpToolOutput {
+                presentation: codex_protocol::models::McpToolResultPresentation::PreferStructured,
                 result: codex_protocol::mcp::CallToolResult {
                     content: Vec::new(),
                     structured_content: None,
@@ -703,6 +704,7 @@ fn post_tool_use_feedback_output_preserves_mcp_result_metadata(tool_error: bool)
     });
     let result = PostToolUseFeedbackOutput {
         original: Box::new(crate::tools::context::McpToolOutput {
+            presentation: codex_protocol::models::McpToolResultPresentation::PreferStructured,
             result: codex_protocol::mcp::CallToolResult {
                 content: vec![serde_json::json!({
                     "type": "text",

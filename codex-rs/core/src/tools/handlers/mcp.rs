@@ -265,6 +265,7 @@ impl McpHandler {
 
         Ok(boxed_tool_output(McpToolOutput {
             result: result.result,
+            presentation: result.presentation,
             tool_input: result.tool_input,
             result_metadata_capture_allowed,
             wall_time: started.elapsed(),
@@ -713,6 +714,7 @@ mod tests {
             arguments: json!({ "path": "/tmp/notes.txt" }).to_string(),
         };
         let output = McpToolOutput {
+            presentation: codex_protocol::models::McpToolResultPresentation::PreferStructured,
             result: codex_protocol::mcp::CallToolResult {
                 content: vec![json!({
                     "type": "text",

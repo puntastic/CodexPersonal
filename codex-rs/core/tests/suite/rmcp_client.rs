@@ -158,6 +158,13 @@ fn assert_wall_time_header(output: &str) {
     assert_eq!(marker, "Output:");
 }
 
+pub(super) fn mcp_test_audio_data_url() -> String {
+    // Expected 25 ms, 24 kHz, mono 16-bit PCM fixture, including its RIFF header.
+    let mut wav = b"RIFF\xd4\x04\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\xc0\x5d\x00\x00\x80\xbb\x00\x00\x02\x00\x10\x00data\xb0\x04\x00\x00".to_vec();
+    wav.resize(1_244, /*value*/ 0);
+    format!("data:audio/wav;base64,{}", BASE64_STANDARD.encode(wav))
+}
+
 fn read_only_user_turn(fixture: &TestCodex, text: impl Into<String>) -> TurnInputRequest {
     read_only_user_turn_with_model(fixture, text, fixture.session_configured.model.clone())
 }
@@ -3193,6 +3200,100 @@ async fn stdio_image_responses_preserve_original_detail_metadata(
     }));
     assert_eq!(output, &expected);
 
+    server.verify().await;
+    Ok(())
+}
+
+#[test_case(vec![InputModality::Text, InputModality::Audio]; "audio capable model")]
+#[test_case(vec![InputModality::Text]; "text only model")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[serial(mcp_test_value)]
+async fn stdio_structured_audio_responses_follow_model_modalities(
+    input_modalities: Vec<InputModality>,
+) -> anyhow::Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let call_id = "structured-audio-1";
+    let supports_audio = input_modalities.contains(&InputModality::Audio);
+    mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_function_call_with_namespace(
+                call_id,
+                "mcp__rmcp",
+                "audio_scenario",
+                "{}",
+            ),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let final_mock = mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_assistant_message("msg-1", "done"),
+            responses::ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+
+    let rmcp_test_server_bin = remote_aware_stdio_server_bin()?;
+    let fixture = test_codex()
+        .with_model_info_override("rmcp-audio-test-model", move |model| {
+            model.input_modalities = input_modalities;
+            model.supports_search_tool = false;
+        })
+        .with_config(move |config| {
+            insert_mcp_server(
+                config,
+                "rmcp",
+                stdio_transport(rmcp_test_server_bin, /*env*/ None, Vec::new()),
+                TestMcpServerOptions {
+                    environment_id: remote_aware_environment_id(),
+                    ..Default::default()
+                },
+            );
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    wait_for_mcp_server(&fixture.codex, "rmcp").await?;
+    fixture
+        .codex
+        .start_or_steer_turn(read_only_user_turn(
+            &fixture,
+            "call the rmcp audio_scenario tool",
+        ))
+        .await?;
+    wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let output_item = final_mock.single_request().function_call_output(call_id);
+    let header = output_item["output"][0]["text"]
+        .as_str()
+        .expect("first content item should contain the wall-time header");
+    assert_wall_time_header(header);
+    let audio_item = if supports_audio {
+        json!({"type": "input_audio", "audio_url": mcp_test_audio_data_url()})
+    } else {
+        json!({
+            "type": "input_text",
+            "text": "<audio content omitted because you do not support audio input>",
+        })
+    };
+    assert_eq!(
+        output_item["output"],
+        json!([
+            {"type": "input_text", "text": header},
+            {"type": "input_text", "text": json!({"result":"structured-audio"}).to_string()},
+            {"type": "input_text", "text": "Here is the audio:"},
+            audio_item,
+        ])
+    );
     server.verify().await;
     Ok(())
 }

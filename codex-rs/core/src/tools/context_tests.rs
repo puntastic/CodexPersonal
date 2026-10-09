@@ -87,6 +87,7 @@ fn mcp_code_mode_result_omits_private_metadata() {
 #[test]
 fn mcp_tool_output_response_item_includes_wall_time() {
     let output = McpToolOutput {
+        presentation: McpToolResultPresentation::PreferStructured,
         result: CallToolResult {
             content: vec![serde_json::json!({
                 "type": "text",
@@ -132,6 +133,7 @@ fn mcp_tool_output_response_item_includes_wall_time() {
 #[test]
 fn mcp_tool_output_response_item_truncates_large_structured_content() {
     let output = McpToolOutput {
+        presentation: McpToolResultPresentation::PreferStructured,
         result: CallToolResult {
             content: vec![serde_json::json!({
                 "type": "text",
@@ -184,6 +186,7 @@ fn mcp_tool_output_response_item_truncates_large_structured_content() {
 fn mcp_tool_output_response_item_preserves_content_items() {
     let image_url = "data:image/png;base64,AAA";
     let output = McpToolOutput {
+        presentation: McpToolResultPresentation::PreserveMediaContext,
         result: CallToolResult {
             content: vec![serde_json::json!({
                 "type": "image",
@@ -251,6 +254,7 @@ fn mcp_tool_output_code_mode_result_preserves_content_without_private_metadata(
         json!({"type":"audio", "mimeType":"audio/wav", "data":"AAA"}),
     ];
     let output = McpToolOutput {
+        presentation: McpToolResultPresentation::PreserveMediaContext,
         result: CallToolResult {
             content: content.clone(),
             structured_content: Some(serde_json::json!({
@@ -297,6 +301,7 @@ fn mcp_mixed_media_response_keeps_truncation_detail_and_private_metadata_boundar
         (TruncationPolicy::Tokens(32), "tokens truncated"),
     ] {
         let output = McpToolOutput {
+            presentation: McpToolResultPresentation::PreserveMediaContext,
             result: CallToolResult {
                 content: vec![
                     json!({"type":"text", "text":"caption after structured JSON"}),
@@ -363,6 +368,72 @@ fn mcp_mixed_media_response_keeps_truncation_detail_and_private_metadata_boundar
             "model truncation must not mutate the original result or hook envelope"
         );
     }
+}
+
+#[test]
+fn mcp_tool_output_preserves_sanitized_media_context_only_in_direct_response() {
+    let content = vec![
+        json!({"type":"text", "text":"caption"}),
+        json!({
+            "type":"text",
+            "text":"<audio content omitted because you do not support audio input>",
+        }),
+    ];
+    let structured_content = json!({"result":"structured"});
+    let output = McpToolOutput {
+        result: CallToolResult {
+            content: content.clone(),
+            structured_content: Some(structured_content.clone()),
+            is_error: Some(false),
+            meta: Some(json!({"private":"metadata"})),
+        },
+        presentation: McpToolResultPresentation::PreserveMediaContext,
+        tool_input: json!({}),
+        result_metadata_capture_allowed: false,
+        wall_time: Duration::ZERO,
+        original_image_detail_supported: false,
+        truncation_policy: TruncationPolicy::Tokens(1024),
+    };
+    let payload = ToolPayload::Function {
+        arguments: "{}".to_string(),
+    };
+
+    assert_eq!(
+        output.to_response_item("sanitized-media", &payload),
+        ResponseInputItem::FunctionCallOutput {
+            call_id: "sanitized-media".to_string(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::ContentItems(vec![
+                    FunctionCallOutputContentItem::InputText {
+                        text: "Wall time: 0.0000 seconds\nOutput:".to_string(),
+                    },
+                    FunctionCallOutputContentItem::InputText {
+                        text: structured_content.to_string(),
+                    },
+                    FunctionCallOutputContentItem::InputText {
+                        text: "caption".to_string(),
+                    },
+                    FunctionCallOutputContentItem::InputText {
+                        text: "<audio content omitted because you do not support audio input>"
+                            .to_string(),
+                    },
+                ]),
+                success: Some(true),
+            },
+        }
+    );
+    assert_eq!(
+        output.code_mode_result(&payload),
+        json!({
+            "content":content,
+            "structuredContent":structured_content,
+            "isError":false,
+        })
+    );
+    assert_eq!(
+        output.post_tool_use_response("sanitized-media", &payload),
+        Some(serde_json::to_value(&output.result).expect("serialize unchanged hook result"))
+    );
 }
 
 #[test]

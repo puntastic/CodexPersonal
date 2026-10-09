@@ -71,6 +71,7 @@ use codex_protocol::mcp_approval_meta::TOOL_DESCRIPTION_KEY as MCP_TOOL_APPROVAL
 use codex_protocol::mcp_approval_meta::TOOL_PARAMS_DISPLAY_KEY as MCP_TOOL_APPROVAL_TOOL_PARAMS_DISPLAY_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_PARAMS_KEY as MCP_TOOL_APPROVAL_TOOL_PARAMS_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_TITLE_KEY as MCP_TOOL_APPROVAL_TOOL_TITLE_KEY;
+use codex_protocol::models::McpToolResultPresentation;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::AskForApproval;
@@ -153,6 +154,7 @@ pub(crate) async fn handle_mcp_tool_call(
                 error!("failed to parse tool call arguments: {e}");
                 return HandledMcpToolCall {
                     result: CallToolResult::from_error_text(format!("err: {e}")),
+                    presentation: McpToolResultPresentation::PreferStructured,
                     tool_input: JsonValue::Object(serde_json::Map::new()),
                 };
             }
@@ -180,6 +182,7 @@ pub(crate) async fn handle_mcp_tool_call(
         .await;
         return HandledMcpToolCall {
             result: CallToolResult::from_result(result),
+            presentation: McpToolResultPresentation::PreferStructured,
             tool_input: arguments_value
                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
         };
@@ -205,6 +208,7 @@ pub(crate) async fn handle_mcp_tool_call(
             .await;
             return HandledMcpToolCall {
                 result: CallToolResult::from_result(result),
+                presentation: McpToolResultPresentation::PreferStructured,
                 tool_input: arguments_value
                     .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
             };
@@ -250,6 +254,7 @@ pub(crate) async fn handle_mcp_tool_call(
         );
         return HandledMcpToolCall {
             result: CallToolResult::from_result(result),
+            presentation: McpToolResultPresentation::PreferStructured,
             tool_input: arguments_value
                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
         };
@@ -364,6 +369,7 @@ pub(crate) async fn handle_mcp_tool_call(
 
         return HandledMcpToolCall {
             result: CallToolResult::from_result(result),
+            presentation: McpToolResultPresentation::PreferStructured,
             tool_input: arguments_value
                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
         };
@@ -386,6 +392,7 @@ pub(crate) async fn handle_mcp_tool_call(
 
 pub(crate) struct HandledMcpToolCall {
     pub(crate) result: CallToolResult,
+    pub(crate) presentation: McpToolResultPresentation,
     pub(crate) tool_input: JsonValue,
 }
 
@@ -460,6 +467,7 @@ async fn handle_approved_mcp_tool_call(
         .clone()
         .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
     let mut elicitation_type = None;
+    let mut presentation = McpToolResultPresentation::PreferStructured;
     let result = async {
         let result = async {
             let mut result = prepared_call
@@ -566,20 +574,26 @@ async fn handle_approved_mcp_tool_call(
                 &mut result,
             )
             .await;
-            let result = sanitize_mcp_tool_result_for_model(
+            presentation = result.presentation();
+            let mut result = sanitize_mcp_tool_result_for_model(
                 &step_context.settings.model_info.input_modalities,
                 Ok(result),
             )?;
-            Ok(maybe_request_codex_apps_auth_elicitation(
+            if let Some(replacement) = maybe_request_codex_apps_auth_elicitation(
                 sess,
                 turn_context,
                 prepared_call.config().approval_policy.value(),
                 call_id,
                 &invocation.server,
                 Some(&metadata),
-                result,
+                &result,
             )
-            .await)
+            .await
+            {
+                presentation = replacement.presentation();
+                result = replacement;
+            }
+            Ok(result)
         }
         .await;
         record_mcp_result_span_telemetry(&Span::current(), &result);
@@ -645,6 +659,7 @@ async fn handle_approved_mcp_tool_call(
 
     HandledMcpToolCall {
         result: CallToolResult::from_result(result),
+        presentation,
         tool_input,
     }
 }
@@ -755,6 +770,8 @@ fn truncate_str_to_char_boundary(value: &str, max_chars: usize) -> &str {
     }
 }
 
+/// Return a replacement only when auth was accepted, leaving presentation policy
+/// attached to the original result when no replacement is needed.
 async fn maybe_request_codex_apps_auth_elicitation(
     sess: &Arc<Session>,
     turn_context: &TurnContext,
@@ -762,10 +779,10 @@ async fn maybe_request_codex_apps_auth_elicitation(
     call_id: &str,
     server: &str,
     metadata: Option<&McpToolApprovalMetadata>,
-    result: CallToolResult,
-) -> CallToolResult {
+    result: &CallToolResult,
+) -> Option<CallToolResult> {
     if server != CODEX_APPS_MCP_SERVER_NAME {
-        return result;
+        return None;
     }
 
     if !turn_context
@@ -773,13 +790,13 @@ async fn maybe_request_codex_apps_auth_elicitation(
         .features
         .enabled(Feature::AuthElicitation)
     {
-        return result;
+        return None;
     }
 
     match approval_policy {
-        AskForApproval::Never => return result,
+        AskForApproval::Never => return None,
         AskForApproval::Granular(granular_config) if !granular_config.allows_mcp_elicitations() => {
-            return result;
+            return None;
         }
         AskForApproval::OnRequest | AskForApproval::UnlessTrusted | AskForApproval::Granular(_) => {
         }
@@ -794,9 +811,9 @@ async fn maybe_request_codex_apps_auth_elicitation(
         )
     });
     let Some(plan) =
-        build_auth_elicitation_plan(call_id, &result, connector_id, connector_name, install_url)
+        build_auth_elicitation_plan(call_id, result, connector_id, connector_name, install_url)
     else {
-        return result;
+        return None;
     };
 
     let request_id = rmcp::model::RequestId::String(plan.elicitation.elicitation_id.clone().into());
@@ -819,11 +836,14 @@ async fn maybe_request_codex_apps_auth_elicitation(
         .as_ref()
         .is_some_and(|response| response.action == ElicitationAction::Accept)
     {
-        return result;
+        return None;
     }
 
     refresh_codex_apps_after_connector_auth(sess, turn_context).await;
-    auth_elicitation_completed_result(&plan.auth_failure, result.meta)
+    Some(auth_elicitation_completed_result(
+        &plan.auth_failure,
+        result.meta.clone(),
+    ))
 }
 
 async fn refresh_codex_apps_after_connector_auth(sess: &Arc<Session>, turn_context: &TurnContext) {

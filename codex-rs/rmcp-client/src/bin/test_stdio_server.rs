@@ -8,6 +8,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
@@ -144,6 +146,7 @@ impl TestToolServer {
             Self::sync_readonly_tool(),
             Self::image_tool(),
             Self::image_scenario_tool(),
+            Self::audio_scenario_tool(),
             sandbox_meta_tool,
         ];
         tools.extend(entitlement_tools);
@@ -406,6 +409,23 @@ impl TestToolServer {
             Cow::Borrowed(
                 "Return content blocks for manual testing of MCP image rendering scenarios.",
             ),
+            Arc::new(schema),
+        );
+        tool.annotations = Some(ToolAnnotations::new().read_only(true));
+        tool
+    }
+
+    fn audio_scenario_tool() -> Tool {
+        #[expect(clippy::expect_used)]
+        let schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }))
+        .expect("audio_scenario tool schema should deserialize");
+        let mut tool = Tool::new(
+            Cow::Borrowed("audio_scenario"),
+            Cow::Borrowed("Return structured JSON, a caption, and a short WAV audio block."),
             Arc::new(schema),
         );
         tool.annotations = Some(ToolAnnotations::new().read_only(true));
@@ -775,6 +795,30 @@ impl ServerHandler for TestToolServer {
             "image_scenario" => {
                 let args = Self::parse_call_args::<ImageScenarioArgs>(&request, "image_scenario")?;
                 Self::image_scenario_result(args)
+            }
+            "audio_scenario" => {
+                // 600 mono PCM frames at 24 kHz yield a valid 25 ms clip.
+                let sample_rate = 24_000_u32;
+                let data_size = 600_u32 * 2;
+                let mut wav = b"RIFF".to_vec();
+                wav.extend_from_slice(&(36 + data_size).to_le_bytes());
+                wav.extend_from_slice(b"WAVEfmt ");
+                wav.extend_from_slice(&16_u32.to_le_bytes());
+                wav.extend_from_slice(&1_u16.to_le_bytes());
+                wav.extend_from_slice(&1_u16.to_le_bytes());
+                wav.extend_from_slice(&sample_rate.to_le_bytes());
+                wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+                wav.extend_from_slice(&2_u16.to_le_bytes());
+                wav.extend_from_slice(&16_u16.to_le_bytes());
+                wav.extend_from_slice(b"data");
+                wav.extend_from_slice(&data_size.to_le_bytes());
+                wav.resize(44 + data_size as usize, /*value*/ 0);
+                let mut result = CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text("Here is the audio:"),
+                    rmcp::model::ContentBlock::audio(BASE64_STANDARD.encode(wav), "audio/wav"),
+                ]);
+                result.structured_content = Some(json!({"result":"structured-audio"}));
+                Ok(result)
             }
             "sync" => {
                 let args = Self::parse_call_args::<SyncArgs>(&request, "sync")?;

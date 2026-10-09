@@ -10,6 +10,7 @@ use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::McpToolResultPresentation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::function_call_output_content_items_to_text;
@@ -125,6 +126,7 @@ impl ToolInvocation {
 #[derive(Clone, Debug)]
 pub struct McpToolOutput {
     pub result: CallToolResult,
+    pub(crate) presentation: McpToolResultPresentation,
     pub tool_input: JsonValue,
     // Keep the original metadata for hooks; this flag only controls analytics capture.
     pub(crate) result_metadata_capture_allowed: bool,
@@ -183,7 +185,9 @@ impl ToolOutput for McpToolOutput {
 
 impl McpToolOutput {
     fn response_payload(&self) -> FunctionCallOutputPayload {
-        let mut payload = self.result.as_function_call_output_payload();
+        let mut payload = self
+            .result
+            .as_function_call_output_payload_with_presentation(self.presentation);
         if let Some(items) = payload.content_items_mut() {
             sanitize_original_image_detail(self.original_image_detail_supported, items);
         }

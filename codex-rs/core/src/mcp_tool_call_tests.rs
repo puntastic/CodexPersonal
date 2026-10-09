@@ -29,6 +29,11 @@ use codex_features::Features;
 use codex_hooks::HooksConfig;
 use codex_model_provider::create_model_provider;
 use codex_protocol::ResponseItemId;
+use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::AskForApproval;
@@ -1072,6 +1077,135 @@ fn sanitize_mcp_tool_result_for_model_preserves_supported_media() {
 }
 
 #[test]
+fn sanitized_mcp_media_context_preserves_structured_supplement() {
+    for input_modalities in [
+        vec![InputModality::Text],
+        vec![InputModality::Text, InputModality::Image],
+        vec![InputModality::Text, InputModality::Audio],
+        vec![
+            InputModality::Text,
+            InputModality::Image,
+            InputModality::Audio,
+        ],
+    ] {
+        let structured = serde_json::json!({"result":"structured"});
+        let original = CallToolResult {
+            content: vec![
+                serde_json::json!({"type":"text", "text":"caption"}),
+                serde_json::json!({"type":"image", "data":"AAA", "mimeType":"image/png"}),
+                serde_json::json!({"type":"audio", "data":"BBB", "mimeType":"audio/wav"}),
+            ],
+            structured_content: Some(structured.clone()),
+            is_error: Some(true),
+            meta: Some(serde_json::json!({"private":"metadata"})),
+        };
+        let presentation = original.presentation();
+        let result = sanitize_mcp_tool_result_for_model(&input_modalities, Ok(original))
+            .expect("sanitize result");
+        let image = if input_modalities.contains(&InputModality::Image) {
+            FunctionCallOutputContentItem::InputImage {
+                image: ImageReference::Inline {
+                    image_url: "data:image/png;base64,AAA".to_string(),
+                },
+                detail: Some(DEFAULT_IMAGE_DETAIL),
+            }
+        } else {
+            FunctionCallOutputContentItem::InputText {
+                text: "<image content omitted because you do not support image input>".to_string(),
+            }
+        };
+        let audio = if input_modalities.contains(&InputModality::Audio) {
+            FunctionCallOutputContentItem::InputAudio {
+                audio_url: "data:audio/wav;base64,BBB".to_string(),
+            }
+        } else {
+            FunctionCallOutputContentItem::InputText {
+                text: "<audio content omitted because you do not support audio input>".to_string(),
+            }
+        };
+        assert_eq!(
+            result.as_function_call_output_payload_with_presentation(presentation),
+            FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::ContentItems(vec![
+                    FunctionCallOutputContentItem::InputText {
+                        text: structured.to_string(),
+                    },
+                    FunctionCallOutputContentItem::InputText {
+                        text: "caption".to_string(),
+                    },
+                    image,
+                    audio,
+                ]),
+                success: Some(false),
+            }
+        );
+        assert_eq!(result.structured_content, Some(structured));
+    }
+}
+
+#[test]
+fn sanitized_mcp_malformed_media_keeps_structured_preference() {
+    let result = CallToolResult {
+        content: vec![
+            serde_json::json!({"type":"text", "text":"ignored"}),
+            serde_json::json!({"type":"image", "mimeType":"image/png"}),
+            serde_json::json!({"type":"audio", "data":42}),
+        ],
+        structured_content: Some(serde_json::json!({"result":"structured"})),
+        is_error: None,
+        meta: None,
+    };
+    let presentation = result.presentation();
+    let result = sanitize_mcp_tool_result_for_model(&[InputModality::Text], Ok(result))
+        .expect("sanitize malformed media");
+
+    assert_eq!(
+        result.as_function_call_output_payload_with_presentation(presentation),
+        FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text(
+                serde_json::json!({"result":"structured"}).to_string(),
+            ),
+            success: Some(true),
+        }
+    );
+}
+
+#[test]
+fn sanitized_mcp_encrypted_content_keeps_precedence_over_structured_content() {
+    let result = CallToolResult {
+        content: vec![
+            serde_json::json!({
+                "type":"text", "text":"enc_opaque",
+                "_meta":{"codex/encryptedContent":true},
+            }),
+            serde_json::json!({"type":"audio", "data":"BBB", "mimeType":"audio/wav"}),
+        ],
+        structured_content: Some(serde_json::json!({"result":"ignored"})),
+        is_error: Some(true),
+        meta: None,
+    };
+    let presentation = result.presentation();
+    let result = sanitize_mcp_tool_result_for_model(&[InputModality::Text], Ok(result))
+        .expect("sanitize encrypted result");
+
+    assert_eq!(
+        result.as_function_call_output_payload_with_presentation(presentation),
+        FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::ContentItems(vec![
+                FunctionCallOutputContentItem::EncryptedContent {
+                    encrypted_content: "enc_opaque".to_string(),
+                },
+                FunctionCallOutputContentItem::InputText {
+                    text: "<audio content omitted because you do not support audio input>"
+                        .to_string(),
+                },
+            ]),
+            success: Some(false),
+        }
+    );
+}
+
+#[test]
 fn truncate_mcp_tool_result_for_event_preserves_small_result() {
     let original = CallToolResult {
         content: vec![serde_json::json!({
@@ -1657,11 +1791,11 @@ async fn codex_apps_auth_elicitation_feature_disabled_returns_original_result() 
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&metadata),
-        result.clone(),
+        &result,
     )
     .await;
 
-    assert_eq!(returned, result);
+    assert_eq!(returned, None);
     assert!(rx_event.try_recv().is_err());
 }
 
@@ -1682,11 +1816,11 @@ async fn codex_apps_auth_elicitation_disallowed_by_policy_returns_original_resul
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&metadata),
-        result.clone(),
+        &result,
     )
     .await;
 
-    assert_eq!(returned, result);
+    assert_eq!(returned, None);
     assert!(rx_event.try_recv().is_err());
 }
 
@@ -1718,27 +1852,36 @@ async fn codex_apps_auth_elicitation_granular_mcp_disabled_returns_original_resu
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&metadata),
-        result.clone(),
+        &result,
     )
     .await;
 
-    assert_eq!(returned, result);
+    assert_eq!(returned, None);
     assert!(rx_event.try_recv().is_err());
 }
 
-#[test_case::test_case(SessionSource::Exec; "root")]
-#[test_case::test_case(SessionSource::SubAgent(SubAgentSource::Review); "subagent")]
-#[test_case::test_case(SessionSource::Internal(InternalSessionSource::Guardian); "guardian")]
+#[test_case::test_case(SessionSource::Exec, McpToolResultPresentation::PreferStructured; "root")]
+#[test_case::test_case(SessionSource::SubAgent(SubAgentSource::Review), McpToolResultPresentation::PreferStructured; "subagent")]
+#[test_case::test_case(SessionSource::Internal(InternalSessionSource::Guardian), McpToolResultPresentation::PreferStructured; "guardian")]
+#[test_case::test_case(SessionSource::Exec, McpToolResultPresentation::PreserveMediaContext; "media result")]
 #[tokio::test]
 async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation(
     source: SessionSource,
+    original_presentation: McpToolResultPresentation,
 ) {
     let (session, mut turn_context, rx_event) = make_session_and_context_with_rx().await;
     Arc::get_mut(&mut turn_context)
         .expect("single turn context ref")
         .session_source = source;
     *session.active_turn.lock().await = Some(ActiveTurn::default());
-    let result = codex_apps_auth_failure_result();
+    let mut result = codex_apps_auth_failure_result();
+    if original_presentation == McpToolResultPresentation::PreserveMediaContext {
+        result.content.push(serde_json::json!({
+            "type":"image", "data":"AAA", "mimeType":"image/png",
+        }));
+        result.structured_content = Some(serde_json::json!({"stale":"original result"}));
+    }
+    assert_eq!(result.presentation(), original_presentation);
     let metadata = codex_apps_auth_failure_metadata();
 
     let request_task = tokio::spawn({
@@ -1752,7 +1895,7 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation(
                 "call_123",
                 CODEX_APPS_MCP_SERVER_NAME,
                 Some(&metadata),
-                result,
+                &result,
             )
             .await
         }
@@ -1792,7 +1935,13 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation(
     let returned = tokio::time::timeout(std::time::Duration::from_secs(1), request_task)
         .await
         .expect("auth elicitation task timed out")
-        .expect("auth elicitation task failed");
+        .expect("auth elicitation task failed")
+        .expect("accepted auth elicitation should replace the result");
+    assert_eq!(
+        returned.presentation(),
+        McpToolResultPresentation::PreferStructured
+    );
+    assert_eq!(returned.structured_content, None);
     assert_eq!(
         returned.content,
         vec![serde_json::json!({
