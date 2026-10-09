@@ -440,6 +440,16 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
             config.experimental_thread_store = ThreadStoreConfig::Local;
 
             // Exercise local compaction's rebuilt user messages, not an opaque checkpoint.
+            // This fixture inspects thread-owned retained evidence, not the default mode.
+            for feature in [
+                Feature::GuardianThreadContext,
+                Feature::GuardianReuseParentCompaction,
+            ] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("exercise thread-owned retained evidence");
+            }
             config.model_provider.name = "Local compaction test provider".to_owned();
             config
                 .features

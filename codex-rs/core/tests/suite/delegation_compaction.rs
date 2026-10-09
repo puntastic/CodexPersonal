@@ -55,7 +55,17 @@ enum DeliverySize {
     Oversized,
 }
 
-fn builder(mode: CompactionMode, history_mode: ThreadHistoryMode) -> TestCodexBuilder {
+#[derive(Clone, Copy, Debug)]
+enum SenderContext {
+    Available,
+    Unavailable,
+}
+
+fn builder(
+    mode: CompactionMode,
+    history_mode: ThreadHistoryMode,
+    sender_context: SenderContext,
+) -> TestCodexBuilder {
     let mut extensions = ExtensionRegistryBuilder::new();
     extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
     test_codex()
@@ -70,10 +80,11 @@ fn builder(mode: CompactionMode, history_mode: ThreadHistoryMode) -> TestCodexBu
                 .features
                 .enable(Feature::Sqlite)
                 .expect("history database enabled");
-            config
-                .features
-                .enable(Feature::GuardianThreadContext)
-                .expect("sender context available to the fixture's snapshot assertions");
+            match sender_context {
+                SenderContext::Available => config.features.enable(Feature::GuardianThreadContext),
+                SenderContext::Unavailable => config.features.disable(Feature::GuardianThreadContext),
+            }
+            .expect("fixture controls private sender context without changing approval policy");
             if let CompactionMode::LocalText = mode {
                 config.model_provider.name = "OpenAI-compatible test provider".to_owned();
                 config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_owned());
@@ -117,11 +128,12 @@ fn assert_retained_request(
     }
 }
 
-#[test_case::test_case(CompactionMode::LocalText, "codex_app", "send_message_to_thread", DeliverySize::Fitting, ThreadHistoryMode::Legacy; "local text desktop")]
-#[test_case::test_case(CompactionMode::RemoteV2, "codex_app", "send_message_to_thread", DeliverySize::Fitting, ThreadHistoryMode::PaginatedRefsV2; "remote desktop refs v2")]
-#[test_case::test_case(CompactionMode::RemoteV2, "codex_tui", "send_message_to_thread", DeliverySize::Fitting, ThreadHistoryMode::Legacy; "remote tui")]
-#[test_case::test_case(CompactionMode::RemoteV2, "cloud_threads", "send_message", DeliverySize::Fitting, ThreadHistoryMode::Legacy; "remote cloud")]
-#[test_case::test_case(CompactionMode::RemoteV2, "codex_app", "send_message_to_thread", DeliverySize::Oversized, ThreadHistoryMode::PaginatedRefsV2; "remote shortened delivery refs v2")]
+#[test_case::test_case(CompactionMode::LocalText, "codex_app", "send_message_to_thread", DeliverySize::Fitting, ThreadHistoryMode::Legacy, SenderContext::Available; "local text desktop")]
+#[test_case::test_case(CompactionMode::RemoteV2, "codex_app", "send_message_to_thread", DeliverySize::Fitting, ThreadHistoryMode::PaginatedRefsV2, SenderContext::Available; "remote desktop refs v2")]
+#[test_case::test_case(CompactionMode::RemoteV2, "codex_tui", "send_message_to_thread", DeliverySize::Fitting, ThreadHistoryMode::Legacy, SenderContext::Available; "remote tui")]
+#[test_case::test_case(CompactionMode::RemoteV2, "cloud_threads", "send_message", DeliverySize::Fitting, ThreadHistoryMode::Legacy, SenderContext::Available; "remote cloud")]
+#[test_case::test_case(CompactionMode::RemoteV2, "codex_app", "send_message_to_thread", DeliverySize::Oversized, ThreadHistoryMode::PaginatedRefsV2, SenderContext::Available; "remote shortened delivery refs v2")]
+#[test_case::test_case(CompactionMode::RemoteV2, "codex_app", "send_message_to_thread", DeliverySize::Fitting, ThreadHistoryMode::PaginatedRefsV2, SenderContext::Unavailable; "remote desktop guardian disabled refs v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delegated_input_survives_compaction_and_cold_resume(
     mode: CompactionMode,
@@ -129,10 +141,11 @@ async fn delegated_input_survives_compaction_and_cold_resume(
     name: &str,
     delivery_size: DeliverySize,
     history_mode: ThreadHistoryMode,
+    sender_context: SenderContext,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = responses::start_mock_server().await;
-    let test = builder(mode, history_mode)
+    let test = builder(mode, history_mode, sender_context)
         .build_with_auto_env(&server)
         .await?;
     let sender = test
@@ -218,7 +231,9 @@ async fn delegated_input_survives_compaction_and_cold_resume(
         let snapshot = history
             .retained_context()
             .and_then(|context| context.sender_user_messages());
-        if id == "lookalike" {
+        if matches!(sender_context, SenderContext::Unavailable) {
+            assert!(history.retained_context().is_none());
+        } else if id == "lookalike" {
             assert!(
                 snapshot.is_none(),
                 "quoted tags must not establish sender provenance"
@@ -311,6 +326,30 @@ async fn delegated_input_survives_compaction_and_cold_resume(
         .map(codex_rollout::parse_rollout_line)
         .map(|line| line.map(|line| line.item))
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let original_delivery = |id: &str| {
+        items
+            .iter()
+            .find_map(|item| match item {
+                RolloutItem::ResponseItem(envelope)
+                    if envelope.item.id().is_some_and(|source_id| source_id.as_str() == id) => Some(envelope),
+                _ => None,
+            })
+            .context("original persisted delivery")
+    };
+    if matches!(sender_context, SenderContext::Unavailable) {
+        // The public getter is gated, not the host admission marker. Read exact original
+        // envelopes so this case cannot fabricate metadata from the compaction result.
+        for id in ["new-assignment", "new-correction"] {
+            let snapshot = original_delivery(id)?
+                .metadata.as_ref()
+                .and_then(|metadata| metadata.sender_user_messages.as_deref())
+                .context("host-attached snapshot with private sender context unavailable")?;
+            assert_eq!(snapshot.receiver_message_id, id);
+            assert!(snapshot.text.contains("Host: No sender user messages are available."));
+            assert!(!snapshot.text.contains("SENDER_PRIVATE_CONTEXT"));
+            admitted_snapshots.push(snapshot.clone());
+        }
+    }
     if history_mode == ThreadHistoryMode::PaginatedRefsV2 {
         assert!(items.iter().any(|item| matches!(
             item, RolloutItem::SessionMeta(meta) if meta.meta.history_mode == history_mode
@@ -330,20 +369,7 @@ async fn delegated_input_survives_compaction_and_cold_resume(
             DeliverySize::Oversized => &["new-correction"],
         };
         for &id in unchanged_ids {
-            let source = items
-                .iter()
-                .find_map(|item| match item {
-                    RolloutItem::ResponseItem(envelope)
-                        if envelope
-                            .item
-                            .id()
-                            .is_some_and(|source_id| source_id.as_str() == id) =>
-                    {
-                        Some(envelope)
-                    }
-                    _ => None,
-                })
-                .context("original persisted delivery")?;
+            let source = original_delivery(id)?;
             let digest = CompactedHistoryDigest::from_envelope(source)?;
             assert!(
                 entries.iter().any(|entry| matches!(
@@ -365,10 +391,12 @@ async fn delegated_input_survives_compaction_and_cold_resume(
         })
         .next_back()
         .context("compacted replacement history")?;
-    for delivery in &expected {
+    // The client omits unprefixed fixture IDs from provider requests. Bind stored
+    // identity to admission, while checking model-visible bodies independently.
+    for (id, delivery) in ["new-assignment", "new-correction"].into_iter().zip(&expected) {
         let retained = checkpoint
             .iter()
-            .find(|envelope| envelope.item.id().map(|id| id.as_str()) == delivery["id"].as_str())
+            .find(|envelope| envelope.item.id().is_some_and(|source_id| source_id.as_str() == id))
             .context("materialized delegated delivery")?;
         let ResponseItem::FunctionCallOutput { output, .. } = &retained.item else {
             panic!("materialized delivery changed type");
@@ -389,7 +417,7 @@ async fn delegated_input_survives_compaction_and_cold_resume(
 
     // A new manager/store reopens the checkpoint through the public model-context route,
     // including paginated references. The original sender is no longer loaded here.
-    let cold = builder(mode, history_mode)
+    let cold = builder(mode, history_mode, sender_context)
         .with_home(Arc::clone(&test.home))
         .build_with_auto_env(&server)
         .await?;
@@ -418,12 +446,15 @@ async fn delegated_input_survives_compaction_and_cold_resume(
         .await?
         .thread;
     let cold_history = resumed.conversation_history_snapshot().await;
-    assert_eq!(
-        cold_history
-            .retained_context()
-            .and_then(|context| context.sender_user_messages()),
-        admitted_snapshots.last()
-    );
+    match sender_context {
+        SenderContext::Available => assert_eq!(
+            cold_history
+                .retained_context()
+                .and_then(|context| context.sender_user_messages()),
+            admitted_snapshots.last()
+        ),
+        SenderContext::Unavailable => assert!(cold_history.retained_context().is_none()),
+    }
     let resume_mock = responses::mount_sse_once(&server, done()).await;
     resumed
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
