@@ -7,6 +7,7 @@ use codex_core::ForkSnapshot;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
 use codex_core::config::ThreadStoreConfig;
+use codex_core::context::GuardianContextMode;
 use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
@@ -355,8 +356,11 @@ async fn guardian_history_uses_deltas_between_eviction_batches() -> Result<()> {
             "guardian_history": history.review_items().cloned().collect::<Vec<_>>()
         }
     }))?;
-    test.codex =
-        super::guardian_checkpoint_migration::resume(&test, &test.codex, vec![checkpoint]).await?;
+    test.codex
+        .append_rollout_items(std::slice::from_ref(&checkpoint))
+        .await?;
+    let history = super::guardian_checkpoint_migration::saved_history(&test, &test.codex).await?;
+    test.codex = super::guardian_checkpoint_migration::resume(&test, &test.codex, history).await?;
 
     let mut responses = Vec::new();
     for index in 0..3 {
@@ -446,6 +450,10 @@ async fn guardian_answers_survive_compaction_and_eviction() -> Result<()> {
                 .unwrap();
             config
                 .features
+                .enable(Feature::GuardianReuseParentCompaction)
+                .expect("review the compacted parent context");
+            config
+                .features
                 .enable(Feature::DefaultModeRequestUserInput)
                 .unwrap();
             config.update_plan_enabled = true;
@@ -522,6 +530,13 @@ async fn guardian_answers_survive_compaction_and_eviction() -> Result<()> {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+
+    assert_eq!(
+        GuardianContextMode::from_history(
+            test.codex.conversation_history_snapshot().await.as_ref()
+        ),
+        GuardianContextMode::ThreadOwned,
+    );
 
     // A valid, supported-size image whose encoded bytes exceed the retention budget.
     let (width, height) = (1200, 1200);

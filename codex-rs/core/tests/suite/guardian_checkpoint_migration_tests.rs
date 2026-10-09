@@ -109,6 +109,10 @@ async fn independent_history_resume_filters_rolled_back_sources(compaction: &str
             }
             config
                 .features
+                .enable(Feature::GuardianThreadContext)
+                .expect("exercise independent Guardian history");
+            config
+                .features
                 .disable(Feature::GuardianReuseParentCompaction)
                 .expect("retain independent review history");
         })
@@ -132,7 +136,13 @@ async fn independent_history_resume_filters_rolled_back_sources(compaction: &str
     let original = original.item.clone();
     test.codex.ensure_rollout_materialized().await;
     test.codex.append_rollout_items(&history).await?;
+    // The synthetic sources are a durable suffix, not a complete replay identity.
+    let history = saved_history(&test, &test.codex).await?;
     let thread = resume(&test, &test.codex, history).await?;
+    assert_eq!(
+        GuardianContextMode::from_history(thread.conversation_history_snapshot().await.as_ref()),
+        GuardianContextMode::Independent,
+    );
     let summary = if local {
         responses::ev_assistant_message("summary", "Synthetic parent summary")
     } else {
@@ -155,14 +165,13 @@ async fn independent_history_resume_filters_rolled_back_sources(compaction: &str
     );
     // Paginated replay starts at the compacted window, where the queued assistant
     // source is gone. Its ordering must survive in the separate Guardian checkpoint.
-    let mut history = saved_history(&test, &thread).await?;
     let rollback = RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
         num_turns: 1,
     }));
     thread
         .append_rollout_items(std::slice::from_ref(&rollback))
         .await?;
-    history.push(rollback);
+    let history = saved_history(&test, &thread).await?;
     let thread = resume(&test, &thread, history).await?;
     let snapshot = thread.conversation_history_snapshot().await;
     assert_eq!(

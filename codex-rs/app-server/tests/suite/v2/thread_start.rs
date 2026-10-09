@@ -1419,6 +1419,7 @@ async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<
                 limit: None,
                 detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
                 thread_id: Some(start_response.thread.id),
+                server_name: None,
             },
         })
         .await?;

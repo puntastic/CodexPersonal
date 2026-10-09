@@ -146,7 +146,11 @@ fn seed_reference_backed_checkpoint(path: &Path, retained_text: &str) -> Result<
         .filter(|line| !line.trim().is_empty())
         .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?;
-    let (checkpoint_index, retained_envelope) = lines
+    // RefsV1 writers may already encode the checkpoint as entries. Resolve a copy for
+    // selection without rewriting unrelated checkpoints in the persisted fixture.
+    let mut materialized_lines = lines.clone();
+    materialize_rollout_lines(&mut materialized_lines)?;
+    let (checkpoint_index, retained_envelope) = materialized_lines
         .iter()
         .enumerate()
         .find_map(|(index, line)| match &line.item {
@@ -212,13 +216,19 @@ fn seed_reference_backed_checkpoint(path: &Path, retained_text: &str) -> Result<
     // backward reference. Model-visible content stays unchanged, while resume and fork now have a
     // real reference to resolve end to end.
     lines[source_index].item = RolloutItem::ResponseItem(retained_envelope.clone());
-    let RolloutItem::Compacted(compacted) = &mut lines[checkpoint_index].item else {
+    let RolloutItem::Compacted(materialized_checkpoint) =
+        &mut materialized_lines[checkpoint_index].item
+    else {
         unreachable!("checkpoint index was selected from a compacted item");
     };
-    let replacement_history = compacted
+    let replacement_history = materialized_checkpoint
         .replacement_history
         .take()
         .context("selected checkpoint lost replacement history")?;
+    let RolloutItem::Compacted(compacted) = &mut lines[checkpoint_index].item else {
+        unreachable!("checkpoint index was selected from a compacted item");
+    };
+    compacted.replacement_history = None;
     let mut replaced = false;
     compacted.replacement_history_entries = Some(
         replacement_history
