@@ -9,25 +9,57 @@ and only then select it for the next Desktop restart.
 
 ## Current update and last qualification
 
-The September27 source-qualified update is on `codex/upstream-sync-20260927`,
+The October 8 update completed source/package qualification and next-restart
+selection on October 9. It integrates stable `rust-v0.161.0`
+(`979011409de0a60b52f179721948e65531d26144`), the pending tool-interface work,
+two selected upstream Windows fixes and the bounded direct-MCP media repair.
+Compiled source `e0c9c2b514bc4946d701ede91454900ef5fe022f` was fast-forward
+landed on remote `main` and `codex/upstream-sync-20261008`. Later receipt-only
+documentation commits are not the compiled source identity.
+
+The canonical `0.161.0` `dev-small` build used `CARGO_INCREMENTAL=0` and
+`CARGO_BUILD_JOBS=2`, producing package fingerprint
+`d65ecbf9c50f0db7707357817621d9d8d1cf14a2b1ea6f1345ce4516ccd047a8`.
+Actual copied-database candidate→old 0.157.1→candidate startup passed, including
+state migration 57→58, the three partial archive indexes, migration-ledger and
+primary-row evidence checks, and history/memory companion integrity checks.
+Untouched recovery copies were verified. This qualifies database startup,
+schema and metadata only: no real rollout or model turn was exercised. The
+new-V2-to-old-reader replay limit remains; selector rollback is not data rollback.
+
+Deploy selected that immutable package at `2026-10-09T07:44:07Z` for the next
+restart. Verify reports `restart_required`, DeploymentStatus is `consistent`,
+and selectors agree. The previous `d29db7aca…` package is retained. At that
+verification, processes 15132 and 26996 still ran the previous 0.157.1 package:
+no restart, new live pickup or fresh phone proof is claimed.
+`model_context_window=872000`
+and the existing live authority settings are unchanged. Exact provenance,
+checks, historical failures and recovery limits live in the
+[`October 8 receipt`](updates/2026-10-08.md).
+
+### Historical September qualifications
+
+The September27 source-qualified update was on `codex/upstream-sync-20260927`,
 based on stable `rust-v0.157.1`
 (`36650394c5b38c2990ccf2a3457165ca3e9d9726`) and two narrowly selected later fixes.
 Compiled source `1dcf0e4461ff08b111cca74c667449bda1033689` produced package
 fingerprintd29db7aca…; it passed copied-database new→old→new startup and is
-selected for the next launch. Verify reports consistent selection and
-restart_required; actual Desktop/phone use after restart is still unobserved.
+the previous package retained by the October update. Its September selection
+receipt reported consistent selection and restart_required, with actual
+Desktop/phone use then unobserved. The October intake subsequently verified
+actual Desktop processes using it; that does not establish phone use.
 Decisions, tests, exclusions and recovery gates live in
 [`updates/2026-09-27.md`](updates/2026-09-27.md).
 
-The running package verified at intake is0.154.0, compiled from
+The running package verified at the September27 intake was0.154.0, compiled from
 `c196cb9040fbfba882e1ff5ae539736b7a8ab81b`, fingerprintfda313ec…; selector,
-config mirror and actual process path agree. Personal/main started at
+config mirror and actual process path agreed. Personal/main started at
 `d222195d9fb3383772600c60c954de653aec918a`. The
 [`September13 receipt`](updates/2026-09-13.md) describes that prior build;
 its selection-time restart limitation was later resolved by actual restart
-observation in Ath1331. It still ran at the new package's selection; a separate
-user restart is required. No permission/window/dormant-feature change was made
-in the live configuration.
+observation in Ath1331. It still ran at the September27 package's selection;
+a separate user restart was then required. No permission/window/dormant-feature
+change was made in the live configuration by that update.
 
 The following block records the prior September5 source qualification; its
 then-pending deployment state is historical, not a current deployment receipt.
@@ -39,9 +71,9 @@ then-pending deployment state is historical, not a current deployment receipt.
 - Source-qualified on: 2026-09-05
 - Deployment state: package build, selection, restart, and phone check pending
 
-Update this block when a candidate is accepted. A fetched commit, completed
-merge, passing source tests, built package, selected package, restarted app, and
-working phone connection are different states.
+Keep the current qualification above distinct from these historical receipts.
+A fetched commit, completed merge, passing source tests, built package, selected
+package, restarted app, and working phone connection are different states.
 
 The source qualification covered the fork's state/history/rollout/thread-store,
 compaction/resume/fork, Guardian, context-management, model-catalog,
