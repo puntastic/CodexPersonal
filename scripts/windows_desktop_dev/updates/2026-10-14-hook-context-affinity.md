@@ -100,3 +100,14 @@ assertions are unchanged; the helper also sets collaboration mode, so this is
 not full input equivalence. This test-only discriminator changes no production
 policy and still needs a bounded Linux rerun. No tests, builds or native runs
 were performed for this addendum.
+
+At2e4f817c233275abe01bccb65a5b64c0186fdb61, external Rigger's bounded Linux
+return (received and reviewed by Fae, message msg_d990215b9bc34a9badfe2eda40d368cf)
+reports all three selected cases passing first try, runner exit0 and2276 tests
+excluded by selection. No retry or assertion relaxation. This supports fixture
+permission-input sensitivity with preserved affinity behavior, not a complete
+retrospective cause for the earlier empty response. The marker assertion checks
+serialized containment, not exact JSON type/value. This run's temporary hook log,
+child exit and raw streams were not retained; runner exit is not child exit.
+Earlier compilation/interrupted-case failures remain unchanged. The Windows
+binary is still source759890dfc7, not this later test/receipt lineage.
