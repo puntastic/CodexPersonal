@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use crate::function_tool::FunctionCallError;
 use crate::hook_runtime::PreToolUseHookResult;
-use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::run_post_tool_use_hooks;
 use crate::hook_runtime::run_pre_tool_use_hooks;
 use crate::memory_usage::emit_metric_for_tool_read;
@@ -731,12 +730,14 @@ impl ToolRegistry {
             None
         };
         if let Some(outcome) = &post_tool_use_outcome {
-            record_additional_contexts(
-                &invocation.session,
-                &invocation.turn,
-                outcome.additional_contexts.clone(),
-            )
-            .await;
+            invocation
+                .session
+                .record_post_tool_use_contexts(
+                    &invocation.turn,
+                    invocation.step_context.hook_context_target.clone(),
+                    outcome.additional_contexts.clone(),
+                )
+                .await;
         }
 
         // A PostToolUse block rejects the result, not the already-completed tool execution.

@@ -41,6 +41,7 @@ pub(crate) struct PostToolUseOutput {
     pub reason: Option<String>,
     pub invalid_block_reason: Option<String>,
     pub additional_context: Option<String>,
+    pub additional_context_affinity: crate::HookContextAffinity,
     pub invalid_reason: Option<String>,
 }
 
@@ -224,6 +225,11 @@ pub(crate) fn parse_post_tool_use(stdout: &str) -> Option<PostToolUseOutput> {
     } else {
         None
     };
+    let additional_context_affinity = wire
+        .hook_specific_output
+        .as_ref()
+        .map(|output| output.additional_context_affinity)
+        .unwrap_or_default();
     let additional_context = wire
         .hook_specific_output
         .and_then(|output| output.additional_context);
@@ -234,6 +240,7 @@ pub(crate) fn parse_post_tool_use(stdout: &str) -> Option<PostToolUseOutput> {
         reason: wire.reason,
         invalid_block_reason,
         additional_context,
+        additional_context_affinity,
         invalid_reason,
     })
 }

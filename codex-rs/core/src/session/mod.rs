@@ -238,6 +238,9 @@ mod extension_interruption;
 pub(crate) mod extension_metrics;
 mod guardian_checkpoint;
 mod handlers;
+mod hook_context;
+use hook_context::HistoryPublication;
+pub(crate) use hook_context::OriginatingTask;
 mod inject;
 mod reasoning_effort;
 mod submission;
@@ -3574,6 +3577,7 @@ impl Session {
             model_info,
             items,
             image_preparations,
+            HistoryPublication::Unrestricted,
         )
         .await;
     }
@@ -3584,6 +3588,7 @@ impl Session {
         model_info: &ModelInfo,
         mut items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
+        publication: HistoryPublication,
     ) {
         // Save the originating history budget for replay.
         // Preserve any existing tool-specific override.
@@ -3607,11 +3612,23 @@ impl Session {
         let force_mcp_checkpoint = items
             .iter()
             .any(|envelope| crate::context_manager::is_user_turn_boundary(&envelope.item));
-        let mcp_revision = self
+        let mcp_checkpoint = self
             .services
             .executed_tool_calls
-            .mcp_attribution_checkpoint(force_mcp_checkpoint)
-            .and_then(|(attribution, revision)| {
+            .mcp_attribution_checkpoint(force_mcp_checkpoint);
+        let (persisted_items, response_items, mcp_revision) = {
+            // Match task identity and append under the same lock ordering as task settings.
+            // Ordinary history does not acquire active_turn or gain a task-lifetime restriction.
+            let active = match &publication {
+                HistoryPublication::Unrestricted => None,
+                HistoryPublication::PostToolUse { .. } => Some(self.active_turn.lock().await),
+            };
+            let mut state = self.state.lock().await;
+            publication.retain_current(&mut items, active.as_deref().and_then(Option::as_ref));
+            if items.is_empty() && matches!(publication, HistoryPublication::PostToolUse { .. }) {
+                return;
+            }
+            let mcp_revision = mcp_checkpoint.and_then(|(attribution, revision)| {
                 let first_persisted = items
                     .iter()
                     .position(|envelope| should_persist_response_item(&envelope.item))?;
@@ -3627,12 +3644,10 @@ impl Session {
                 }
                 Some(revision)
             });
-        let response_items = items
-            .iter()
-            .map(|envelope| envelope.item.clone())
-            .collect::<Vec<_>>();
-        let persisted_items = {
-            let mut state = self.state.lock().await;
+            let response_items = items
+                .iter()
+                .map(|envelope| envelope.item.clone())
+                .collect::<Vec<_>>();
             state
                 .current_time_reminder
                 .note_recorded_items(&response_items);
@@ -3686,7 +3701,7 @@ impl Session {
             // ContextManager may truncate selected tool outputs while recording them. Only make an
             // ID referenceable when the value about to be persisted is byte-for-value identical
             // to the live value compaction could later reuse under that ID.
-            items
+            let persisted_items = items
                 .iter()
                 .filter_map(|envelope| {
                     let item_id = envelope.item.id()?;
@@ -3694,7 +3709,8 @@ impl Session {
                         && active_by_id.get(item_id.as_str()).copied() == Some(envelope))
                     .then(|| envelope.clone())
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (persisted_items, response_items, mcp_revision)
         };
         for image in image_preparations {
             self.services
@@ -3842,8 +3858,8 @@ impl Session {
     ) -> CodexResult<Arc<StepContext>> {
         // Read the step's model and record its environments together so an update cannot split them.
         // Wait for executor startup below, after releasing the lock.
-        let (mut settings, environments) = {
-            let _active = self
+        let (mut settings, environments, hook_context_target) = {
+            let active = self
                 .active_turn
                 .lock()
                 .or_cancel(cancellation_token)
@@ -3851,6 +3867,10 @@ impl Session {
             (
                 turn_context.next_step_settings.load_full(),
                 self.services.turn_environments.snapshot(),
+                active
+                    .as_ref()
+                    .and_then(|active| active.task.as_ref())
+                    .and_then(|task| OriginatingTask::capture(task, &turn_context)),
             )
         };
         if matches!(
@@ -3973,6 +3993,7 @@ impl Session {
         ) = prepared_tools??;
         turn_context.extension_data.insert(selected_plugins);
         Ok(Arc::new(StepContext {
+            hook_context_target,
             preempt: turn_context
                 .config
                 .features
@@ -5113,6 +5134,7 @@ impl Session {
             model_info,
             prepared_items,
             image_preparations,
+            HistoryPublication::Unrestricted,
         )
         .await;
         user_message_item.client_id = client_id;

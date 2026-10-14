@@ -22,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 /// Request-scoped state that may change between model sampling requests.
 pub(crate) struct StepContext {
     pub(crate) turn: Arc<TurnContext>,
+    /// Immutable task lifetime captured before step preparation or delayed cell callbacks.
+    pub(crate) hook_context_target: Option<super::OriginatingTask>,
     /// Preempts this request and yields its code-mode observations when user input arrives.
     pub(crate) preempt: Option<CancellationToken>,
     /// Realtime call activity and instructions captured for this sampling request.

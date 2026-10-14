@@ -8,12 +8,40 @@
       ],
       "type": "string"
     },
+    "HookContextAffinity": {
+      "description": "Applicability of synchronous PostToolUse additional context, not tool effects.",
+      "oneOf": [
+        {
+          "description": "Preserve the historical behavior, including late conversation context.",
+          "enum": [
+            "conversation"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Publish only while the task captured with the originating step is still current.",
+          "enum": [
+            "originating_task"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "PostToolUseHookSpecificOutputWire": {
       "additionalProperties": false,
       "properties": {
         "additionalContext": {
           "default": null,
           "type": "string"
+        },
+        "additionalContextAffinity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HookContextAffinity"
+            }
+          ],
+          "default": "conversation",
+          "description": "Opt-in task affinity is supported only by synchronous PostToolUse handlers."
         },
         "hookEventName": {
           "const": "PostToolUse",
