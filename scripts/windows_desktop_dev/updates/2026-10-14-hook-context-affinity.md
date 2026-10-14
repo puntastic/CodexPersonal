@@ -87,3 +87,16 @@ failure was not independently reproduced. Both affected integration modules
 are non-Windows, so their compilation failure does not contradict the Windows
 unit/mock results. These two test-source repairs still need the bounded Linux
 rerun; no Linux behavior pass is claimed.
+
+The follow-on Linux report passed the current case, while both interrupted cases
+passed their affinity assertions but failed the tool-output marker assertion.
+Their serialized hook inputs contained an empty `tool_response`; raw command
+exit/stdout were not retained, so this does not establish the cause. Source
+inspection found that `submit_turn` sets Disabled/Never permissions while the
+interrupted first turn used a bare nonwaiting request. That request now applies
+the existing `turn_permission_fields` and thread-settings pattern to align only
+those permissions. The command, held barrier, interruption/release ordering and
+assertions are unchanged; the helper also sets collaboration mode, so this is
+not full input equivalence. This test-only discriminator changes no production
+policy and still needs a bounded Linux rerun. No tests, builds or native runs
+were performed for this addendum.

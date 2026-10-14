@@ -87,11 +87,21 @@ if mode == "context":"#);
         });
     let test = builder.build_with_auto_env(&server).await?;
     if interrupt {
+        let (sandbox_policy, permission_profile) =
+            turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
         test.codex
-            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: "run the owned nested read".into(),
-                text_elements: Vec::new(),
-            }]))
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(vec![UserInput::Text {
+                    text: "run the owned nested read".into(),
+                    text_elements: Vec::new(),
+                }])
+                .with_thread_settings(ThreadSettingsOverrides {
+                    approval_policy: Some(AskForApproval::Never),
+                    sandbox_policy: Some(sandbox_policy),
+                    permission_profile,
+                    ..Default::default()
+                }),
+            )
             .await?;
         fs_wait::wait_for_path_exists(test.codex_home_path().join("held"), Duration::from_secs(10))
             .await?;
