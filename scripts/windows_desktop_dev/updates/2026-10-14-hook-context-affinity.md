@@ -67,3 +67,23 @@ before a delayed callback arrived. Capture was moved into the existing locked
 step snapshot, and a before-dispatch same-context replacement regression added.
 This was not an observed production leak; the retained native003 failure remains
 the separately observed old-turn publication. No new execution was performed.
+
+## Native and Linux follow-on
+
+The stable Windows package from759890dfc7 subsequently passed all four bounded
+mock-native paths: active delivery, cancelled-task withholding, after-turn
+withholding, and unmarked historical-context retention. No real model call or
+Desktop activation occurred. The Athenaeum native-event-join-v0 RESULTS-R4.md
+preserves exact inputs, outputs and the source/spec-only affinity custody limit.
+
+Rigger's separate Linux attempt at759890dfc7, reviewed by Fae in Ath2010r1,
+failed compilation before any requested case ran. An explicit child-module
+pretty_assertions::assert_eq import repairs the new test's reported macro
+ambiguity. The enclosing integration target also exposed an inherited test's
+two moves of sandbox_policy; clone its first test input so the second turn can
+reuse the same policy value. This changes no production authorization behavior.
+The guardian test blob was unchanged from the PR base; a separate base build
+failure was not independently reproduced. Both affected integration modules
+are non-Windows, so their compilation failure does not contradict the Windows
+unit/mock results. These two test-source repairs still need the bounded Linux
+rerun; no Linux behavior pass is claimed.

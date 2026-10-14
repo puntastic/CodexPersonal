@@ -4,6 +4,7 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolLifecycleContributor;
 use codex_extension_api::ToolLifecycleFuture;
+use pretty_assertions::assert_eq;
 use std::sync::Mutex;
 use tokio::sync::oneshot;
 
