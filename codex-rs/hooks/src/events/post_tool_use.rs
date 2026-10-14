@@ -11,6 +11,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 
 use super::common;
+use crate::HookContextAffinity;
+use crate::PostToolUseContext;
 use crate::engine::ClaudeHooksEngine;
 use crate::engine::ConfiguredHandler;
 use crate::engine::HandlerRunResult;
@@ -19,6 +21,7 @@ use crate::engine::output_parser;
 use crate::output_spill::AdditionalContext;
 use crate::schema::PostToolUseCommandInput;
 use crate::schema::SubagentCommandInputFields;
+use codex_protocol::protocol::HookExecutionMode;
 
 #[derive(Debug, Clone)]
 pub struct PostToolUseRequest {
@@ -40,13 +43,14 @@ pub struct PostToolUseRequest {
 pub struct PostToolUseOutcome {
     pub hook_events: Vec<HookCompletedEvent>,
     pub should_block: bool,
-    pub additional_contexts: Vec<String>,
+    pub additional_contexts: Vec<PostToolUseContext>,
     pub feedback_message: Option<String>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PostToolUseHandlerData {
     should_block: bool,
+    context_affinity: HookContextAffinity,
     additional_contexts_for_model: Vec<AdditionalContext>,
     feedback_messages_for_model: Vec<String>,
 }
@@ -110,15 +114,21 @@ pub(crate) async fn run(
     )
     .await;
 
-    let additional_contexts = common::flatten_additional_contexts(
-        results
-            .iter()
-            .map(|result| result.data.additional_contexts_for_model.as_slice()),
-    );
+    let contexts = results
+        .iter()
+        .flat_map(|result| {
+            result
+                .data
+                .additional_contexts_for_model
+                .iter()
+                .cloned()
+                .map(|context| (context, result.data.context_affinity))
+        })
+        .collect();
     let additional_contexts = engine
         .command_runtime
         .output_spiller()
-        .maybe_spill_additional_contexts(additional_contexts)
+        .spill_post_tool_use_contexts(contexts)
         .await;
     let should_block = results.iter().any(|result| result.data.should_block);
     let feedback_message = common::join_text_chunks(
@@ -174,6 +184,7 @@ fn parse_completed(
     let mut entries = Vec::new();
     let mut status = HookRunStatus::Completed;
     let mut should_block = false;
+    let mut context_affinity = HookContextAffinity::Conversation;
     let mut additional_contexts_for_model = Vec::new();
     let mut feedback_messages_for_model = Vec::new();
 
@@ -197,8 +208,21 @@ fn parse_completed(
                             text: system_message,
                         });
                     }
-                    if (!handler.can_apply_control_effects()
-                        || parsed.invalid_reason.is_none() && parsed.invalid_block_reason.is_none())
+                    context_affinity = parsed.additional_context_affinity;
+                    let unsupported_affinity = context_affinity
+                        == HookContextAffinity::OriginatingTask
+                        && handler.execution_mode() == HookExecutionMode::Async;
+                    if unsupported_affinity {
+                        status = HookRunStatus::Failed;
+                        entries.push(HookOutputEntry {
+                            kind: HookOutputEntryKind::Error,
+                            text: "originating_task additionalContextAffinity requires synchronous PostToolUse".to_string(),
+                        });
+                    }
+                    if !unsupported_affinity
+                        && (!handler.can_apply_control_effects()
+                            || parsed.invalid_reason.is_none()
+                                && parsed.invalid_block_reason.is_none())
                         && let Some(additional_context) = parsed.additional_context
                     {
                         common::append_additional_context(
@@ -299,6 +323,7 @@ fn parse_completed(
         completed,
         data: PostToolUseHandlerData {
             should_block,
+            context_affinity,
             additional_contexts_for_model,
             feedback_messages_for_model,
         },
@@ -367,6 +392,7 @@ mod tests {
                 should_block: true,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: vec!["bash output looked sketchy".to_string()],
+                ..Default::default()
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
@@ -395,6 +421,7 @@ mod tests {
                     limit: AdditionalContextLimit::from_config(Some(17)),
                 }],
                 feedback_messages_for_model: Vec::new(),
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -421,6 +448,7 @@ mod tests {
                 should_block: false,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: Vec::new(),
+                ..Default::default()
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
@@ -462,6 +490,7 @@ mod tests {
                 should_block: true,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: vec!["post hook says pause".to_string()],
+                ..Default::default()
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
@@ -485,6 +514,7 @@ mod tests {
                 should_block: false,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: vec!["post-tool hook says stop".to_string()],
+                ..Default::default()
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
@@ -511,6 +541,7 @@ mod tests {
                 should_block: false,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: vec!["PostToolUse hook stopped execution".to_string()],
+                ..Default::default()
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
@@ -537,6 +568,7 @@ mod tests {
                 should_block: false,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: Vec::new(),
+                ..Default::default()
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
@@ -587,7 +619,7 @@ mod tests {
         handler_with_async(/*async*/ false)
     }
 
-    fn handler_with_async(r#async: bool) -> ConfiguredHandler {
+    pub(super) fn handler_with_async(r#async: bool) -> ConfiguredHandler {
         ConfiguredHandler {
             builtin: false,
             event_name: HookEventName::PostToolUse,
@@ -606,7 +638,11 @@ mod tests {
         }
     }
 
-    fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HandlerRunResult {
+    pub(super) fn run_result(
+        exit_code: Option<i32>,
+        stdout: &str,
+        stderr: &str,
+    ) -> HandlerRunResult {
         HandlerRunResult {
             started_at: 1_700_000_000,
             completed_at: 1_700_000_001,
@@ -635,3 +671,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "post_tool_use_affinity_tests.rs"]
+mod affinity_tests;

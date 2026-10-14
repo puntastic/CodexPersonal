@@ -2,6 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Context;
+#[path = "hook_context_affinity.rs"]
+mod context_affinity;
 use anyhow::Result;
 use codex_config::HookStateToml;
 use codex_config::McpServerConfig;

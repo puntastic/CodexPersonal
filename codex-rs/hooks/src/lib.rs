@@ -1,4 +1,5 @@
 mod config_rules;
+mod context_affinity;
 mod declarations;
 mod engine;
 pub(crate) mod events;
@@ -12,6 +13,8 @@ mod types;
 use codex_protocol::protocol::HookEventName;
 
 pub use config_rules::hook_states_from_stack;
+pub use context_affinity::HookContextAffinity;
+pub use context_affinity::PostToolUseContext;
 pub use declarations::PluginHookDeclaration;
 pub use declarations::plugin_hook_declarations;
 pub use engine::HookListEntry;

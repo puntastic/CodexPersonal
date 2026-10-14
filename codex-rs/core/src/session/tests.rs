@@ -281,6 +281,7 @@ impl StepContext {
         });
         settings.service_tier = turn.config.service_tier.clone();
         Arc::new(Self {
+            hook_context_target: None,
             preempt: turn
                 .config
                 .features

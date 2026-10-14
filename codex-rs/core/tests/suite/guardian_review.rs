@@ -2501,7 +2501,7 @@ async fn cyber_model_guardian_denial_closes_lane_but_preserves_turn_and_resets_n
             .with_thread_settings(ThreadSettingsOverrides {
                 approval_policy: Some(approval_policy),
                 approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
-                sandbox_policy: Some(sandbox_policy),
+                sandbox_policy: Some(sandbox_policy.clone()),
                 ..Default::default()
             }),
         )

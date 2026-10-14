@@ -133,6 +133,7 @@ impl Session {
             model_info,
             annotated_items,
             image_preparations,
+            super::HistoryPublication::Unrestricted,
         )
         .await;
     }

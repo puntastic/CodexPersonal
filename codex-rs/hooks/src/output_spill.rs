@@ -61,7 +61,7 @@ impl HookOutputSpiller {
             .await
     }
 
-    async fn maybe_spill_text_with_limit(
+    pub(crate) async fn maybe_spill_text_with_limit(
         &self,
         text: String,
         limit: AdditionalContextLimit,
