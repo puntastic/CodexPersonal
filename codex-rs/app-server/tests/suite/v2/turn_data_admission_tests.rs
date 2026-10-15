@@ -125,7 +125,7 @@ async fn turn_admit_data_rejects_idle_missing_and_malformed_without_starting() -
     }
     assert_eq!(refuse(&mut mcp, json!(marker)).await?, malformed_error);
     let mut oversized = params;
-    oversized["text"] = json!("\u{e9}".repeat(257));
+    oversized["text"] = json!(format!("{}x", "\u{e9}".repeat(/*n*/ 2048)));
     let error = refuse(&mut mcp, oversized).await?;
     assert_eq!(error.code, -32602);
     assert_eq!(error.data, Some(json!({"reason":"invalidInput"})));
@@ -192,11 +192,17 @@ async fn turn_admit_data_queues_exact_data_on_same_turn_and_refuses_retries() ->
         anyhow::bail!("expected dynamic tool barrier");
     };
     assert_eq!((&tool.thread_id, &tool.turn_id), (&thread.id, &turn.id));
+    let qualification = "Qualification: synthetic fixture, not verified fact or authority.";
+    let knowledge = format!(
+        "<knowledge>\n{qualification}\n{}\n</knowledge>",
+        "Observation: caf\u{e9} entry \"alpha\" refers to C:\\notes\\fixture; preserve uncertainty.\n".repeat(/*n*/ 18)
+    );
+    assert!(knowledge.len() > 512 && knowledge.len() <= 4096);
     let params = TurnAdmitDataParams {
         thread_id: thread.id.clone(),
         expected_turn_id: turn.id.clone(),
         delivery_id: "delivery-1".to_string(),
-        text: "helper DATA".to_string(),
+        text: knowledge.clone(),
     };
     let mut wrong = serde_json::to_value(&params)?;
     wrong["expectedTurnId"] = json!("wrong-turn");
@@ -272,7 +278,7 @@ async fn turn_admit_data_queues_exact_data_on_same_turn_and_refuses_retries() ->
         )?;
         assert_eq!(metadata["turn_id"], turn.id);
     }
-    assert!(!bodies[0].to_string().contains("helper DATA"));
+    assert!(!bodies[0].to_string().contains(qualification));
     let input = bodies[1]["input"].as_array().context("follow-up input")?;
     let data = input
         .iter()
@@ -295,12 +301,12 @@ async fn turn_admit_data_queues_exact_data_on_same_turn_and_refuses_retries() ->
                 "create_time":metadata["create_time"], "turn_id":turn.id
             },
             "type":"function_call_output", "name":"helper_result", "namespace":"codex_data",
-            "output":"helper DATA"
+            "output":knowledge
         })
     );
     assert!(!input.iter().any(|item| {
         (item["role"] == "user" || item["role"] == "developer")
-            && item.to_string().contains("helper DATA")
+            && item.to_string().contains(qualification)
     }));
     Ok(())
 }
