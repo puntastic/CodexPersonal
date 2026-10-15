@@ -15,9 +15,11 @@ pub struct TurnAdmitDataParams {
     /// Nonempty, at most 128 UTF-8 bytes. Deduplicated only for the lifetime of
     /// this live turn state, including after drain; not across restart/recovery.
     pub delivery_id: String,
-    /// Nonempty DATA, at most 512 UTF-8 bytes (enforced at runtime, not by JSON
-    /// string length). The server owns the standalone helper_result/codex_data
-    /// tool-result shape; clients cannot supply role, call ID, or provenance.
+    /// Nonempty final DATA text, including wrappers and qualifications, at most
+    /// 4096 UTF-8 bytes (enforced at runtime, not by JSON string length). Ordinary
+    /// tool-output policy may truncate accepted text before model transport.
+    /// The server owns the standalone helper_result/codex_data tool-result shape;
+    /// clients cannot supply role, call ID, or provenance.
     pub text: String,
 }
 

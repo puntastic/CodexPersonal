@@ -10,6 +10,10 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use std::collections::HashSet;
 
+// Final text includes caller wrappers and qualifications; normal tool-output
+// truncation still applies after admission. This is not a token-limit proof.
+const MAX_DATA_TEXT_BYTES: usize = 4096;
+
 /// The admission receipt deliberately does not claim delivery.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DataAdmission {
@@ -21,7 +25,8 @@ pub enum DataAdmission {
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DataAdmissionError {
     #[error(
-        "DATA requires nonempty IDs of at most 128 bytes and nonempty text of at most 512 bytes"
+        "DATA requires nonempty IDs of at most 128 bytes and nonempty text of at most {max} bytes",
+        max = MAX_DATA_TEXT_BYTES
     )]
     InvalidInput,
     #[error("no active task")]
@@ -61,6 +66,7 @@ impl CodexThread {
     /// IDs deduplicate for this live turn state, even after consumption, not across
     /// recovery. Pending DATA is discarded on abort or terminal cleanup. Once drained,
     /// ordinary history recording can precede transport; queued does not mean sampled.
+    /// The final text limit includes wrappers; ordinary tool-output policy may truncate it.
     pub async fn admit_data(
         &self,
         expected_turn_id: &str,
@@ -127,7 +133,7 @@ impl Session {
             || delivery_id.is_empty()
             || delivery_id.len() > 128
             || text.is_empty()
-            || text.len() > 512
+            || text.len() > MAX_DATA_TEXT_BYTES
         {
             return Err(DataAdmissionError::InvalidInput);
         }

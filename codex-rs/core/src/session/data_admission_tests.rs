@@ -277,7 +277,11 @@ async fn data_input_caps_are_utf8_bytes_and_refusals_do_not_reserve_ids() {
         ("".to_owned(), "data".to_owned()),
         ("x".repeat(129), "data".to_owned()),
         ("one".to_owned(), String::new()),
-        ("one".to_owned(), "é".repeat(257)),
+        ("one".to_owned(), "x".repeat(/*n*/ 4097)),
+        (
+            "two".to_owned(),
+            format!("{}x", "\u{e9}".repeat(/*n*/ 2048)),
+        ),
     ] {
         assert_eq!(
             session.admit_data(&turn.sub_id, &id, &text).await,
@@ -286,7 +290,13 @@ async fn data_input_caps_are_utf8_bytes_and_refusals_do_not_reserve_ids() {
     }
     assert_eq!(
         session
-            .admit_data(&turn.sub_id, "one", &"é".repeat(256))
+            .admit_data(&turn.sub_id, "one", &"x".repeat(/*n*/ 4096))
+            .await,
+        Ok(Queued)
+    );
+    assert_eq!(
+        session
+            .admit_data(&turn.sub_id, "two", &"\u{e9}".repeat(/*n*/ 2048))
             .await,
         Ok(Queued)
     );

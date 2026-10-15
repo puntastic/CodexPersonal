@@ -8,10 +8,18 @@ It never starts a turn, retries with `turn/start`, or falls back to idle/history
 insertion. Existing access, provider, and server-drain checks still apply.
 
 The core enforces nonempty `expectedTurnId` and `deliveryId` of at most 128
-UTF-8 bytes each, nonempty `text` of at most 512 UTF-8 bytes, and four accepted
-delivery IDs per live turn state. These are runtime byte limits, not JSON
+UTF-8 bytes each, nonempty final `text` of at most 4096 UTF-8 bytes including all
+wrappers and qualifications, and four accepted delivery IDs per live turn state.
+These are runtime byte limits, not JSON
 Schema character-length guarantees. Deduplication survives queue drain only
 within that live turn state, not restart or recovery.
+
+P0 size-review notice: at this maximum, the repository's byte-based estimate for
+the body plus fixed helper name/namespace is about 1030 tokens. Actual token
+counts are unknown; bytes do not prove a universal token bound. The existing
+extra-review requirement for items above 1k tokens and 10k-token item ceiling
+remain in force. This is a prospective experimental bound for a knowledge view
+with its qualifications, not a universal optimum or a new token policy.
 
 The response is `{status:"queued", turnId, deliveryId}`. It acknowledges only
 admission, not preparation, delivery, sampling, or comprehension. Pending DATA
@@ -19,6 +27,9 @@ may be discarded on cancellation or terminal cleanup. The server constructs a
 standalone `function_call_output` named `helper_result` in namespace `codex_data`,
 without a fabricated call ID, user/developer role, or caller-supplied provenance.
 Normal history processing may add its own item ID, creation time, and turn ID.
+It also retains the normal model tool-output truncation policy: a low
+`tool_output_token_limit` can truncate accepted DATA before transport. Queued
+does not guarantee that the text or its qualifications will arrive intact.
 
 Core refusals carry JSON-RPC error `data.reason`: `invalidInput` (`-32602`), or
 `noActiveTurn`, `expectedTurnMismatch`, `notRegular`, `closed`, `cancelled`,
