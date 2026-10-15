@@ -233,6 +233,7 @@ mod compacted_history;
 mod config_refresh;
 pub(crate) mod context_window;
 mod daemon_recovery;
+pub(crate) mod data_admission;
 mod environment;
 mod extension_interruption;
 pub(crate) mod extension_metrics;

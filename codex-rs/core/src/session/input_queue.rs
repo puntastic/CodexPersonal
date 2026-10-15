@@ -277,6 +277,7 @@ impl InputQueue {
         let mut turn_state = active_turn.turn_state.lock().await;
         turn_state.clear_pending_waiters();
         turn_state.pending_input.items.clear();
+        turn_state.data_admission.close();
     }
 
     pub(crate) async fn defer_mailbox_delivery_to_next_turn(
@@ -350,7 +351,10 @@ impl InputQueue {
         &self,
         turn_state: &Mutex<TurnState>,
     ) -> Vec<TurnInput> {
-        turn_state.lock().await.pending_input.items.split_off(0)
+        let mut state = turn_state.lock().await;
+        // Strict DATA is never converted into history-only completion residue.
+        state.data_admission.close();
+        state.pending_input.items.split_off(0)
     }
 
     #[expect(
@@ -396,7 +400,7 @@ impl InputQueue {
         reason = "active turn checks and turn state reads must remain atomic"
     )]
     pub(crate) async fn has_pending_input(&self, active_turn: &Mutex<Option<ActiveTurn>>) -> bool {
-        let (has_turn_pending_input, accepts_mailbox_delivery) = {
+        let (has_turn_pending_input, accepts_mailbox_delivery, has_data) = {
             let active = active_turn.lock().await;
             match active.as_ref() {
                 Some(active_turn) => {
@@ -404,11 +408,15 @@ impl InputQueue {
                     (
                         !turn_state.pending_input.is_empty(),
                         turn_state.accepts_mailbox_delivery_for_current_turn(),
+                        !turn_state.data_admission.pending.is_empty(),
                     )
                 }
-                None => (false, true),
+                None => (false, true, false),
             }
         };
+        if has_data {
+            return true;
+        }
         if !accepts_mailbox_delivery {
             return false;
         }

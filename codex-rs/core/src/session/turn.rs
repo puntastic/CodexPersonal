@@ -146,6 +146,12 @@ pub(crate) struct McpStartupRequirements {
     required_plugins: HashSet<String>,
 }
 
+pub(crate) enum RunTurnResult {
+    Completed(Option<String>),
+    /// A hook or failure stopped this run; pending DATA must not restart it.
+    Stopped(Option<String>),
+}
+
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
 ///
@@ -167,7 +173,7 @@ pub(crate) async fn run_turn(
     mcp_startup_requirements: &mut McpStartupRequirements,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
-) -> CodexResult<Option<String>> {
+) -> CodexResult<RunTurnResult> {
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
     }
@@ -218,7 +224,7 @@ pub(crate) async fn run_turn(
         )
         .await;
         error!("Failed to run pre-sampling compact");
-        return Ok(None);
+        return Ok(RunTurnResult::Stopped(None));
     }
 
     let user_input = turn_user_input(&input);
@@ -316,11 +322,11 @@ pub(crate) async fn run_turn(
     )
     .await
     else {
-        return Ok(None);
+        return Ok(RunTurnResult::Stopped(None));
     };
 
     if run_pending_session_start_hooks(&sess, &turn_context).await {
-        return Ok(None);
+        return Ok(RunTurnResult::Stopped(None));
     }
     if crate::guardian::is_basic_session_source(&turn_context.session_source)
         && let Err(error) = crate::guardian::finalize_guardian_input(
@@ -374,7 +380,7 @@ pub(crate) async fn run_turn(
     )
     .await
     {
-        return Ok(None);
+        return Ok(RunTurnResult::Stopped(None));
     }
 
     // Only speculate after hooks accept the turn, using its finalized tools and permissions.
@@ -446,6 +452,18 @@ pub(crate) async fn run_turn(
         .await
         {
             break;
+        }
+
+        // A generic input hook veto must not consume strict DATA without sampling.
+        // Its own consumer identity never reopens mailbox delivery.
+        if can_drain_pending_input {
+            let pending_data = sess.take_pending_data(&turn_context.sub_id).await;
+            if run_hooks_and_record_inputs(
+                &sess, &turn_context, &turn_context.capture_current_model_info(),
+                &pending_data, PersistContext::Standard,
+            ).await {
+                break;
+            }
         }
 
         // Input and turn-start injections are recorded before recovery can continue this turn.
@@ -635,10 +653,10 @@ pub(crate) async fn run_turn(
                             err.details(),
                         )
                         .await;
-                        return Ok(None);
+                        return Ok(RunTurnResult::Stopped(None));
                     }
                     if run_pending_session_start_hooks(&sess, &turn_context).await {
-                        return Ok(None);
+                        return Ok(RunTurnResult::Stopped(None));
                     }
                     // After a signaled step, drain the steer even if compaction
                     // leaves the estimated context above the token limit.
@@ -708,7 +726,7 @@ pub(crate) async fn run_turn(
                     )
                     .await
                     {
-                        return Ok(None);
+                        return Ok(RunTurnResult::Stopped(None));
                     }
                     // Token-budget resets do not summarize, so preserve their existing rollover
                     // policy. Keep summarizing compaction in this task to serialize history updates.
@@ -751,8 +769,9 @@ pub(crate) async fn run_turn(
                             .await;
                         }
                         warn!(error = %err, "Post-turn compaction failed; preserving the completed turn");
+                        return Ok(RunTurnResult::Stopped(last_agent_message));
                     }
-                    break;
+                    return Ok(RunTurnResult::Completed(last_agent_message));
                 }
                 continue;
             }
@@ -836,7 +855,7 @@ pub(crate) async fn run_turn(
         }
     }
 
-    Ok(last_agent_message)
+    Ok(RunTurnResult::Stopped(last_agent_message))
 }
 
 #[instrument(level = "trace", skip_all)]

@@ -223,6 +223,7 @@ mod truncation;
 #[path = "turn_error_details_tests.rs"]
 mod turn_error_details;
 mod turn_input_submission;
+mod data_admission;
 mod turn_phase_trace;
 mod turn_state;
 mod unified_exec;
