@@ -8,6 +8,7 @@ use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::startup_prewarm::SessionStartupPrewarmResolution;
 use crate::session::turn::McpStartupRequirements;
+use crate::session::turn::RunTurnResult;
 use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
@@ -102,7 +103,7 @@ impl SessionTask for RegularTask {
         let mut prewarmed_client_session = prewarmed_client_session;
         let mut mcp_startup_requirements = McpStartupRequirements::default();
         loop {
-            let last_agent_message = run_turn(
+            let result = run_turn(
                 Arc::clone(&sess),
                 Arc::clone(&ctx),
                 next_input,
@@ -112,12 +113,21 @@ impl SessionTask for RegularTask {
             )
             .instrument(run_turn_span.clone())
             .await?;
+            let last_agent_message = match result {
+                RunTurnResult::Completed(message) => message,
+                RunTurnResult::Stopped(message) => {
+                    sess.discard_pending_data(&ctx.sub_id).await;
+                    message
+                }
+            };
             // Terminal errors are already reported. Let task completion preserve pending
             // input instead of restarting the failed turn for that same input.
             if ctx.terminal_error.lock().await.is_some() {
                 return Ok(last_agent_message);
             }
-            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
+            if !sess.input_queue.has_pending_input(&sess.active_turn).await
+                && sess.close_data_admission_if_idle(&ctx.sub_id).await
+            {
                 return Ok(last_agent_message);
             }
             next_input = Vec::new();

@@ -70,7 +70,11 @@ impl Session {
                 let _ = reply.send(false);
                 return;
             };
-            if !turn.turn_state.lock().await.pending_input.is_empty()
+            let has_pending_input = {
+                let state = turn.turn_state.lock().await;
+                !state.pending_input.is_empty() || !state.data_admission.pending.is_empty()
+            };
+            if has_pending_input
                 || self.input_queue.has_pending_mailbox_items().await
                 || reply.is_closed()
             {
