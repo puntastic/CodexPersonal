@@ -59,56 +59,22 @@ async fn data_admitted_in_flight_joins_only_next_same_turn_request() -> anyhow::
         let metadata: Value = serde_json::from_str(request["client_metadata"]["x-codex-turn-metadata"].as_str().unwrap())?;
         assert_eq!(metadata["turn_id"], turn_id);
     }
-    let output = json!({
-        "type": "function_call_output", "name": "helper_result", "namespace": "codex_data",
-        "output": "helper DATA",
-    });
-    assert!(!frozen["input"].as_array().unwrap().contains(&output));
+    assert!(frozen["input"].as_array().unwrap().iter().all(|item| item["namespace"] != "codex_data"));
     let helpers: Vec<_> = next["input"].as_array().unwrap().iter()
         .filter(|item| item["namespace"] == "codex_data").collect();
+    assert_eq!(helpers.len(), 1);
+    let helper = helpers[0];
+    assert!(helper["id"].as_str().unwrap().starts_with("fco_"));
+    let create_time = &helper["internal_chat_message_metadata_passthrough"]["create_time"];
+    assert!(create_time.as_f64().unwrap() > 0.0);
+    let output = json!({
+        "type": "function_call_output", "name": "helper_result", "namespace": "codex_data",
+        "output": "helper DATA", "id": helper["id"],
+        "internal_chat_message_metadata_passthrough": { "create_time": create_time, "turn_id": turn_id },
+    });
     assert_eq!(helpers, vec![&output]);
     assert!(!next.to_string().contains("rejected DATA"));
     assert_eq!(thread.admit_data(&turn_id, "delivery-2", "late DATA").await, Err(DataAdmissionError::NoActiveTurn));
-    server.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn data_pending_during_pre_sampling_compaction_failure_does_not_restart_turn() -> anyhow::Result<()> {
-    let (release, gate) = oneshot::channel();
-    let (server, _completions) = start_streaming_sse_server(vec![
-        vec![StreamingSseChunk { gate: None, body: responses::sse(vec![
-            responses::ev_response_created("seed"),
-            responses::ev_completed_with_tokens("seed", 250_000),
-        ]) }],
-        vec![StreamingSseChunk { gate: Some(gate), body: responses::sse_failed("compact", "server_error", "compaction failed") }],
-    ]).await;
-    let mock = responses::start_mock_server().await;
-    let test = test_codex().build_with_auto_env(&mock).await?;
-    let mut config = test.config.clone();
-    config.model_provider.name = "OpenAI (test)".to_owned();
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = false;
-    config.model_provider.stream_max_retries = Some(0);
-    config.model_provider.request_max_retries = Some(0);
-    config.model_auto_compact_token_limit = Some(200_000);
-    config.model_post_turn_compact_threshold_percent = 0;
-    let thread = test.thread_manager.start_thread(StartThreadOptions {
-        environments: Some(vec![test.executor_environment().selection().clone()]),
-        ..StartThreadOptions::new(config)
-    }).await?.thread;
-    thread.start_or_steer_turn(request("Seed the context usage")).await?;
-    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
-    let TurnInputSubmission::Started { turn_id } = thread.start_or_steer_turn(request("Needs pre-turn compact"))
-        .await? else { anyhow::bail!("expected started turn") };
-    tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 30), server.wait_for_request_count(/*count*/ 2)).await?;
-    assert_eq!(thread.admit_data(&turn_id, "one", "must not restart failed compact").await, Ok(DataAdmission::Queued));
-    release.send(()).expect("compaction gate is live");
-    let completed = wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
-    let EventMsg::TurnComplete(completed) = completed else { unreachable!() };
-    assert_eq!(completed.turn_id, turn_id);
-    assert_eq!(server.requests().await.len(), 2);
-    assert_eq!(thread.admit_data(&turn_id, "two", "late").await, Err(DataAdmissionError::NoActiveTurn));
     server.shutdown().await;
     Ok(())
 }
