@@ -56,6 +56,7 @@ const EXPERIMENTAL_CLIENT_METHOD_DEPENDENCY_TYPES: &[&str] = &[
     "ThreadBackgroundTerminal",
     "ThreadSearchOccurrence",
     "ThreadSearchTextRange",
+    "TurnAdmitDataStatus",
     "TurnSettingsUpdateStatus",
     "UserVerificationProof",
     "UserVerificationCancellationReason",

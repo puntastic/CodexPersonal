@@ -459,9 +459,14 @@ pub(crate) async fn run_turn(
         if can_drain_pending_input {
             let pending_data = sess.take_pending_data(&turn_context.sub_id).await;
             if run_hooks_and_record_inputs(
-                &sess, &turn_context, &turn_context.capture_current_model_info(),
-                &pending_data, PersistContext::Standard,
-            ).await {
+                &sess,
+                &turn_context,
+                &turn_context.capture_current_model_info(),
+                &pending_data,
+                PersistContext::Standard,
+            )
+            .await
+            {
                 break;
             }
         }

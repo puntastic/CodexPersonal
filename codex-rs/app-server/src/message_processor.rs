@@ -1664,7 +1664,9 @@ impl MessageProcessor {
                 self.turn_processor.turn_steer(&request_id, params).await
             }
             ClientRequest::TurnAdmitData { params, .. } => {
-                self.turn_processor.turn_admit_data(&request_id, params).await
+                self.turn_processor
+                    .turn_admit_data(&request_id, params)
+                    .await
             }
             ClientRequest::TurnSettingsUpdate { params, .. } => {
                 self.turn_processor

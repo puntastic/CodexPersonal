@@ -94,6 +94,7 @@ mod guardian_cached_score;
 mod guardian_checkpoint_migration;
 // Uses the same command-approval harness as guardian_review below.
 mod canonical_plugin_connectors;
+mod data_admission;
 mod gateway_auth;
 #[cfg(not(target_os = "windows"))]
 mod guardian_context_budget;
@@ -223,7 +224,6 @@ mod truncation;
 #[path = "turn_error_details_tests.rs"]
 mod turn_error_details;
 mod turn_input_submission;
-mod data_admission;
 mod turn_phase_trace;
 mod turn_state;
 mod unified_exec;

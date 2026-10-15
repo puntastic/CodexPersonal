@@ -101,7 +101,10 @@ async fn turn_admit_data_rejects_idle_missing_and_malformed_without_starting() -
     };
     for field in ["threadId", "expectedTurnId", "deliveryId", "text"] {
         let mut missing = params.clone();
-        missing.as_object_mut().context("params object")?.remove(field);
+        missing
+            .as_object_mut()
+            .context("params object")?
+            .remove(field);
         assert_eq!(refuse(&mut mcp, missing).await?, malformed_error);
     }
     let mut extra = params.clone();
@@ -111,7 +114,11 @@ async fn turn_admit_data_rejects_idle_missing_and_malformed_without_starting() -
     let mut unknown_field = params.clone();
     unknown_field[marker] = json!(marker);
     assert_eq!(refuse(&mut mcp, unknown_field).await?, malformed_error);
-    for wrong_type in [json!(86753094729_u64), json!([marker]), json!({"value":marker})] {
+    for wrong_type in [
+        json!(86753094729_u64),
+        json!([marker]),
+        json!({"value":marker}),
+    ] {
         let mut malformed = params.clone();
         malformed["text"] = wrong_type;
         assert_eq!(refuse(&mut mcp, malformed).await?, malformed_error);
@@ -123,8 +130,12 @@ async fn turn_admit_data_rejects_idle_missing_and_malformed_without_starting() -
     assert_eq!(error.code, -32602);
     assert_eq!(error.data, Some(json!({"reason":"invalidInput"})));
     assert!(
-        server.received_requests().await.context("requests")?
-            .iter().all(|request| !request.url.path().ends_with("/responses"))
+        server
+            .received_requests()
+            .await
+            .context("requests")?
+            .iter()
+            .all(|request| !request.url.path().ends_with("/responses"))
     );
     Ok(())
 }
@@ -159,16 +170,25 @@ async fn turn_admit_data_queues_exact_data_on_same_turn_and_refuses_retries() ->
         })]),
         ..Default::default()
     }).await?.thread;
-    let TurnStartResponse { turn } = mcp.request(|request_id| ClientRequest::TurnStart {
-        request_id,
-        params: TurnStartParams {
-            thread_id: thread.id.clone(),
-            input: vec![UserInput::Text { text: "Run the barrier".to_string(), text_elements: vec![] }],
-            ..Default::default()
-        },
-    }).await?;
+    let TurnStartResponse { turn } = mcp
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                input: vec![UserInput::Text {
+                    text: "Run the barrier".to_string(),
+                    text_elements: vec![],
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
     let request = timeout(TIMEOUT, mcp.read_stream_until_request_message()).await??;
-    let ServerRequest::DynamicToolCall { request_id, params: tool } = request else {
+    let ServerRequest::DynamicToolCall {
+        request_id,
+        params: tool,
+    } = request
+    else {
         anyhow::bail!("expected dynamic tool barrier");
     };
     assert_eq!((&tool.thread_id, &tool.turn_id), (&thread.id, &turn.id));
@@ -184,22 +204,36 @@ async fn turn_admit_data_queues_exact_data_on_same_turn_and_refuses_retries() ->
         refuse(&mut mcp, wrong).await?.data,
         Some(json!({"reason":"expectedTurnMismatch"}))
     );
-    let queued: TurnAdmitDataResponse = mcp.request(|request_id| ClientRequest::TurnAdmitData {
-        request_id, params: params.clone(),
-    }).await?;
-    assert_eq!(queued, TurnAdmitDataResponse {
-        status: TurnAdmitDataStatus::Queued,
-        turn_id: turn.id.clone(),
-        delivery_id: params.delivery_id.clone(),
-    });
+    let queued: TurnAdmitDataResponse = mcp
+        .request(|request_id| ClientRequest::TurnAdmitData {
+            request_id,
+            params: params.clone(),
+        })
+        .await?;
+    assert_eq!(
+        queued,
+        TurnAdmitDataResponse {
+            status: TurnAdmitDataStatus::Queued,
+            turn_id: turn.id.clone(),
+            delivery_id: params.delivery_id.clone(),
+        }
+    );
     assert_eq!(
         refuse(&mut mcp, serde_json::to_value(&params)?).await?.data,
         Some(json!({"reason":"duplicate"}))
     );
-    mcp.send_response(request_id, json!({
-        "contentItems":[{"type":"inputText", "text":"barrier released"}], "success":true
-    })).await?;
-    let completed = timeout(TIMEOUT, mcp.read_stream_until_notification_message("turn/completed")).await??;
+    mcp.send_response(
+        request_id,
+        json!({
+            "contentItems":[{"type":"inputText", "text":"barrier released"}], "success":true
+        }),
+    )
+    .await?;
+    let completed = timeout(
+        TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
     let completed = completed.params.context("completed params")?;
     assert_eq!(completed["turn"]["id"], turn.id);
     assert_eq!(
@@ -207,42 +241,63 @@ async fn turn_admit_data_queues_exact_data_on_same_turn_and_refuses_retries() ->
         Some(json!({"reason":"noActiveTurn"}))
     );
     assert_eq!(
-        mcp.pending_notification_methods().iter()
-            .filter(|method| method.as_str() == "turn/started").count(),
+        mcp.pending_notification_methods()
+            .iter()
+            .filter(|method| method.as_str() == "turn/started")
+            .count(),
         1
     );
-    let started = timeout(TIMEOUT, mcp.read_stream_until_notification_message("turn/started")).await??;
-    assert_eq!(started.params.context("started params")?["turn"]["id"], turn.id);
+    let started = timeout(
+        TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/started"),
+    )
+    .await??;
+    assert_eq!(
+        started.params.context("started params")?["turn"]["id"],
+        turn.id
+    );
 
     let requests = server.received_requests().await.context("requests")?;
-    let bodies = requests.iter()
+    let bodies = requests
+        .iter()
         .filter(|request| request.url.path().ends_with("/responses"))
-        .map(|request| request.body_json::<Value>())
+        .map(wiremock::Request::body_json::<Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     assert_eq!(bodies.len(), 2);
     for body in &bodies {
         let metadata: Value = serde_json::from_str(
-            body["client_metadata"]["x-codex-turn-metadata"].as_str()
-                .context("canonical request turn metadata")?
+            body["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .context("canonical request turn metadata")?,
         )?;
         assert_eq!(metadata["turn_id"], turn.id);
     }
     assert!(!bodies[0].to_string().contains("helper DATA"));
     let input = bodies[1]["input"].as_array().context("follow-up input")?;
-    let data = input.iter().filter(|item| item["namespace"] == "codex_data").collect::<Vec<_>>();
+    let data = input
+        .iter()
+        .filter(|item| item["namespace"] == "codex_data")
+        .collect::<Vec<_>>();
     assert_eq!(data.len(), 1);
     let data = data[0];
     assert!(data["id"].as_str().is_some_and(|id| id.starts_with("fco_")));
     let metadata = &data["internal_chat_message_metadata_passthrough"];
-    assert!(metadata["create_time"].as_f64().is_some_and(|time| time > 0.0));
-    assert_eq!(data, &json!({
-        "id":data["id"],
-        "internal_chat_message_metadata_passthrough": {
-            "create_time":metadata["create_time"], "turn_id":turn.id
-        },
-        "type":"function_call_output", "name":"helper_result", "namespace":"codex_data",
-        "output":"helper DATA"
-    }));
+    assert!(
+        metadata["create_time"]
+            .as_f64()
+            .is_some_and(|time| time > 0.0)
+    );
+    assert_eq!(
+        data,
+        &json!({
+            "id":data["id"],
+            "internal_chat_message_metadata_passthrough": {
+                "create_time":metadata["create_time"], "turn_id":turn.id
+            },
+            "type":"function_call_output", "name":"helper_result", "namespace":"codex_data",
+            "output":"helper DATA"
+        })
+    );
     assert!(!input.iter().any(|item| {
         (item["role"] == "user" || item["role"] == "developer")
             && item.to_string().contains("helper DATA")
