@@ -111,8 +111,17 @@ const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
 fn deserialize_client_request(request: JSONRPCRequest) -> Result<ClientRequest, JSONRPCErrorError> {
     reject_obsolete_request_fields(&request)?;
 
-    ClientRequest::try_from(request)
-        .map_err(|err| invalid_request(format!("Invalid request: {err}")))
+    let is_data_admission = request.method == "turn/admitData";
+    ClientRequest::try_from(request).map_err(|err| {
+        if is_data_admission {
+            // Serde errors can contain caller-supplied values or field names.
+            invalid_request(
+                "Invalid turn/admitData request: expected exactly threadId, expectedTurnId, deliveryId, and text as strings",
+            )
+        } else {
+            invalid_request(format!("Invalid request: {err}"))
+        }
+    })
 }
 
 fn reject_obsolete_request_fields(request: &JSONRPCRequest) -> Result<(), JSONRPCErrorError> {
@@ -999,6 +1008,7 @@ impl MessageProcessor {
             | ClientRequest::ThreadArchive { .. } => (Some(self.turn_admission.admit()?), false),
             ClientRequest::TurnStart { .. }
             | ClientRequest::TurnSteer { .. }
+            | ClientRequest::TurnAdmitData { .. }
             | ClientRequest::ReviewStart { .. }
             | ClientRequest::ThreadCompactStart { .. }
             | ClientRequest::ThreadShellCommand { .. }
@@ -1652,6 +1662,9 @@ impl MessageProcessor {
             }
             ClientRequest::TurnSteer { params, .. } => {
                 self.turn_processor.turn_steer(&request_id, params).await
+            }
+            ClientRequest::TurnAdmitData { params, .. } => {
+                self.turn_processor.turn_admit_data(&request_id, params).await
             }
             ClientRequest::TurnSettingsUpdate { params, .. } => {
                 self.turn_processor
