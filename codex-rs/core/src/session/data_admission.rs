@@ -1,8 +1,8 @@
 //! Experimental, turn-bound helper DATA. This is a standalone tool result, not
 //! a contextual-user fragment or a user steering message.
 
-use super::session::Session;
 use super::TurnInput;
+use super::session::Session;
 use crate::codex_thread::CodexThread;
 use crate::state::TaskKind;
 use codex_history::ResponseItemEnvelope;
@@ -20,7 +20,9 @@ pub enum DataAdmission {
 /// Refusals leave both history and pending input unchanged.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DataAdmissionError {
-    #[error("DATA requires nonempty IDs of at most 128 bytes and nonempty text of at most 512 bytes")]
+    #[error(
+        "DATA requires nonempty IDs of at most 128 bytes and nonempty text of at most 512 bytes"
+    )]
     InvalidInput,
     #[error("no active task")]
     NoActiveTurn,
@@ -65,7 +67,9 @@ impl CodexThread {
         delivery_id: &str,
         text: &str,
     ) -> Result<DataAdmission, DataAdmissionError> {
-        self.session.admit_data(expected_turn_id, delivery_id, text).await
+        self.session
+            .admit_data(expected_turn_id, delivery_id, text)
+            .await
     }
 }
 
@@ -77,7 +81,9 @@ impl Session {
     pub(crate) async fn discard_pending_data(&self, turn_id: &str) {
         let active = self.active_turn.lock().await;
         if let Some(turn) = active.as_ref().filter(|turn| {
-            turn.task.as_ref().is_some_and(|task| task.turn_context.sub_id == turn_id)
+            turn.task
+                .as_ref()
+                .is_some_and(|task| task.turn_context.sub_id == turn_id)
         }) {
             turn.turn_state.lock().await.data_admission.close();
         }
@@ -91,12 +97,19 @@ impl Session {
         let active = self.active_turn.lock().await;
         let Some(turn) = active.as_ref().filter(|turn| {
             turn.task.as_ref().is_some_and(|task| {
-                task.turn_context.sub_id == turn_id && task.kind == TaskKind::Regular
+                task.turn_context.sub_id == turn_id
+                    && task.kind == TaskKind::Regular
                     && !task.cancellation_token.is_cancelled()
             })
-        }) else { return Vec::new() };
+        }) else {
+            return Vec::new();
+        };
         let pending = std::mem::take(&mut turn.turn_state.lock().await.data_admission.pending);
-        pending.into_iter().map(ResponseItemEnvelope::new).map(TurnInput::FunctionCallOutput).collect()
+        pending
+            .into_iter()
+            .map(ResponseItemEnvelope::new)
+            .map(TurnInput::FunctionCallOutput)
+            .collect()
     }
 
     #[expect(
@@ -109,9 +122,12 @@ impl Session {
         delivery_id: &str,
         text: &str,
     ) -> Result<DataAdmission, DataAdmissionError> {
-        if expected_turn_id.is_empty() || expected_turn_id.len() > 128
-            || delivery_id.is_empty() || delivery_id.len() > 128
-            || text.is_empty() || text.len() > 512
+        if expected_turn_id.is_empty()
+            || expected_turn_id.len() > 128
+            || delivery_id.is_empty()
+            || delivery_id.len() > 128
+            || text.is_empty()
+            || text.len() > 512
         {
             return Err(DataAdmissionError::InvalidInput);
         }
@@ -158,7 +174,9 @@ impl Session {
     pub(crate) async fn close_data_admission_if_idle(&self, turn_id: &str) -> bool {
         let active = self.active_turn.lock().await;
         let Some(turn) = active.as_ref().filter(|turn| {
-            turn.task.as_ref().is_some_and(|task| task.turn_context.sub_id == turn_id)
+            turn.task
+                .as_ref()
+                .is_some_and(|task| task.turn_context.sub_id == turn_id)
         }) else {
             return true;
         };
