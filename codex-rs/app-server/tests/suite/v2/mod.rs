@@ -159,6 +159,8 @@ mod thread_timeline;
 mod thread_unarchive;
 mod thread_unsubscribe;
 mod turn_cost_otel;
+#[path = "turn_data_admission_tests.rs"]
+mod turn_data_admission;
 mod turn_interrupt;
 mod turn_settings_update;
 mod turn_start;

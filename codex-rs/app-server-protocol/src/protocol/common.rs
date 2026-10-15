@@ -1059,6 +1059,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::TurnSteerResponse,
     },
+    #[experimental("turn/admitData")]
+    TurnAdmitData => "turn/admitData" {
+        params: v2::TurnAdmitDataParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::TurnAdmitDataResponse,
+    },
     TurnInterrupt => "turn/interrupt" {
         params: v2::TurnInterruptParams,
         serialization: thread_id(params.thread_id),
