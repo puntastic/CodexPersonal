@@ -59,13 +59,19 @@ async fn data_admitted_in_flight_joins_only_next_same_turn_request() -> anyhow::
         let metadata: Value = serde_json::from_str(request["client_metadata"]["x-codex-turn-metadata"].as_str().unwrap())?;
         assert_eq!(metadata["turn_id"], turn_id);
     }
-    let output = json!({
-        "type": "function_call_output", "name": "helper_result", "namespace": "codex_data",
-        "output": "helper DATA",
-    });
-    assert!(!frozen["input"].as_array().unwrap().contains(&output));
+    assert!(frozen["input"].as_array().unwrap().iter().all(|item| item["namespace"] != "codex_data"));
     let helpers: Vec<_> = next["input"].as_array().unwrap().iter()
         .filter(|item| item["namespace"] == "codex_data").collect();
+    assert_eq!(helpers.len(), 1);
+    let helper = helpers[0];
+    assert!(helper["id"].as_str().unwrap().starts_with("fco_"));
+    let create_time = &helper["internal_chat_message_metadata_passthrough"]["create_time"];
+    assert!(create_time.as_f64().unwrap() > 0.0);
+    let output = json!({
+        "type": "function_call_output", "name": "helper_result", "namespace": "codex_data",
+        "output": "helper DATA", "id": helper["id"],
+        "internal_chat_message_metadata_passthrough": { "create_time": create_time, "turn_id": turn_id },
+    });
     assert_eq!(helpers, vec![&output]);
     assert!(!next.to_string().contains("rejected DATA"));
     assert_eq!(thread.admit_data(&turn_id, "delivery-2", "late DATA").await, Err(DataAdmissionError::NoActiveTurn));
