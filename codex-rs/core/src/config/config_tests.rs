@@ -6098,6 +6098,134 @@ async fn sqlite_home_defaults_to_codex_home_for_workspace_write() -> std::io::Re
 }
 
 #[tokio::test]
+async fn sqlite_rollout_import_requires_explicit_existing_alternate_home() -> std::io::Result<()> {
+    use codex_protocol::config_types::SqliteRolloutImport;
+
+    let codex_home = TempDir::new()?;
+    let alternate = TempDir::new()?;
+    for (home, expected_error) in [
+        (None, Some("explicit sqlite_home")),
+        (Some(codex_home.abs()), Some("distinct from CODEX_HOME")),
+        (
+            Some(codex_home.path().join("not-created").abs()),
+            Some("existing sqlite_home directory"),
+        ),
+        (Some(alternate.abs()), None),
+    ] {
+        let result = Config::load_from_base_config_with_overrides(
+            ConfigToml {
+                sqlite_home: home,
+                sqlite_rollout_import: Some(SqliteRolloutImport::Disabled),
+                ..Default::default()
+            },
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await;
+        match expected_error {
+            Some(expected) => {
+                let error = result.expect_err("invalid no-import configuration must fail");
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+                assert!(error.to_string().contains(expected), "{error}");
+            }
+            None => {
+                let config = result?;
+                assert_eq!(config.sqlite.home(), alternate.path());
+                assert_eq!(
+                    config.sqlite.rollout_import(),
+                    SqliteRolloutImport::Disabled
+                );
+                assert_eq!(config.codex_home, codex_home.abs());
+            }
+        }
+    }
+    assert!(!codex_home.path().join("not-created").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_rollout_import_rejects_managed_home_redirection() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let selected_home = TempDir::new()?;
+    let required_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        format!(
+            "sqlite_rollout_import = \"disabled\"\nsqlite_home = {:?}\n",
+            selected_home.path().display()
+        ),
+    )?;
+    let error = load_with_enterprise_requirement(
+        &codex_home,
+        format!("sqlite_home = {:?}", required_home.path().display()),
+    )
+    .await
+    .expect_err("managed selection must not silently redirect isolated no-import state");
+    assert!(
+        error.to_string().contains("redirected by requirements"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sqlite_rollout_import_rejects_unknown_policy() {
+    assert!(toml::from_str::<ConfigToml>("sqlite_rollout_import = 'sometimes'").is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sqlite_rollout_import_rejects_codex_home_symlink_alias() -> std::io::Result<()> {
+    use codex_protocol::config_types::SqliteRolloutImport;
+
+    let codex_home = TempDir::new()?;
+    let aliases = TempDir::new()?;
+    let alias = aliases.path().join("home-alias");
+    std::os::unix::fs::symlink(codex_home.path(), &alias)?;
+    let error = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            sqlite_home: Some(alias.abs()),
+            sqlite_rollout_import: Some(SqliteRolloutImport::Disabled),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("alias of the normal profile must not select no-import mode");
+    assert!(
+        error.to_string().contains("distinct from CODEX_HOME"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn sqlite_rollout_import_rejects_codex_home_case_alias() -> std::io::Result<()> {
+    use codex_protocol::config_types::SqliteRolloutImport;
+
+    let codex_home = TempDir::new()?;
+    let alias = PathBuf::from(codex_home.path().to_string_lossy().to_uppercase());
+    let error = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            sqlite_home: Some(alias.abs()),
+            sqlite_rollout_import: Some(SqliteRolloutImport::Disabled),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("case alias of the normal profile must not select no-import mode");
+    assert!(
+        error.to_string().contains("distinct from CODEX_HOME"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_write_includes_configured_writable_root_once_without_memories_root()
 -> std::io::Result<()> {
     let codex_home = TempDir::new()?;

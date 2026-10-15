@@ -179,6 +179,7 @@ mod permissions;
 mod requirements;
 mod resolved_permission_profile;
 mod runtime_refresh;
+mod sqlite_rollout_import;
 pub(crate) use runtime_refresh::RuntimeConfigRefresh;
 #[cfg(test)]
 mod schema;
@@ -4145,6 +4146,13 @@ impl Config {
             .cloned()
             .or(sqlite_home_env)
             .unwrap_or_else(|| codex_home.clone());
+        let sqlite_rollout_import = cfg.sqlite_rollout_import.unwrap_or_default();
+        sqlite_rollout_import::validate(
+            sqlite_rollout_import,
+            configured_sqlite_home.as_deref(),
+            sqlite_home.as_path(),
+            codex_home.as_path(),
+        )?;
         let original_permission_profile = permission_profile.clone();
         apply_requirement_constrained_value(
             "approval_policy",
@@ -4437,7 +4445,8 @@ impl Config {
             memories: memories_config,
             agent_interrupt_message_enabled,
             codex_home,
-            sqlite: codex_state::SqliteConfig::from_sqlite_home(sqlite_home),
+            sqlite: codex_state::SqliteConfig::from_sqlite_home(sqlite_home)
+                .with_rollout_import(sqlite_rollout_import),
             log_dir,
             config_layer_stack,
             application_network_policy: Default::default(),

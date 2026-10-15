@@ -22,6 +22,16 @@ use wildmatch::WildMatchPattern;
 
 use crate::openai_models::ReasoningEffort;
 
+/// Whether startup imports existing rollout files into the SQLite state index.
+/// This does not control new thread persistence or explicit history reads.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SqliteRolloutImport {
+    #[default]
+    Enabled,
+    Disabled,
+}
+
 /// Limit for the text included in `codex.tool_result` log records.
 /// This does not affect model-visible output. Raising it can expose more tool data to logs.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema)]
