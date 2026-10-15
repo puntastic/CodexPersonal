@@ -160,6 +160,86 @@ async fn try_init_times_out_waiting_for_stuck_startup_backfill() -> anyhow::Resu
 }
 
 #[tokio::test]
+async fn disabled_rollout_import_preserves_backfill_and_new_thread_persistence()
+-> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let sqlite_home = TempDir::new()?;
+    let old_id = ThreadId::new();
+    write_rollout_with_user_message(home.path(), old_id, "Old", ThreadHistoryMode::Legacy)?;
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.path().abs())
+        .with_rollout_import(SqliteRolloutImport::Disabled);
+    let config = RolloutConfig {
+        codex_home: home.path().to_path_buf(),
+        sqlite: sqlite.clone(),
+        cwd: home.path().to_path_buf(),
+        model_provider_id: "test-provider".to_string(),
+        generate_memories: false,
+    };
+    let runtime = try_init(&config).await?;
+    assert_eq!(runtime.get_thread(old_id).await?, None);
+    assert_eq!(
+        runtime.get_backfill_state().await?,
+        codex_state::BackfillState::default()
+    );
+
+    // New work remains writable even though historical import was not performed.
+    let new_id = ThreadId::new();
+    let new_path =
+        write_rollout_with_user_message(home.path(), new_id, "New", ThreadHistoryMode::Legacy)?;
+    reconcile_rollout(
+        Some(runtime.as_ref()),
+        &new_path,
+        "test-provider",
+        /*builder*/ None,
+        &[],
+        /*archived_only*/ None,
+        /*new_thread_memory_mode*/ None,
+    )
+    .await;
+    let new_metadata = runtime.get_thread(new_id).await?;
+    assert!(new_metadata.is_some());
+    runtime.mark_backfill_running().await?;
+    runtime.checkpoint_backfill("retained-checkpoint").await?;
+    let backfill_before = runtime.get_backfill_state().await?;
+    runtime.close().await;
+
+    // Both owning initialization and optional reads honor the same policy.
+    let reopened = try_init(&config).await?;
+    assert_eq!(reopened.get_thread(old_id).await?, None);
+    assert_eq!(reopened.get_thread(new_id).await?, new_metadata);
+    assert_eq!(reopened.get_backfill_state().await?, backfill_before);
+    reopened.close().await;
+    let optional = get_state_db(&config)
+        .await
+        .expect("disabled import remains readable");
+    assert_eq!(optional.get_backfill_state().await?, backfill_before);
+    assert_eq!(optional.get_thread(new_id).await?, new_metadata);
+    optional.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_rollout_import_indexes_existing_rollouts() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let sqlite_home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    write_rollout_with_user_message(home.path(), thread_id, "Old", ThreadHistoryMode::Legacy)?;
+    let runtime = try_init_with_roots(
+        home.path().to_path_buf(),
+        SqliteConfig::new_for_testing(sqlite_home.path().abs()),
+        "test-provider".to_string(),
+    )
+    .await?;
+    assert!(runtime.get_thread(thread_id).await?.is_some());
+    assert_eq!(
+        runtime.get_backfill_state().await?.status,
+        codex_state::BackfillStatus::Complete
+    );
+    runtime.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_rollout_preserves_existing_explicit_title() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let thread_id = ThreadId::new();

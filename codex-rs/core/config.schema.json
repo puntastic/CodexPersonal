@@ -4278,6 +4278,14 @@
         }
       ]
     },
+    "SqliteRolloutImport": {
+      "description": "Whether startup imports existing rollout files into the SQLite state index. This does not control new thread persistence or explicit history reads.",
+      "enum": [
+        "enabled",
+        "disabled"
+      ],
+      "type": "string"
+    },
     "ThreadStoreToml": {
       "oneOf": [
         {
@@ -7806,6 +7814,14 @@
         }
       ],
       "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
+    },
+    "sqlite_rollout_import": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SqliteRolloutImport"
+        }
+      ],
+      "description": "Import existing rollout files into SQLite at startup (enabled by default). Disabling requires an explicit, existing sqlite_home distinct from CODEX_HOME. New thread persistence and explicit history reads remain available."
     },
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",

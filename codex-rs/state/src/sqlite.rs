@@ -12,6 +12,7 @@ use crate::migrations::repair_legacy_recency_migration_version;
 use crate::runtime::recovery::RuntimeDbInitError;
 use crate::telemetry;
 use crate::telemetry::DbKind;
+use codex_protocol::config_types::SqliteRolloutImport;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use log::LevelFilter;
 use sqlx::ConnectOptions;
@@ -154,13 +155,14 @@ pub struct RuntimeDbPath {
 #[derive(Clone, Debug)]
 pub struct SqliteConfig {
     sqlite_home: AbsolutePathBuf,
+    rollout_import: SqliteRolloutImport,
     quick_check_manager: SqliteQuickCheckManager,
 }
 
 // Validation history is operational state, not part of configuration equality.
 impl PartialEq for SqliteConfig {
     fn eq(&self, other: &Self) -> bool {
-        self.sqlite_home == other.sqlite_home
+        self.sqlite_home == other.sqlite_home && self.rollout_import == other.rollout_import
     }
 }
 
@@ -170,8 +172,19 @@ impl SqliteConfig {
     pub fn from_sqlite_home(sqlite_home: AbsolutePathBuf) -> Self {
         Self {
             sqlite_home,
+            rollout_import: SqliteRolloutImport::default(),
             quick_check_manager: SqliteQuickCheckManager::new(),
         }
+    }
+
+    /// Set the startup rollout import policy after configuration validation.
+    pub fn with_rollout_import(mut self, policy: SqliteRolloutImport) -> Self {
+        self.rollout_import = policy;
+        self
+    }
+
+    pub fn rollout_import(&self) -> SqliteRolloutImport {
+        self.rollout_import
     }
 
     pub fn new_for_testing(sqlite_home: AbsolutePathBuf) -> Self {

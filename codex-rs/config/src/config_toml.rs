@@ -46,6 +46,7 @@ use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::config_types::SqliteRolloutImport;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchMode;
@@ -369,6 +370,11 @@ pub struct ConfigToml {
     /// Directory where Codex stores the SQLite state DB.
     /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`.
     pub sqlite_home: Option<AbsolutePathBuf>,
+
+    /// Import existing rollout files into SQLite at startup (enabled by default).
+    /// Disabling requires an explicit, existing sqlite_home distinct from CODEX_HOME.
+    /// New thread persistence and explicit history reads remain available.
+    pub sqlite_rollout_import: Option<SqliteRolloutImport>,
 
     /// Directory where Codex writes log files. Setting this value explicitly
     /// also enables the TUI text log in this directory.

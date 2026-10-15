@@ -10,6 +10,7 @@ use anyhow::Context;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::SqliteRolloutImport;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 pub use codex_state::LogEntry;
@@ -107,6 +108,11 @@ async fn try_init_with_roots_inner(
                     sqlite.home().display()
                 )
             })?;
+    if sqlite.rollout_import() == SqliteRolloutImport::Disabled {
+        // The caller opted out of startup import, not into a complete-history claim.
+        // Keep the real backfill state unchanged; ordinary thread writes still work.
+        return Ok(runtime);
+    }
     let backfill_gate_started = Instant::now();
     let backfill_gate_result = wait_for_backfill_gate(
         runtime.as_ref(),
@@ -201,7 +207,7 @@ fn emit_startup_warning(message: &str) {
     }
 }
 
-/// Open the DB if it exists and its startup backfill has already completed.
+/// Open an existing DB when backfill is complete or import is explicitly disabled.
 ///
 /// Unlike [`init`], this helper does not run rollout backfill. It is for
 /// optional local reads from non-owning contexts such as remote app-server mode.
@@ -231,7 +237,11 @@ pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHand
             return None;
         }
     };
-    require_backfill_complete(runtime, config.sqlite_config().home()).await
+    if config.sqlite_config().rollout_import() == SqliteRolloutImport::Disabled {
+        Some(runtime)
+    } else {
+        require_backfill_complete(runtime, config.sqlite_config().home()).await
+    }
 }
 
 /// Build a SQLite telemetry recorder backed by an OTEL metrics client.
@@ -307,9 +317,11 @@ pub async fn list_thread_ids_db(
     let ctx = context?;
     if ctx.sqlite() != sqlite {
         warn!(
-            "state db SQLite home mismatch: expected {}, got {}",
+            "state db SQLite configuration mismatch: expected home {} import {:?}, got home {} import {:?}",
             sqlite.home().display(),
-            ctx.sqlite().home().display()
+            sqlite.rollout_import(),
+            ctx.sqlite().home().display(),
+            ctx.sqlite().rollout_import()
         );
         return None;
     }
@@ -368,9 +380,11 @@ pub async fn list_threads_db(
     let ctx = context?;
     if ctx.sqlite() != sqlite {
         warn!(
-            "state db SQLite home mismatch: expected {}, got {}",
+            "state db SQLite configuration mismatch: expected home {} import {:?}, got home {} import {:?}",
             sqlite.home().display(),
-            ctx.sqlite().home().display()
+            sqlite.rollout_import(),
+            ctx.sqlite().home().display(),
+            ctx.sqlite().rollout_import()
         );
         return None;
     }
