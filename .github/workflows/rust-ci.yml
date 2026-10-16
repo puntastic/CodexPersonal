@@ -123,8 +123,7 @@ jobs:
       - name: Install pinned nextest
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
+          tool: nextest@0.9.143
 
       - name: Build, verify the exact selection, then qualify serially
         working-directory: codex-rs
@@ -248,10 +247,28 @@ jobs:
             }
           )
           $plans | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'expected-tests.json') -Encoding utf8
+          $nextestVersion = @(& cargo nextest --version)
+          if ($LASTEXITCODE -ne 0 -or $nextestVersion.Count -eq 0 -or $nextestVersion[0] -notmatch '^cargo-nextest 0\.9\.143(?:\s|$)') {
+            throw 'This pilot requires exactly cargo-nextest 0.9.143.'
+          }
+          # Custom profiles do not inherit junit.path. Supply an explicit CI-only
+          # report path without modifying the source checkout's nextest config.
+          $junit = Join-Path $env:PILOT_ROOT 'junit.xml'
+          $nextestConfig = Join-Path $env:PILOT_ROOT 'nextest-ci.toml'
+          @(
+            '[profile.local.junit]'
+            ('path = ' + (ConvertTo-Json -InputObject $junit -Compress))
+            'report-skipped = "none"'
+            'store-success-output = false'
+            'store-failure-output = false'
+          ) | Set-Content -LiteralPath $nextestConfig -Encoding utf8
+          $nextestConfigArg = "codex-windows-isolated:$nextestConfig"
           @{
             cargo = (& cargo --version)
             rustc = (& rustc -Vv) -join "`n"
-            nextest = (& cargo nextest --version)
+            nextest = $nextestVersion
+            nextest_tool_config_sha256 = (Get-FileHash -LiteralPath $nextestConfig -Algorithm SHA256).Hash
+            junit_path = $junit
             just = (& just --version)
             python = (& python --version)
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'tool-versions.json') -Encoding utf8
@@ -274,7 +291,7 @@ jobs:
           foreach ($plan in $plans) {
             Save-DiskObservation "list-$($plan.label)"
             $filter = ($plan.names | ForEach-Object { "test(=$_)"} ) -join ' | '
-            $plan.arguments = @('--locked', '--cargo-profile', 'dev-small', '-p', $plan.package) + $plan.target + @('-E', $filter)
+            $plan.arguments = @('--tool-config-file', $nextestConfigArg, '--profile', 'local', '--locked', '--cargo-profile', 'dev-small', '-p', $plan.package) + $plan.target + @('-E', $filter)
             $inventoryPath = Join-Path $env:PILOT_ROOT "$($plan.label)-inventory.json"
             $listLog = Join-Path $env:PILOT_ROOT "$($plan.label)-list.log"
             & cargo nextest list @($plan.arguments) --message-format json 1> $inventoryPath 2> $listLog
@@ -304,10 +321,7 @@ jobs:
             }
           }
           $results = @()
-          # nextest 0.9.103 defaults store.dir to workspace-root/target/nextest,
-          # independently of CARGO_TARGET_DIR. The pinned repo sets local's inherited
-          # junit.path to junit.xml; the Cargo workspace root is codex-rs.
-          $junit = Join-Path $env:CODEX_REPO_ROOT 'codex-rs/target/nextest/local/junit.xml'
+          # The CI-only config binds every invocation to this exact report path.
           foreach ($plan in $plans) {
             Save-DiskObservation "run-$($plan.label)"
             if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
