@@ -195,7 +195,7 @@ jobs:
             $expectedIdentities = @($Plan.caseIdentities | ForEach-Object {
               ConvertTo-Json -InputObject @($_.classname, $_.name) -Compress
             })
-            if ($document.DocumentElement.Name -ne 'testsuites' -or $cases.Count -ne $Plan.names.Count -or
+            if ($document.DocumentElement.get_Name() -ne 'testsuites' -or $cases.Count -ne $Plan.names.Count -or
                 $document.SelectNodes('//testcase').Count -ne $cases.Count -or
                 @(Compare-Object ($expectedIdentities | Sort-Object) ($actualIdentities | Sort-Object)).Count -ne 0) {
               throw 'JUnit cases do not exactly match the selected test allowlist.'
