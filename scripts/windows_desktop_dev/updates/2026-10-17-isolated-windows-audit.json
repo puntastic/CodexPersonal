@@ -1,0 +1,106 @@
+{
+  "schema": "windows-ci-qualification-audit-v1",
+  "github_run_id": 38960655562,
+  "github_workflow_id": 351095856,
+  "github_job_id": 117174574909,
+  "github_conclusion": "failure",
+  "validator_correction_sha_not_dispatched": "5cae58177c3e99376b905f3744bc4630f9247e6c",
+  "run_workflow_sha": "8eaf261d95dce3213d4967d38698c704792556ed",
+  "source_under_test_sha": "a836ce4fcdee8b42e6616a9099eae26ea02969c4",
+  "newer_native_sha_not_tested": "89f49680348fbd911716c7bf4d38a2b3f292f17f",
+  "actual_nextest_version": "0.9.143",
+  "actual_nextest_commit": "60fa45f638ffc3f35e74afa65737f45fcd32db2a",
+  "failure_classification": "reporting false-negative: PowerShell XML adapter resolves DocumentElement.Name to name=\"nextest-run\", not the testsuites element name",
+  "independent_junit_verification": "passed",
+  "total_selected_cases": 11,
+  "selected_failures": 0,
+  "selected_errors": 0,
+  "selected_skips": 0,
+  "selected_retries": 0,
+  "artifact": {
+    "id": 12073538584,
+    "bytes": 18136,
+    "sha256": "1f19f8dfab2a2d9d55e84a97b204ef83088e71788cb1fd04721c59a4d8d05910"
+  },
+  "generated_nextest_config_sha256": "9c23b0eecbb341f96bd4473202365a6f5ce810ad5470ca8305142280227e04a1",
+  "populations": [
+    {
+      "label": "core-windows-sandbox",
+      "count": 7,
+      "junit": "core-windows-sandbox.xml",
+      "sha256": "8984605dc97305e123283ec569656ca50fc5367a7f5777d20172a98f1c4c8b58",
+      "nextest_run_id": "857a0269-f49c-48e7-aa8b-37fb900651f7",
+      "timestamp": "2026-10-16T20:40:11.978+00:00",
+      "seconds": "65.366"
+    },
+    {
+      "label": "exec-server-filesystem",
+      "count": 2,
+      "junit": "exec-server-filesystem.xml",
+      "sha256": "e2b958209d79c7eaeaf106939634d2b27349b2a6e2222776660e22f020356716",
+      "nextest_run_id": "adba3e73-307e-4e01-87f0-8c407990cd18",
+      "timestamp": "2026-10-16T20:41:20.488+00:00",
+      "seconds": "4.575"
+    },
+    {
+      "label": "exec-server-process",
+      "count": 1,
+      "junit": "exec-server-process.xml",
+      "sha256": "9a057672947f8901c6dc5a4673e7ee37b46a0c279a1b12398a4839a33e68d02b",
+      "nextest_run_id": "8ae5a991-f2ac-483e-af65-0b202c23ce45",
+      "timestamp": "2026-10-16T20:41:27.633+00:00",
+      "seconds": "0.999"
+    },
+    {
+      "label": "sandbox-library",
+      "count": 1,
+      "junit": "sandbox-library.xml",
+      "sha256": "9c3eaf83e7e237c5de06bbdf00113d92f7d3b237530bc80e7611bf85939225fa",
+      "nextest_run_id": "3d0e980a-c6ad-4a89-9823-44fc171a4e81",
+      "timestamp": "2026-10-16T20:41:31.074+00:00",
+      "seconds": "1.081"
+    }
+  ],
+  "log_observations": {
+    "leak": 0,
+    "retry": 0,
+    "runfiles": 0,
+    "summaries": [
+      "2026-10-16T20:41:17.3474396Z      Summary [  65.366s] 7 tests run: 7 passed (1 slow), 2 skipped",
+      "2026-10-16T20:41:25.0654403Z      Summary [   4.575s] 2 tests run: 2 passed, 65 skipped",
+      "2026-10-16T20:41:28.6350966Z      Summary [   0.999s] 1 test run: 1 passed, 31 skipped",
+      "2026-10-16T20:41:32.1561924Z      Summary [   1.081s] 1 test run: 1 passed, 280 skipped"
+    ]
+  },
+  "caveats": [
+    "GitHub run remains failed; local gate replay is separate evidence, not a new CI result.",
+    "378 tests outside the exact allowlist were filtered/skipped by nextest; all 11 selected tests are present and passing.",
+    "One selected test was slow; no LEAK appeared. The earlier transient LEAK is not causally explained.",
+    "Downloaded file mtimes are download-time; XML timestamps are within the actual run. Original CI freshness guard completed before the root-name rejection.",
+    "No fourth dispatch; no claim about newer native source, full-workspace success, installation or live peer use."
+  ],
+  "original_artifact_file_sha256": {
+    "core-windows-sandbox-run-tail.txt": "14f102d977c7fe2710697becb2646cf41bfecd9c437ba5f6049cb0e811fb985e",
+    "core-windows-sandbox-compile-tail.txt": "560ae6816821a2c8e6b2a1210d187dd9e746f5d59d79a663d6d5b94648314ceb",
+    "core-windows-sandbox.xml": "8984605dc97305e123283ec569656ca50fc5367a7f5777d20172a98f1c4c8b58",
+    "disk-observations.jsonl": "0ceda8b3e54b45888beadb6547b7a24d33ac3e1fb6e57d47b71e479a81e163f0",
+    "exec-server-filesystem-compile-tail.txt": "9aa6885cd3677b5b1991e8ec2936f5ce75c1f050dbac1ab7f6e3da851044a275",
+    "exec-server-filesystem.xml": "e2b958209d79c7eaeaf106939634d2b27349b2a6e2222776660e22f020356716",
+    "exec-server-filesystem-run-tail.txt": "a36da70387951dd0ad602c77fa69589880e37473c90360878350cb05bd462a90",
+    "exec-server-process-compile-tail.txt": "0ce6528024d2d833e7163f4850b2d5f2bd25552362158c9584f2a09b32651a6c",
+    "exec-server-process-run-tail.txt": "f0557b3d30f88d0c0892edcc7a1b66d14e2e2f6d6b952778013a59de6dda9697",
+    "exec-server-process.xml": "9a057672947f8901c6dc5a4673e7ee37b46a0c279a1b12398a4839a33e68d02b",
+    "expected-tests.json": "e77f13444e304e9371e4ffc468d0e921e3f3e7a375d45b0277f4e9a4d9d68a2f",
+    "final-disks.json": "c16698751251c317d1dd11a076f5b026f79b1979fc90ce43850762a5767a2b7c",
+    "helper-build-tail.txt": "0d0ba0e1cbfa86700b5ed2c3eceef4e945d1edff09c40d69cf1ee7c9405d20e9",
+    "helper-hashes.json": "58b1258bcb0100b0889dde9c6dffe7d8bcfc09cfc7da5bf76231930ea55b2322",
+    "initial-disks.json": "35e40a9fd11189baef2055b4e6309b448ceb427d0d1bda03d3943100228960fe",
+    "provenance.json": "4cc79b6d49570fbed310e938068442f1f01dbc2d2da55f0c94f2cb074d97d53a",
+    "results.json": "c1ecff5ee9079e2de2b9e16d5d017cba43ba10cf85aa8f23b8adee84937c263c",
+    "sandbox-library-compile-tail.txt": "d597dfeae48c540cba6797345afa36fe9a0b48c8606ca32b8a177fbf687b5853",
+    "sandbox-library-run-tail.txt": "be98b03e13514fc752cdb79866542aaa3db494836fb52bbdafad76406c6d8238",
+    "sandbox-library.xml": "9c3eaf83e7e237c5de06bbdf00113d92f7d3b237530bc80e7611bf85939225fa",
+    "selected-tests.json": "f1c062c99d968ab421286f16d95f23be0be78bf8eae164135797303b78d3936f",
+    "tool-versions.json": "0b90a2e52a45b6b99df9489dd6e2aef70bbc917694339a32d3a8473d8644bca5"
+  }
+}

@@ -4,6 +4,12 @@ This is a continuation hand, not release or deployment approval. The owning
 arc and historical package are in `2026-10-16.md`. The running Desktop remains
 0.161.0. Do not replace it merely because a source branch or test run exists.
 
+The [isolated Windows audit](2026-10-17-isolated-windows-audit.json) records
+11 passing account-level checks at the earlier `a836ce4f` source. Its GitHub
+run stayed failed because of a reporting false-negative; corrected local
+validation of the actual reports is separate evidence. It is not coverage of
+the newer Guardian repair or a passing full workspace.
+
 ## Checked result and resource boundary
 
 The checkpoint/backup-generation repair and explicit Guardian fixture modes
@@ -19,6 +25,11 @@ Run `d017e306-63d9-4a08-8737-c6dd8134efa2` and its saved JUnit in
 `codex-rs/target/desktop-dev/reports/20261017-workspace-other-first.junit.xml`
 own the exact failures. Do not add overlapping earlier runs as unique coverage.
 The complete current-source Core/app-server batches remain unrun.
+
+The [machine-readable case index](2026-10-17-workspace-other-failures.json)
+preserves all 84 test identities, failure types and retry counts beside the
+report hash. It deliberately omits captured stdout/stderr and local private
+test material; it is a selected index, not a replacement for the raw JUnit.
 
 Kestrel's free-space floor is 80 GiB; costly phases use an 84 GiB early-stop
 margin. About 85 GiB remained after that batch. Cleanup is non-forcing only.

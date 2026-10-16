@@ -1,0 +1,605 @@
+{
+  "schema": "codex-local-qualification-failures-v1",
+  "run_id": "d017e306-63d9-4a08-8737-c6dd8134efa2",
+  "started_at": "2026-10-17T05:12:44.060+10:00",
+  "completed_batch": true,
+  "tests": 14637,
+  "failures": 84,
+  "errors": 0,
+  "flaky_passes": 6,
+  "report_sha256": "b353d5e96624de29b1a68b193717cbafe19bb59d94bc7e1489c1420aad3303c1",
+  "base_commit": "a836ce4fcdee8b42e6616a9099eae26ea02969c4",
+  "repair_checkpoint": "89f49680348fbd911716c7bf4d38a2b3f292f17f",
+  "source_boundary": "Run exercised the tracked repair before final formatting and lint; the later checkpoint preserves that repair and its continuation map. Not a compiled-package or full-workspace pass.",
+  "selection": "Workspace except codex-voice-host; runtime filter excludes codex-core, codex-app-server, and the four account-mutating cases in the remaining packages. Ignored tests were not run.",
+  "failure_cases": [
+    {
+      "binary": "codex-exec-server",
+      "test": "environment::tests::default_environment_has_ready_local_executor",
+      "type": "test failure with exit code 101",
+      "seconds": 0.251,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-exec-server::relay",
+      "test": "remote_environment_routes_encrypted_exec_server_rpc",
+      "type": "test failure with exit code 101",
+      "seconds": 0.208,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-exec::all",
+      "test": "suite::cyber_access_program::cyber_access_program_is_selected_per_turn",
+      "type": "test timeout",
+      "seconds": 60.025,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-exec::all",
+      "test": "suite::daybreak::exec_resolves_daybreak_for_api_keys_and_allows_an_off_override",
+      "type": "test timeout",
+      "seconds": 60.029,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-exec::all",
+      "test": "suite::resume::exec_resume_last_appends_to_existing_file",
+      "type": "test failure with exit code 101",
+      "seconds": 11.745,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-exec::all",
+      "test": "suite::resume::exec_resume_last_respects_cwd_filter_and_all_flag",
+      "type": "test timeout",
+      "seconds": 90.023,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-exec::all",
+      "test": "suite::worktree::worktree_start_and_fork_use_host_pool_and_preserve_legacy_resume",
+      "type": "test timeout",
+      "seconds": 120.049,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-http-client",
+      "test": "route_aware_client_pool::tls_fallback_tests::does_not_retry_a_non_replayable_streaming_request",
+      "type": "test failure with exit code 101",
+      "seconds": 0.048,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-http-client",
+      "test": "route_aware_client_pool::tls_fallback_tests::retries_a_native_tls_failure_after_another_request_caches_rustls",
+      "type": "test failure with exit code 101",
+      "seconds": 0.037,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-http-client",
+      "test": "route_aware_client_pool::tls_fallback_tests::retries_a_native_tls_protocol_failure_once_with_rustls",
+      "type": "test failure with exit code 101",
+      "seconds": 0.034,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-http-client",
+      "test": "route_aware_client_pool::tls_fallback_tests::retries_a_tls_protocol_failure_when_request_url_contains_certificate_markers",
+      "type": "test failure with exit code 101",
+      "seconds": 0.034,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-http-client",
+      "test": "route_aware_client_pool::tls_fallback_tests::successful_rustls_fallback_replays_the_request_and_reuses_the_destination",
+      "type": "test failure with exit code 101",
+      "seconds": 0.08,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "analytics::tests::account_layout::unsupported_workspace_plans_hide_top_chats_and_skip_loading",
+      "type": "test timeout",
+      "seconds": 60.032,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app_server_session::prompt_history_tests::lifecycle_metadata_uses_local_prompt_history",
+      "type": "test abort",
+      "seconds": 3.632,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app_server_session::provider_selection_tests::starts_and_forks_use_server_provider_unless_explicitly_selected",
+      "type": "test abort",
+      "seconds": 3.036,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app_server_session::reasoning_defaults_tests::reasoning_defaults_reach_responses",
+      "type": "test abort (leaked handles)",
+      "seconds": 11.454,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app_server_session::rollout_history::tests::legacy_resume_preserves_history_mode_after_picker_server_replacement",
+      "type": "test abort",
+      "seconds": 5.796,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app_server_session::rollout_history::tests::remote_resume_restores_saved_server_profile_without_permission_overrides",
+      "type": "test abort (leaked handles)",
+      "seconds": 14.349,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app_server_session::tests::persisted_resume_does_not_forward_implicit_service_tier",
+      "type": "test abort",
+      "seconds": 6.278,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app_server_session::tests::side_fork_skips_parent_title_lookup_but_normal_ephemeral_fork_keeps_it",
+      "type": "test abort",
+      "seconds": 35.663,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app_server_session::tests::side_fork_uses_one_request_for_long_paginated_history",
+      "type": "test abort",
+      "seconds": 8.443,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::composer_hints::tests::usage_notice_preserves_composer_geometry_on_recovery",
+      "type": "test failure with exit code 101",
+      "seconds": 0.222,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::daemon_menu::tests::daemon_menu_is_read_only_and_confirmation_can_cancel_or_handoff",
+      "type": "test failure with exit code 101",
+      "seconds": 0.224,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::owned_transcript::empty_state_animation_tests::empty_state_animation_preserves_header_cursor_and_footer",
+      "type": "test failure with exit code 101",
+      "seconds": 0.149,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::owned_transcript::tests::fullscreen_composer_remote_images_leave_an_editable_prompt_row",
+      "type": "test failure with exit code 101",
+      "seconds": 0.118,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::owned_transcript::tests::older_page_loading_uses_the_status_row_without_moving_content_or_cursor",
+      "type": "test failure with exit code 101",
+      "seconds": 0.115,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::owned_transcript::tests::owned_transcript_reserves_a_row_above_the_composer",
+      "type": "test failure with exit code 101",
+      "seconds": 0.113,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::owned_transcript::tests::recap_spacing_belongs_to_the_transcript_tail",
+      "type": "test failure with exit code 101",
+      "seconds": 0.145,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::active_reconnect::reconnect_allows_slow_hydration_but_bounds_a_stalled_server",
+      "type": "test failure with exit code 101 (leaked handles)",
+      "seconds": 0.665,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::app_server_thread_replacement_clears_previous_transcript_before_replay",
+      "type": "test failure with exit code 101 (leaked handles)",
+      "seconds": 0.578,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::external_writer_fork_tests::external_writer_fork_opens_editable_thread_without_taking_source_lease",
+      "type": "test abort",
+      "seconds": 7.303,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::history_hydration_tests::history_hydration_metadata_tracks_missing_turns_and_stale_completions_keep_new_request",
+      "type": "test abort",
+      "seconds": 7.61,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::permission_selection_tests::custom_permission_selection_uses_server_definition_and_preserves_state_on_rejection",
+      "type": "test abort",
+      "seconds": 6.055,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::projectless_tests::projectless_permissions_survive_session_transitions_without_trust",
+      "type": "test abort",
+      "seconds": 4.641,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::realtime_requests::buffered_voice_items_reconcile_captions_after_thread_switch",
+      "type": "test failure with exit code 101",
+      "seconds": 0.147,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::realtime_requests::completed_voice_caption_survives_repeated_thread_replacement",
+      "type": "test failure with exit code 101",
+      "seconds": 0.153,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::realtime_requests::replay_reconciles_only_matching_voice_captions_one_for_one",
+      "type": "test failure with exit code 101",
+      "seconds": 0.122,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::realtime_requests::switching_threads_keeps_the_source_voice_partial_only_on_reattach",
+      "type": "test failure with exit code 101",
+      "seconds": 0.149,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::session_lifecycle_requests::changing_directory_preserves_project_trust_permissions_history_and_hooks",
+      "type": "test abort",
+      "seconds": 18.181,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::session_lifecycle_requests::delete_current_thread_navigates_only_after_success",
+      "type": "test abort",
+      "seconds": 5.339,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::session_lifecycle_requests::managed_worktree_transitions_bind_owner_and_preserve_only_fork_history",
+      "type": "test abort",
+      "seconds": 16.051,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::session_lifecycle_requests::remote_legacy_history_start_negotiates_once_for_resume_and_fork",
+      "type": "test abort",
+      "seconds": 8.009,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::session_lifecycle_requests::same_thread_retry_keeps_subscription_and_restores_draft",
+      "type": "test abort",
+      "seconds": 9.399,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::tests::startup_frame_tests::owned_startup_hides_tip_in_transcript",
+      "type": "test failure with exit code 101",
+      "seconds": 0.111,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "app::turn_tips::tests::turn_tip_placements_and_completion_barrier",
+      "type": "test failure with exit code 101",
+      "seconds": 0.315,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "chatwidget::tests::status_and_layout::daybreak_refusal_offers_enable_for_the_next_turn",
+      "type": "test failure with exit code 101",
+      "seconds": 0.065,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "custom_terminal::tests::cursor::terminal_draw_omits_cursor_style_without_an_owned_glyph",
+      "type": "test failure with exit code 101",
+      "seconds": 0.037,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "custom_terminal::tests::cursor::terminal_draw_repairs_owned_wide_hyperlink_after_skipped_glyphs",
+      "type": "test failure with exit code 101",
+      "seconds": 0.062,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "custom_terminal::tests::cursor::terminal_draw_repairs_single_column_without_scrolling",
+      "type": "test failure with exit code 101",
+      "seconds": 0.096,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "custom_terminal::tests::cursor::terminal_draw_repairs_styled_anchor_on_cursor_only_frames",
+      "type": "test failure with exit code 101",
+      "seconds": 0.029,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "history_cell::tests::pnpm_update_available_history_cell_snapshot",
+      "type": "test failure with exit code 101",
+      "seconds": 0.058,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "history_cell::tests::standalone_unix_update_available_history_cell_snapshot",
+      "type": "test failure with exit code 101",
+      "seconds": 0.055,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "history_cell::tests::standalone_windows_update_available_history_cell_snapshot",
+      "type": "test failure with exit code 101",
+      "seconds": 0.058,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "session_start::tests::archived_session_requires_confirmation_before_resume_or_fork",
+      "type": "test abort",
+      "seconds": 9.878,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "startup_draft::layout::tests::owned_startup_keeps_the_live_bottom_geometry",
+      "type": "test failure with exit code 101",
+      "seconds": 0.069,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_cached_limits_hide_credits_without_flag",
+      "type": "test failure with exit code 101",
+      "seconds": 0.078,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_includes_credits_and_limits",
+      "type": "test failure with exit code 101",
+      "seconds": 0.075,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_includes_enterprise_monthly_credit_limit",
+      "type": "test failure with exit code 101",
+      "seconds": 0.078,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_includes_forked_from",
+      "type": "test failure with exit code 101",
+      "seconds": 0.075,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_includes_monthly_limit",
+      "type": "test failure with exit code 101",
+      "seconds": 0.075,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_includes_reasoning_details",
+      "type": "test failure with exit code 101",
+      "seconds": 0.076,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_shows_active_user_defined_profile",
+      "type": "test failure with exit code 101",
+      "seconds": 0.077,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_shows_auto_review_permissions",
+      "type": "test failure with exit code 101",
+      "seconds": 0.075,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_shows_chatgpt_plan_without_email",
+      "type": "test failure with exit code 101",
+      "seconds": 0.223,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_shows_missing_limits_message",
+      "type": "test failure with exit code 101",
+      "seconds": 0.075,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_shows_refreshing_limits_notice",
+      "type": "test failure with exit code 101",
+      "seconds": 0.075,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_shows_stale_limits_message",
+      "type": "test failure with exit code 101",
+      "seconds": 0.076,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_shows_unavailable_limits_message",
+      "type": "test failure with exit code 101",
+      "seconds": 0.074,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_uses_default_reasoning_when_config_empty",
+      "type": "test failure with exit code 101",
+      "seconds": 0.075,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_uses_generic_limit_labels_for_unsupported_windows",
+      "type": "test failure with exit code 101",
+      "seconds": 0.076,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_wraps_halfwidth_kana_in_narrow_terminal",
+      "type": "test failure with exit code 101",
+      "seconds": 0.077,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_snapshot_wraps_in_narrow_terminal",
+      "type": "test failure with exit code 101",
+      "seconds": 0.074,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::status_uses_server_provider_id_and_auth_requirement",
+      "type": "test failure with exit code 101",
+      "seconds": 0.074,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "status::tests::transcript_overlay_remeasures_status_after_rate_limit_refresh",
+      "type": "test failure with exit code 101",
+      "seconds": 0.087,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "tests::startup_resume_and_fork_use_configured_or_explicit_cwd",
+      "type": "test abort",
+      "seconds": 10.958,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "update_prompt::tests::long_update_command_keeps_selected_skip_visible_in_a_short_viewport",
+      "type": "test failure with exit code 101",
+      "seconds": 0.063,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-tui",
+      "test": "update_prompt::tests::update_prompt_snapshot",
+      "type": "test failure with exit code 101",
+      "seconds": 0.057,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-uds",
+      "test": "lib_tests::private_directory_acl_is_user_only_and_inherited_by_files",
+      "type": "test failure with exit code 101",
+      "seconds": 0.404,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-uds",
+      "test": "lib_tests::socket_validation_rejects_broad_acl_without_repairing_it",
+      "type": "test failure with exit code 101",
+      "seconds": 0.343,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-v8-poc",
+      "test": "tests::sandbox_feature_matches_linked_v8",
+      "type": "test failure with exit code 101",
+      "seconds": 0.022,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-windows-sandbox",
+      "test": "unified_exec::tests::legacy_capture_cancellation_terminates_descendants_without_timeout",
+      "type": "test failure with exit code 101",
+      "seconds": 32.013,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-windows-sandbox",
+      "test": "unified_exec::tests::legacy_capture_emits_output_and_preserves_descendant_after_normal_exit",
+      "type": "test failure with exit code 101",
+      "seconds": 11.846,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-windows-sandbox",
+      "test": "unified_exec::tests::legacy_tty_job_terminates_and_preserves_descendants",
+      "type": "test failure with exit code 101",
+      "seconds": 12.144,
+      "failed_retries": 1
+    },
+    {
+      "binary": "codex-windows-sandbox",
+      "test": "unified_exec::tests::legacy_workspace_write_delete_is_limited_to_writable_roots",
+      "type": "test failure with exit code 101",
+      "seconds": 0.251,
+      "failed_retries": 1
+    }
+  ]
+}
