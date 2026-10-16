@@ -57,7 +57,7 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
-use core_test_support::test_codex::local_selections;
+use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -918,7 +918,7 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     core_test_support::submit_thread_settings(
         &conversation,
         ThreadSettingsOverrides {
-            environments: Some(local_selections(override_cwd.clone())),
+            environments: Some(local_requests(override_cwd.clone())),
             collaboration_mode: Some(CollaborationMode {
                 mode: ModeKind::Default,
                 settings: Settings {

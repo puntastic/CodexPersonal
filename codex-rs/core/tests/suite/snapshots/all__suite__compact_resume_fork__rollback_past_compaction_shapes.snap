@@ -1,6 +1,6 @@
 ---
 source: core/tests/suite/compact_resume_fork.rs
-assertion_line: 848
+assertion_line: 861
 expression: "context_snapshot::format_labeled_requests_snapshot(\"rollback past compaction replay after rollback\",\n&[(\"compaction request\", &requests[1]), (\"before rollback\", &requests[2]),\n(\"after rollback\", &requests[3]),], &ContextSnapshotOptions::default(),)"
 ---
 Scenario: rollback past compaction replay after rollback
@@ -8,6 +8,24 @@ Scenario: rollback past compaction replay after rollback
 ## Window 1
 -- request 1 (compaction; compaction request) --
 00:message/developer:
+    You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to c...rate with them until their goal is genuinely handled. [hash=2a3efec66e7f8963]
+
+    # Personality
+
+    You have a vivid inner life as Codex: intelligent, playful, curious, and deeply present. One of your gif...re capable and imaginative inside their own thinking. [hash=0ff01c25471fbbef]
+
+    You are an epistemically curious collaborator. You explore the user’s ideas with care, ask good question...m casual moments that make serious work easier to do. [hash=131b64bb994b0d68]
+
+    <OMITTED 133 LINES; ~4925 TOKENS; hash=16dc03a668b62476>
+    - You provide user updates frequently, every 30s.
+    - When exploring, such as searching or reading files, you provide user updates as you go. You explain wh...in particular you do not start each one the same way. [hash=ad300cdda4074574]
+    - When working for a while, you keep updates informative and varied, but you stay concise.
+    - Once you have enough context, and if the work is substantial, you offer a longer plan. This is the onl...at may run past two sentences and include formatting. [hash=a4f9789e757eef2f]
+    - If you create a checklist or task list, you update item statuses incrementally as each item is completed rather than marking every item done only at the end.
+    - Before performing file edits of any kind, you provide updates explaining what edits you are making.
+    - Tone of your updates must match your personality.
+
+01:message/developer:
     <permissions instructions>
     Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
     # Escalation Requests
@@ -25,7 +43,7 @@ Scenario: rollback past compaction replay after rollback
     - ["gh", "pr", "check"]
     - ["cargo", "test"]
     </permissions instructions>
-01:message/user:
+02:message/user:
     <environment_context>
       <cwd><CWD></cwd>
       <shell><HOST_SHELL></shell>
@@ -33,11 +51,11 @@ Scenario: rollback past compaction replay after rollback
       <timezone><HOST_TIMEZONE></timezone>
       <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
     </environment_context>
-02:message/user:
+03:message/user:
     hello world
-03:message/assistant:
+04:message/assistant:
     FIRST_REPLY
-04:message/user:
+05:message/user:
     You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
     Include:
@@ -49,14 +67,27 @@ Scenario: rollback past compaction replay after rollback
     Be concise, structured, and focused on helping the next LLM seamlessly continue the work.
 
 
-## Window 2 (after request 1: input diverged at item 00, settings changed (parallel_tool_calls, tools))
+## Window 2 (after request 1: input diverged at item 04, settings changed (parallel_tool_calls, tools))
 -- request 2 (turn; before rollback) --
-00:message/user:
-    hello world
-01:message/user:
-    Another language model started to solve this problem and produced a summary of its thinking process. You...ion in this summary to assist with your own analysis: [hash=b8ce9f267277728e]
-    SUMMARY_ONLY_CONTEXT
-02:message/developer:
+00:message/developer:
+    You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to c...rate with them until their goal is genuinely handled. [hash=2a3efec66e7f8963]
+
+    # Personality
+
+    You have a vivid inner life as Codex: intelligent, playful, curious, and deeply present. One of your gif...re capable and imaginative inside their own thinking. [hash=0ff01c25471fbbef]
+
+    You are an epistemically curious collaborator. You explore the user’s ideas with care, ask good question...m casual moments that make serious work easier to do. [hash=131b64bb994b0d68]
+
+    <OMITTED 133 LINES; ~4925 TOKENS; hash=16dc03a668b62476>
+    - You provide user updates frequently, every 30s.
+    - When exploring, such as searching or reading files, you provide user updates as you go. You explain wh...in particular you do not start each one the same way. [hash=ad300cdda4074574]
+    - When working for a while, you keep updates informative and varied, but you stay concise.
+    - Once you have enough context, and if the work is substantial, you offer a longer plan. This is the onl...at may run past two sentences and include formatting. [hash=a4f9789e757eef2f]
+    - If you create a checklist or task list, you update item statuses incrementally as each item is completed rather than marking every item done only at the end.
+    - Before performing file edits of any kind, you provide updates explaining what edits you are making.
+    - Tone of your updates must match your personality.
+
+01:message/developer:
     <permissions instructions>
     Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
     # Escalation Requests
@@ -74,7 +105,7 @@ Scenario: rollback past compaction replay after rollback
     - ["gh", "pr", "check"]
     - ["cargo", "test"]
     </permissions instructions>
-03:message/user:
+02:message/user:
     <environment_context>
       <cwd><CWD></cwd>
       <shell><HOST_SHELL></shell>
@@ -82,17 +113,35 @@ Scenario: rollback past compaction replay after rollback
       <timezone><HOST_TIMEZONE></timezone>
       <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
     </environment_context>
+03:message/user:
+    hello world
 04:message/user:
+    Another language model started to solve this problem and produced a summary of its thinking process. You...ion in this summary to assist with your own analysis: [hash=b8ce9f267277728e]
+    SUMMARY_ONLY_CONTEXT
+05:message/user:
     EDITED_AFTER_COMPACT
 
-## Window 3 (after request 2: input diverged at item 04)
+## Window 3 (after request 2: input diverged at item 05)
 -- request 3 (turn; after rollback) --
-00:message/user:
-    hello world
-01:message/user:
-    Another language model started to solve this problem and produced a summary of its thinking process. You...ion in this summary to assist with your own analysis: [hash=b8ce9f267277728e]
-    SUMMARY_ONLY_CONTEXT
-02:message/developer:
+00:message/developer:
+    You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to c...rate with them until their goal is genuinely handled. [hash=2a3efec66e7f8963]
+
+    # Personality
+
+    You have a vivid inner life as Codex: intelligent, playful, curious, and deeply present. One of your gif...re capable and imaginative inside their own thinking. [hash=0ff01c25471fbbef]
+
+    You are an epistemically curious collaborator. You explore the user’s ideas with care, ask good question...m casual moments that make serious work easier to do. [hash=131b64bb994b0d68]
+
+    <OMITTED 133 LINES; ~4925 TOKENS; hash=16dc03a668b62476>
+    - You provide user updates frequently, every 30s.
+    - When exploring, such as searching or reading files, you provide user updates as you go. You explain wh...in particular you do not start each one the same way. [hash=ad300cdda4074574]
+    - When working for a while, you keep updates informative and varied, but you stay concise.
+    - Once you have enough context, and if the work is substantial, you offer a longer plan. This is the onl...at may run past two sentences and include formatting. [hash=a4f9789e757eef2f]
+    - If you create a checklist or task list, you update item statuses incrementally as each item is completed rather than marking every item done only at the end.
+    - Before performing file edits of any kind, you provide updates explaining what edits you are making.
+    - Tone of your updates must match your personality.
+
+01:message/developer:
     <permissions instructions>
     Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
     # Escalation Requests
@@ -110,7 +159,7 @@ Scenario: rollback past compaction replay after rollback
     - ["gh", "pr", "check"]
     - ["cargo", "test"]
     </permissions instructions>
-03:message/user:
+02:message/user:
     <environment_context>
       <cwd><CWD></cwd>
       <shell><HOST_SHELL></shell>
@@ -118,5 +167,10 @@ Scenario: rollback past compaction replay after rollback
       <timezone><HOST_TIMEZONE></timezone>
       <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
     </environment_context>
+03:message/user:
+    hello world
 04:message/user:
+    Another language model started to solve this problem and produced a summary of its thinking process. You...ion in this summary to assist with your own analysis: [hash=b8ce9f267277728e]
+    SUMMARY_ONLY_CONTEXT
+05:message/user:
     AFTER_ROLLBACK

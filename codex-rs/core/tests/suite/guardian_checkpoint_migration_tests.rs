@@ -1,5 +1,5 @@
 //! Checkpoint replay preserves retained evidence across migration and independent review rollback.
-//! A retired managed opt-out cannot disable capture or later checkpoint promotion.
+//! Explicit parent-checkpoint reuse still requires compatible provenance before promotion.
 
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use std::sync::Arc;
@@ -197,7 +197,8 @@ pub(super) async fn migration_scenario() -> Result<Vec<responses::ResponsesReque
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
 [features]
-"guardianv2.thread_context" = false
+"guardianv2.thread_context" = true
+guardian_reuse_parent_compaction = true
 "#,
             ),
         )
@@ -225,6 +226,17 @@ pub(super) async fn migration_scenario() -> Result<Vec<responses::ResponsesReque
         })
         .build_with_auto_env(&server)
         .await?;
+    assert!(test.config.features.enabled(Feature::GuardianThreadContext));
+    assert!(
+        test.config
+            .features
+            .enabled(Feature::GuardianReuseParentCompaction)
+    );
+    let initial_history = test.codex.conversation_history_snapshot().await;
+    assert_eq!(
+        GuardianContextMode::from_history(initial_history.as_ref()),
+        GuardianContextMode::ThreadOwned,
+    );
     let compact = |id: &str| {
         responses::sse(vec![
             json!({"type": "response.output_item.done", "item": {

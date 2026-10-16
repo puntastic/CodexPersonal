@@ -1,6 +1,6 @@
 ---
 source: core/tests/suite/compact_resume_fork.rs
-assertion_line: 976
+assertion_line: 989
 expression: "context_snapshot::format_labeled_requests_snapshot(\"rollback trims pre-turn override context updates before the follow-up request\",\n&[(\"rolled-back turn request\", &requests[1]),\n(\"follow-up request after rollback\", &requests[2]),],\n&ContextSnapshotOptions::default(),)"
 ---
 Scenario: rollback trims pre-turn override context updates before the follow-up request
@@ -8,6 +8,24 @@ Scenario: rollback trims pre-turn override context updates before the follow-up 
 ## Window 1
 -- request 1 (turn; rolled-back turn request) --
 00:message/developer:
+    You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open...I. You are expected to be precise, safe, and helpful. [hash=5125daec1ed78d99]
+
+    Your capabilities:
+
+    - Receive user prompts and other context provided by the harness, such as files in the workspace.
+    - Communicate with the user by streaming thinking & responses, and by making & updating plans.
+    - Emit function calls to run terminal commands and apply patches. Depending on how this specific run is ... More on this in the "Sandbox and approvals" section. [hash=31cf026fa7b25d6d]
+
+    <OMITTED 260 LINES; ~4847 TOKENS; hash=c814b9b2a524e0e2>
+    A tool named `update_plan` is available to you. You can use it to keep an up‑to‑date, step‑by‑step plan for the task.
+
+    To create a new plan, call `update_plan` with a short list of 1‑sentence steps (no more than 5-7 words e...each step (`pending`, `in_progress`, or `completed`). [hash=3c54fbd6da4a42f8]
+
+    When steps have been completed, use `update_plan` to mark each finished step as `completed` and the next...ple items as complete in a single `update_plan` call. [hash=ae7fb7911db8769f]
+
+    If all steps are complete, ensure you call `update_plan` to mark all steps as `completed`.
+
+01:message/developer:
     <permissions instructions>
     Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
     # Escalation Requests
@@ -25,7 +43,7 @@ Scenario: rollback trims pre-turn override context updates before the follow-up 
     - ["gh", "pr", "check"]
     - ["cargo", "test"]
     </permissions instructions>
-01:message/user:
+02:message/user:
     <environment_context>
       <cwd><CWD></cwd>
       <shell><HOST_SHELL></shell>
@@ -33,13 +51,13 @@ Scenario: rollback trims pre-turn override context updates before the follow-up 
       <timezone><HOST_TIMEZONE></timezone>
       <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
     </environment_context>
-02:message/user:
+03:message/user:
     turn 1 user
-03:message/assistant:
+04:message/assistant:
     turn 1 assistant
-04:message/developer:
+05:message/developer:
     <collaboration_mode>ROLLED_BACK_DEV_INSTRUCTIONS</collaboration_mode>
-05:message/user:
+06:message/user:
     <environment_context>
       <cwd><CWD>/PRETURN_CONTEXT_DIFF_CWD</cwd>
       <shell><HOST_SHELL></shell>
@@ -47,12 +65,30 @@ Scenario: rollback trims pre-turn override context updates before the follow-up 
       <timezone><HOST_TIMEZONE></timezone>
       <filesystem><workspace_roots><root><CWD>/PRETURN_CONTEXT_DIFF_CWD</root></workspace_roots><permission_...ntry></file_system></permission_profile></filesystem> [hash=078446faebf69a7f]
     </environment_context>
-06:message/user:
+07:message/user:
     turn 2 user
 
-## Window 2 (after request 1: input diverged at item 06)
+## Window 2 (after request 1: input diverged at item 07)
 -- request 2 (turn; follow-up request after rollback) --
 00:message/developer:
+    You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open...I. You are expected to be precise, safe, and helpful. [hash=5125daec1ed78d99]
+
+    Your capabilities:
+
+    - Receive user prompts and other context provided by the harness, such as files in the workspace.
+    - Communicate with the user by streaming thinking & responses, and by making & updating plans.
+    - Emit function calls to run terminal commands and apply patches. Depending on how this specific run is ... More on this in the "Sandbox and approvals" section. [hash=31cf026fa7b25d6d]
+
+    <OMITTED 260 LINES; ~4847 TOKENS; hash=c814b9b2a524e0e2>
+    A tool named `update_plan` is available to you. You can use it to keep an up‑to‑date, step‑by‑step plan for the task.
+
+    To create a new plan, call `update_plan` with a short list of 1‑sentence steps (no more than 5-7 words e...each step (`pending`, `in_progress`, or `completed`). [hash=3c54fbd6da4a42f8]
+
+    When steps have been completed, use `update_plan` to mark each finished step as `completed` and the next...ple items as complete in a single `update_plan` call. [hash=ae7fb7911db8769f]
+
+    If all steps are complete, ensure you call `update_plan` to mark all steps as `completed`.
+
+01:message/developer:
     <permissions instructions>
     Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
     # Escalation Requests
@@ -70,7 +106,7 @@ Scenario: rollback trims pre-turn override context updates before the follow-up 
     - ["gh", "pr", "check"]
     - ["cargo", "test"]
     </permissions instructions>
-01:message/user:
+02:message/user:
     <environment_context>
       <cwd><CWD></cwd>
       <shell><HOST_SHELL></shell>
@@ -78,13 +114,13 @@ Scenario: rollback trims pre-turn override context updates before the follow-up 
       <timezone><HOST_TIMEZONE></timezone>
       <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
     </environment_context>
-02:message/user:
+03:message/user:
     turn 1 user
-03:message/assistant:
+04:message/assistant:
     turn 1 assistant
-04:message/developer:
+05:message/developer:
     <collaboration_mode>ROLLED_BACK_DEV_INSTRUCTIONS</collaboration_mode>
-05:message/user:
+06:message/user:
     <environment_context>
       <cwd><CWD>/PRETURN_CONTEXT_DIFF_CWD</cwd>
       <shell><HOST_SHELL></shell>
@@ -92,5 +128,5 @@ Scenario: rollback trims pre-turn override context updates before the follow-up 
       <timezone><HOST_TIMEZONE></timezone>
       <filesystem><workspace_roots><root><CWD>/PRETURN_CONTEXT_DIFF_CWD</root></workspace_roots><permission_...ntry></file_system></permission_profile></filesystem> [hash=078446faebf69a7f]
     </environment_context>
-06:message/user:
+07:message/user:
     follow-up user

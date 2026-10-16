@@ -18,6 +18,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::turn_input::TurnInput;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::LoadThreadHistoryParams;
@@ -153,7 +154,14 @@ async fn delegated_input_survives_compaction_and_cold_resume(
     let sender = test
         .thread_manager
         .start_thread(StartThreadOptions {
-            environments: Some(test.codex.environment_selections().await),
+            environments: Some(
+                test.codex
+                    .environment_selections()
+                    .await
+                    .into_iter()
+                    .map(TurnEnvironmentSelection::into_request)
+                    .collect(),
+            ),
             ..StartThreadOptions::new(test.config.clone())
         })
         .await?;
