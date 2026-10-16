@@ -2,8 +2,6 @@
 
 use super::*;
 use app_test_support::create_final_assistant_message_sse_response as assistant_response;
-use codex_app_server_protocol::CodexErrorInfo;
-use codex_app_server_protocol::GuardianWarningNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
@@ -20,9 +18,9 @@ use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadSourceKind;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::ThreadUnsubscribeResponse;
-use codex_app_server_protocol::TurnError;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
+use codex_app_server_protocol::WarningNotification;
 use codex_protocol::protocol::SubAgentSource;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
@@ -63,8 +61,7 @@ enum ReviewEnding {
 }
 
 #[tokio::test]
-async fn circuit_break_action_preserves_warning_and_reports_error_in_live_and_saved_turns()
--> Result<()> {
+async fn circuit_break_action_preserves_warning_and_completes_live_and_saved_turns() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     for action in [None, Some("default"), Some("strict")] {
@@ -79,8 +76,8 @@ async fn circuit_break_action_preserves_warning_and_reports_error_in_live_and_sa
                 replies.push(vec![StreamingSseChunk { gate: None, body }]);
             }
         }
-        // Keep a racing parent request from completing before the interruption.
-        let (_continue_parent, parent_gate) = oneshot::channel();
+        // Keep the parent active until the approval-lane closure is observed.
+        let (continue_parent, parent_gate) = oneshot::channel();
         replies.push(vec![StreamingSseChunk {
             gate: Some(parent_gate),
             body: assistant_response("Done.")?,
@@ -115,35 +112,32 @@ async fn circuit_break_action_preserves_warning_and_reports_error_in_live_and_sa
                 },
             })
             .await?;
-        // Individual denials also emit Guardian warnings before the circuit breaker.
+        // Individual denials emit Guardian warnings; lane closure is an ordinary warning.
         let warning = timeout(TIMEOUT, async {
             loop {
-                let warning: GuardianWarningNotification =
-                    app.read_notification("guardianWarning").await?;
-                assert_eq!(warning.thread_id, thread.id);
+                let warning: WarningNotification = app.read_notification("warning").await?;
                 if warning.message.contains("3 consecutive") {
+                    assert_eq!(warning.thread_id.as_deref(), Some(thread.id.as_str()));
                     break Ok::<_, anyhow::Error>(warning);
                 }
             }
         })
         .await??;
+        assert!(warning.message.contains("turn remains active"));
+        continue_parent
+            .send(())
+            .expect("parent continuation should remain available after lane closure");
         let completed: TurnCompletedNotification =
             timeout(TIMEOUT, app.read_notification("turn/completed")).await??;
-        let expected_error = (action == Some("strict")).then_some(TurnError {
-            message: warning.message,
-            codex_error_info: Some(CodexErrorInfo::TooManyDenials),
-            additional_details: None,
-            misalignment: None,
-        });
         assert_eq!(completed.thread_id, thread.id);
         assert_eq!(completed.turn.id, started.turn.id);
-        assert_eq!(completed.turn.status, TurnStatus::Interrupted);
-        assert_eq!(completed.turn.error, expected_error);
+        assert_eq!(completed.turn.status, TurnStatus::Completed);
+        assert_eq!(completed.turn.error, None);
         assert!(
             !app.pending_notification_methods()
                 .iter()
                 .any(|method| method == "error"),
-            "the error must be carried by the interrupted turn, not a separate notification"
+            "approval-lane closure must not emit a separate turn error"
         );
         app.shutdown_gracefully().await?;
 
@@ -161,10 +155,10 @@ async fn circuit_break_action_preserves_warning_and_reports_error_in_live_and_sa
                 },
             })
             .await?;
-        let saved = read.thread.turns.last().expect("saved interrupted turn");
+        let saved = read.thread.turns.last().expect("saved completed turn");
         assert_eq!(saved.id, completed.turn.id);
         assert_eq!(saved.status, completed.turn.status);
-        assert_eq!(saved.error, expected_error);
+        assert_eq!(saved.error, None);
         app.shutdown_gracefully().await?;
         mcp_server.abort();
         server.shutdown().await;

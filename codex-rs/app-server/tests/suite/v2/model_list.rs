@@ -39,7 +39,7 @@ use wiremock::matchers::path;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 
-#[test_case(None, None, true; "default on")]
+#[test_case(None, None, true; "default off")]
 #[test_case(None, Some(false), true; "app rollback")]
 #[test_case(None, Some(true), true; "app rollout")]
 #[test_case(Some(false), Some(true), true; "user opt out")]
@@ -134,7 +134,8 @@ requires_openai_auth = true
             },
         })
         .await?;
-    let enabled = user_enablement.or(app_enablement).unwrap_or(true) && catalog_opt_in;
+    // This fork preserves explicit activation; availability alone is not opt-in.
+    let enabled = user_enablement.or(app_enablement).unwrap_or(false) && catalog_opt_in;
     let expected: &[ModelPreset] = if enabled {
         &remote
     } else if catalog_opt_in {
@@ -151,8 +152,8 @@ requires_openai_auth = true
             next_cursor: None,
         }
     );
-    // Only startup opt-outs prevent fetches before the app sends its enablement.
-    if user_enablement == Some(false) || !catalog_opt_in {
+    // Disabled discovery or a missing catalog must not make a catalog request.
+    if !enabled {
         assert!(
             server
                 .received_requests()

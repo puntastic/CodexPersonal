@@ -24,6 +24,7 @@ pub struct PreparedGuardianContext {
     context: GuardianReviewContext,
     config: Config,
     context_policy: ReviewContextPolicy,
+    has_retained_context: bool,
     key: GuardianReviewSessionReuseKey,
     parent_compaction: Option<ResponseItem>,
     reviewer_selection: ReviewerSelection,
@@ -43,8 +44,9 @@ impl PreparedGuardianContext {
         if reset_version != history.reset_version {
             history_reset.cancel();
         }
-        let context_mode =
-            GuardianContextMode::from_history(history.conversation_history_snapshot().as_ref());
+        let snapshot = history.conversation_history_snapshot();
+        let context_mode = GuardianContextMode::from_history(snapshot.as_ref());
+        let has_retained_context = snapshot.retained_context().is_some();
         let context_policy = ReviewContextPolicy::for_context(context_mode, &config.features);
         let root_review_version = context_policy.root_review_version(&parent).await;
         let parent_compaction = context_policy.parent_compaction(history)?;
@@ -68,6 +70,7 @@ impl PreparedGuardianContext {
             context,
             config,
             context_policy,
+            has_retained_context,
             key,
             parent_compaction,
             reviewer_selection: ReviewerSelection::ReuseIfAvailable,
@@ -89,6 +92,30 @@ impl PreparedGuardianContext {
             // Without a decryptable summary, the existing reviewer may hold the
             // only remaining authorization or restriction from parent history.
             key.align_summary_free_parent_history(&previous.reuse_key);
+        }
+        if self.context_policy == ReviewContextPolicy::LegacyWithCheckpointReuse
+            && !self.has_retained_context
+            && let Some(parent) = self.parent_compaction.as_ref()
+            && let Some(previous) = previous
+            && let Ok(state) = previous.state.try_lock()
+            && state.transcript_source == Some(GuardianTranscriptSource::LoadedParentCheckpoint)
+            && state.conversation.cursor().is_some()
+            && let Some(snapshot) = state.conversation.snapshot()
+            && snapshot.history().transcript_source
+                == Some(GuardianTranscriptSource::LoadedParentCheckpoint)
+            && let [RolloutItem::Compacted(compacted), ..] =
+                snapshot.history().initial_history.get_rollout_items()
+            && let Some(loaded) = compacted
+                .replacement_history
+                .as_deref()
+                .and_then(codex_history::CompactionCheckpoint::latest)
+            && loaded.is_usable()
+            && loaded.item == parent
+        {
+            // Only a committed review of this exact checkpoint proves the backup was
+            // unused. Keep all parent/reset/authority/config keys; normalize just the
+            // unused backup generation. Missing or busy state keeps normal invalidation.
+            key.review_history_version = previous.reuse_key.review_history_version;
         }
         key
     }

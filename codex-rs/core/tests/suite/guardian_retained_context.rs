@@ -300,6 +300,16 @@ async fn streamed_question_precedes_reply_across_resume(
                 .disable(Feature::InstantInterrupt)
                 .expect("disable InstantInterrupt feature");
             config.experimental_thread_store = ThreadStoreConfig::Local;
+            // This fixture inspects thread-owned retained evidence, not the default mode.
+            for feature in [
+                Feature::GuardianThreadContext,
+                Feature::GuardianReuseParentCompaction,
+            ] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("exercise thread-owned retained evidence");
+            }
         })
         .build_with_streaming_server(&server)
         .await?;
@@ -684,6 +694,16 @@ async fn legacy_checkpoint_recovers_root_excerpt_before_discarding_backup(
         .with_config(|config| {
             config.experimental_thread_store = ThreadStoreConfig::Local;
 
+            // Legacy checkpoint migration is into thread-owned retained evidence.
+            for feature in [
+                Feature::GuardianThreadContext,
+                Feature::GuardianReuseParentCompaction,
+            ] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("exercise thread-owned retained evidence");
+            }
             config
                 .features
                 .disable(Feature::TokenBudget)
@@ -813,6 +833,8 @@ async fn standalone_fork_retains_inherited_user_instructions(
             config.model_provider.name = "Local compaction test provider".to_owned();
             for feature in [
                 Feature::GuardianApproval,
+                Feature::GuardianThreadContext,
+                Feature::GuardianReuseParentCompaction,
                 Feature::Collab,
                 Feature::MultiAgentV2,
                 Feature::DefaultModeRequestUserInput,
@@ -1020,7 +1042,13 @@ async fn forked_parent_instructions_do_not_become_local_authorization(
             config.experimental_thread_store = ThreadStoreConfig::Local;
             config.update_plan_enabled = true;
             config.multi_agent_v2.preserve_fork_prefix = preserve_fork_prefix;
-            for feature in [Feature::TokenBudget, Feature::Collab, Feature::MultiAgentV2] {
+            for feature in [
+                Feature::TokenBudget,
+                Feature::GuardianThreadContext,
+                Feature::GuardianReuseParentCompaction,
+                Feature::Collab,
+                Feature::MultiAgentV2,
+            ] {
                 config
                     .features
                     .enable(feature)
@@ -1248,6 +1276,8 @@ async fn retained_answers_cross_real_session_boundaries(
             config.multi_agent_v2.preserve_fork_prefix = preserve_fork_prefix;
             for feature in [
                 Feature::TokenBudget,
+                Feature::GuardianThreadContext,
+                Feature::GuardianReuseParentCompaction,
                 Feature::DefaultModeRequestUserInput,
                 Feature::Collab,
                 Feature::MultiAgentV2,

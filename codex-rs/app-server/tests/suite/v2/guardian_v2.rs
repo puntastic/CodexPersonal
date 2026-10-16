@@ -922,6 +922,16 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         }
         GuardianToolScope::ComputerUseOnly { .. } => "",
     };
+    // These scenarios opt into retained context and root-evidence invalidation.
+    // Keep the setting in the existing table, not a preceding dotted feature key.
+    let guardian_context_config = if mixed_evidence
+        || review_continuations
+        || matches!(lifecycle, ThreadLifecycle::RootUserInputCompaction)
+    {
+        "\nthread_context = true"
+    } else {
+        ""
+    };
     let tool_approval_mode = if node_repl_review_required {
         "auto"
     } else {
@@ -940,7 +950,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             analytics_server.uri(),
         ))
         .with_extra_config(&format!(
-            "[mcp_servers.{server_name}]\nurl = \"{mcp_server_url}/mcp\"\ndefault_tools_approval_mode = \"{tool_approval_mode}\"\n\n[analytics]\nenabled = true\n\n[otel]\nmetrics_exporter = {{ otlp-http = {{ endpoint = \"{responses_url}/metrics\", protocol = \"json\" }} }}\n\n[features.guardianv2]\nenabled = true\nasync_classifier_mode = \"{classifier_mode}\"{guardian_scope_config}"
+            "[mcp_servers.{server_name}]\nurl = \"{mcp_server_url}/mcp\"\ndefault_tools_approval_mode = \"{tool_approval_mode}\"\n\n[analytics]\nenabled = true\n\n[otel]\nmetrics_exporter = {{ otlp-http = {{ endpoint = \"{responses_url}/metrics\", protocol = \"json\" }} }}\n\n[features.guardianv2]\nenabled = true{guardian_context_config}\nasync_classifier_mode = \"{classifier_mode}\"{guardian_scope_config}"
         ))
         .enable_feature(Feature::GuardianApproval);
     if lifecycle.has_user_input() || lifecycle.has_root_user_input() {

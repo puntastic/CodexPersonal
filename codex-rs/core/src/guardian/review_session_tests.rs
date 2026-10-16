@@ -507,6 +507,185 @@ async fn summary_free_reuse_requires_unchanged_review_history() {
     assert_ne!(review_evidence_changed, cached);
 }
 
+#[derive(Clone, Copy)]
+enum CheckpointReuseCase {
+    Loaded,
+    RetainedFallback,
+    LiveSourceChanged,
+    CommittedSourceChanged,
+    MissingLoadedCheckpoint,
+    DifferentLoadedCheckpoint,
+    MissingParentCheckpoint,
+    UnusableParentCheckpoint,
+    Uncommitted,
+    ResetCursor,
+    Busy,
+    RetainedMigrationFallback,
+    ThreadOwned,
+    Independent,
+    ParentChanged,
+    ParentReset,
+    RootAuthorityChanged,
+}
+
+#[test_case::test_case(CheckpointReuseCase::Loaded; "loaded checkpoint")]
+#[test_case::test_case(CheckpointReuseCase::RetainedFallback; "raw fallback")]
+#[test_case::test_case(CheckpointReuseCase::LiveSourceChanged; "live source changed")]
+#[test_case::test_case(CheckpointReuseCase::CommittedSourceChanged; "committed source changed")]
+#[test_case::test_case(CheckpointReuseCase::MissingLoadedCheckpoint; "checkpoint not loaded")]
+#[test_case::test_case(CheckpointReuseCase::DifferentLoadedCheckpoint; "different loaded checkpoint")]
+#[test_case::test_case(CheckpointReuseCase::MissingParentCheckpoint; "checkpoint unavailable")]
+#[test_case::test_case(CheckpointReuseCase::UnusableParentCheckpoint; "latest checkpoint unusable")]
+#[test_case::test_case(CheckpointReuseCase::Uncommitted; "uncommitted review")]
+#[test_case::test_case(CheckpointReuseCase::ResetCursor; "reviewer context reset")]
+#[test_case::test_case(CheckpointReuseCase::Busy; "state unavailable")]
+#[test_case::test_case(CheckpointReuseCase::RetainedMigrationFallback; "retained migration fallback")]
+#[test_case::test_case(CheckpointReuseCase::ThreadOwned; "thread owned authority")]
+#[test_case::test_case(CheckpointReuseCase::Independent; "independent authority")]
+#[test_case::test_case(CheckpointReuseCase::ParentChanged; "parent window changed")]
+#[test_case::test_case(CheckpointReuseCase::ParentReset; "parent history reset")]
+#[test_case::test_case(CheckpointReuseCase::RootAuthorityChanged; "root authority changed")]
+#[tokio::test]
+async fn checkpoint_reuse_ignores_only_unselected_backup_generation(case: CheckpointReuseCase) {
+    let mut params = test_review_params().await;
+    params
+        .spawn_config
+        .features
+        .enable(Feature::GuardianReuseParentCompaction)
+        .expect("exercise checkpoint reuse");
+    let mode = match case {
+        CheckpointReuseCase::RetainedMigrationFallback | CheckpointReuseCase::ThreadOwned => {
+            GuardianContextMode::ThreadOwned
+        }
+        CheckpointReuseCase::Independent => GuardianContextMode::Independent,
+        _ => GuardianContextMode::Legacy,
+    };
+    let checkpoint: ResponseItem = serde_json::from_value(serde_json::json!({
+        "type": "compaction", "id": "checkpoint", "encrypted_content": "parent checkpoint"
+    }))
+    .expect("checkpoint fixture");
+    params.parent_history = ContextManager::with_guardian_context_mode(mode, &SessionSource::Cli);
+    if !matches!(case, CheckpointReuseCase::MissingParentCheckpoint) {
+        let mut items = vec![checkpoint.clone().into()];
+        if matches!(case, CheckpointReuseCase::UnusableParentCheckpoint) {
+            // A malformed latest checkpoint must not select the earlier valid one.
+            items.push(
+                serde_json::from_value::<ResponseItem>(serde_json::json!({
+                    "type": "compaction", "encrypted_content": "missing original id"
+                }))
+                .expect("unusable checkpoint")
+                .into(),
+            );
+        }
+        params
+            .parent_history
+            .replace_compacted(items, /*reviewer_compaction_hash*/ None);
+    }
+    if matches!(case, CheckpointReuseCase::RetainedMigrationFallback) {
+        let backup = codex_history::GuardianHistoryCheckpoint(vec![checkpoint.clone().into()]);
+        params.parent_history.restore_review_context(
+            /*retained_context*/ None,
+            Some(&backup),
+            Some("different-producer"),
+        );
+        let snapshot = params.parent_history.conversation_history_snapshot();
+        assert_eq!(
+            GuardianContextMode::from_history(snapshot.as_ref()),
+            GuardianContextMode::Legacy,
+        );
+        assert!(snapshot.retained_context().is_some());
+    }
+    let prepared = setup::prepare_review(params).await.expect("prepare review");
+    let current_key = prepared.context(/*previous*/ None);
+    let (mut reviewer, _, _) = test_review_session().await;
+    reviewer.reuse_key = current_key.clone();
+    // Only the backup generation differs unless the case adds another invalidator.
+    reviewer.reuse_key.review_history_version += 1;
+    match case {
+        CheckpointReuseCase::ParentChanged => reviewer.reuse_key.parent_history_version += 1,
+        CheckpointReuseCase::ParentReset => reviewer.reuse_key.parent_reset_version += 1,
+        CheckpointReuseCase::RootAuthorityChanged => {
+            reviewer.reuse_key.root_review_version = Some((
+                crate::codex_thread::GuardianAuthorizationVersion {
+                    user_message_revision: 1,
+                    retained_context_complete: true,
+                },
+                1,
+            ));
+        }
+        _ => {}
+    }
+    let source = if matches!(case, CheckpointReuseCase::RetainedFallback) {
+        GuardianTranscriptSource::Retained
+    } else {
+        GuardianTranscriptSource::LoadedParentCheckpoint
+    };
+    let loaded = match case {
+        CheckpointReuseCase::MissingLoadedCheckpoint => Vec::new(),
+        CheckpointReuseCase::DifferentLoadedCheckpoint => {
+            vec![serde_json::from_value::<ResponseItem>(serde_json::json!({
+                "type": "compaction", "id": "checkpoint", "encrypted_content": "different payload"
+            }))
+            .expect("different checkpoint")]
+        }
+        _ => vec![checkpoint],
+    };
+    let state = reviewer.state.get_mut();
+    state.transcript_source = Some(if matches!(case, CheckpointReuseCase::LiveSourceChanged) {
+        GuardianTranscriptSource::Retained
+    } else {
+        source
+    });
+    state
+        .conversation
+        .complete_review(GuardianTranscriptCursor {
+            parent_history_version: current_key.parent_history_version,
+            transcript_entry_count: 1,
+        });
+    if !matches!(case, CheckpointReuseCase::Uncommitted) {
+        state.conversation.commit_snapshot(GuardianReviewHistory {
+            initial_history: InitialHistory::Forked(vec![
+                serde_json::from_value(serde_json::json!({
+                    "type": "compacted", "payload": {
+                        "message": "", "replacement_history": loaded
+                    }
+                }))
+                .expect("self-contained committed reviewer history"),
+            ]),
+            transcript_source: Some(
+                if matches!(case, CheckpointReuseCase::CommittedSourceChanged) {
+                    GuardianTranscriptSource::Retained
+                } else {
+                    source
+                },
+            ),
+            last_admitted_node_repl_response_sequence: 0,
+        });
+    }
+    if matches!(case, CheckpointReuseCase::ResetCursor) {
+        state.conversation.reset_transcript();
+    }
+    let _busy = matches!(case, CheckpointReuseCase::Busy)
+        .then(|| reviewer.state.try_lock().expect("hold reviewer state"));
+    let actual_key = prepared.context(Some(&reviewer));
+    let mut expected_key = current_key;
+    if matches!(
+        case,
+        CheckpointReuseCase::Loaded
+            | CheckpointReuseCase::ParentChanged
+            | CheckpointReuseCase::ParentReset
+            | CheckpointReuseCase::RootAuthorityChanged
+    ) {
+        expected_key.review_history_version = reviewer.reuse_key.review_history_version;
+    }
+    assert_eq!(actual_key, expected_key);
+    if matches!(case, CheckpointReuseCase::Loaded) {
+        assert_eq!(actual_key, reviewer.reuse_key);
+    } else {
+        assert_ne!(actual_key, reviewer.reuse_key);
+    }
+}
+
 #[test_case::test_case(GuardianContextMode::ThreadOwned; "thread owned")]
 #[test_case::test_case(GuardianContextMode::Legacy; "legacy checkpoint")]
 #[test_case::test_case(GuardianContextMode::Independent; "independent ignores checkpoint")]

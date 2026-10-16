@@ -286,18 +286,28 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
         .with_extra_config(&format!(
             "[mcp_servers.{TEST_SERVER_NAME}]\nurl = \"{mcp_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[features.guardianv2]\nenabled = true\nthread_context = {thread_context_enabled}\npersist_scores = true\nreuse_parent_compaction = {reuse_parent_compaction}\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
         ));
-    // The host feature selects checkpoint-based versus independent reviewer history.
-    // Luna retains its separately configured checkpoint-reuse gate.
+    // The Legacy cases exercise the raw transcript path without host checkpoint reuse;
+    // ThreadOwned cases exercise parent checkpoints. Luna keeps its separate reuse gate.
     mock_config = match context_path {
-        ContextPath::Legacy | ContextPath::ThreadOwned => {
+        ContextPath::ThreadOwned => {
             mock_config.enable_feature(Feature::GuardianReuseParentCompaction)
         }
-        ContextPath::Independent => {
+        ContextPath::Legacy | ContextPath::Independent => {
             mock_config.disable_feature(Feature::GuardianReuseParentCompaction)
         }
     };
     mock_config.write(codex_home.path())?;
     let config = load_default_config_for_test(&codex_home).await;
+    assert_eq!(
+        config.features.enabled(Feature::GuardianThreadContext),
+        thread_context_enabled
+    );
+    assert_eq!(
+        config
+            .features
+            .enabled(Feature::GuardianReuseParentCompaction),
+        matches!(context_path, ContextPath::ThreadOwned)
+    );
     let models = [
         (MODEL, parent_hash),
         ("gpt-5.6-luna", luna_hash),
@@ -556,7 +566,10 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
             let review = &reviews[index];
             let sync_input = review["input"].as_array().expect("request input array");
             let async_input = request["input"].as_array().expect("request input array");
-            assert_eq!(sync_input.contains(&checkpoint), index > 0 && !independent);
+            assert_eq!(
+                sync_input.contains(&checkpoint),
+                index > 0 && matches!(context_path, ContextPath::ThreadOwned)
+            );
             assert_eq!(
                 async_input.contains(&checkpoint),
                 index > 0 && compatible && !independent,

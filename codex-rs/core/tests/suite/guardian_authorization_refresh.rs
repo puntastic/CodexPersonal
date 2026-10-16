@@ -4,6 +4,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
+use codex_core::context::GuardianContextMode;
 use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -142,6 +143,17 @@ async fn guardian_refreshes_subagent_authorization(change: Change) -> Result<()>
                     .enable(feature)
                     .expect("enable test feature");
             }
+            if matches!(change, Change::RootReset) {
+                for feature in [
+                    Feature::GuardianThreadContext,
+                    Feature::GuardianReuseParentCompaction,
+                ] {
+                    config
+                        .features
+                        .enable(feature)
+                        .expect("exercise root history promotion");
+                }
+            }
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
             config
@@ -153,17 +165,29 @@ async fn guardian_refreshes_subagent_authorization(change: Change) -> Result<()>
         .await?;
     if matches!(change, Change::RootReset) {
         test.codex.ensure_rollout_materialized().await;
-        test.codex = super::guardian_checkpoint_migration::resume(
-            &test,
-            &test.codex,
-            vec![RolloutItem::Compacted(serde_json::from_value(json!({
+        test.codex
+            .append_rollout_items(&[RolloutItem::Compacted(serde_json::from_value(json!({
                 "message": "old checkpoint",
                 "replacement_history": [{
                     "type": "compaction", "id": "old", "encrypted_content": "unknown producer"
                 }]
-            }))?)],
-        )
-        .await?;
+            }))?)])
+            .await?;
+        // Resume the durable checkpoint together with its canonical session metadata.
+        let history =
+            super::guardian_checkpoint_migration::saved_history(&test, &test.codex).await?;
+        test.codex =
+            super::guardian_checkpoint_migration::resume(&test, &test.codex, history).await?;
+        let history = test.codex.conversation_history_snapshot().await;
+        assert_eq!(
+            (
+                GuardianContextMode::from_history(history.as_ref()),
+                history
+                    .latest_compaction()
+                    .and_then(|checkpoint| checkpoint.model_hash),
+            ),
+            (GuardianContextMode::Legacy, None),
+        );
     }
     let mut created = test.thread_manager.subscribe_thread_created();
     test.codex
@@ -229,6 +253,16 @@ async fn guardian_refreshes_subagent_authorization(change: Change) -> Result<()>
                     matches!(event, EventMsg::TurnComplete(_))
                 })
                 .await;
+                let history = test.codex.conversation_history_snapshot().await;
+                assert_eq!(
+                    (
+                        GuardianContextMode::from_history(history.as_ref()),
+                        history
+                            .latest_compaction()
+                            .and_then(|checkpoint| checkpoint.model_hash),
+                    ),
+                    (GuardianContextMode::ThreadOwned, Some("compatible")),
+                );
             } else {
                 test.submit_text_turn(&message).await?;
                 latest_message = Some(message);

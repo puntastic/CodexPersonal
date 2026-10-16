@@ -897,7 +897,8 @@ trust_level = "trusted"
         })
         .context("retained failed checkout")?;
     assert!(
-        output.contains(&format!(
+        // Compare the checkout identity independently of terminal soft wrapping.
+        output.replace(['\r', '\n'], "").contains(&format!(
             "{:?}",
             Path::new(&retained.replace('/', std::path::MAIN_SEPARATOR_STR))
         )),
