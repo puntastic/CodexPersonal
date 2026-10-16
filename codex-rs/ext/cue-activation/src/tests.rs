@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::models::ImageReference;
 use pretty_assertions::assert_eq;
 
 const FIXTURE: &str = include_str!("../tests/fixtures/synthetic-cues.json");
@@ -134,14 +135,18 @@ fn task_context_keeps_two_substantive_requests_and_two_turn_cooldown() {
     }]);
     assert!(!attachment.represented && select_candidate(&fixture(), &attachment, true).is_none());
     let image_only = runtime.query(&[UserInput::Image {
-        image_url: "data:image/png;base64,AA==".into(),
+        image: ImageReference::Inline {
+            image_url: "data:image/png;base64,AA==".into(),
+        },
         detail: None,
     }]);
     assert!(!image_only.represented && select_candidate(&fixture(), &image_only, true).is_none());
     let text_and_image = runtime.query(&[
         text(POSITIVE).remove(0),
         UserInput::Image {
-            image_url: "data:image/png;base64,AA==".into(),
+            image: ImageReference::Inline {
+                image_url: "data:image/png;base64,AA==".into(),
+            },
             detail: None,
         },
     ]);

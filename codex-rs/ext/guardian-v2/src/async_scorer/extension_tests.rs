@@ -519,7 +519,11 @@ impl RecordingSynchronousReviewer {
 }
 
 impl SynchronousApprovalReviewer for RecordingSynchronousReviewer {
-    fn review(&self, reason: GuardianReviewReason) -> ExtensionFuture<'_, Option<ReviewDecision>> {
+    fn review<'a>(
+        &'a self,
+        reason: GuardianReviewReason,
+        _async_approval: Option<ExtensionFuture<'a, ()>>,
+    ) -> ExtensionFuture<'a, Option<ReviewDecision>> {
         self.reasons.lock().expect("review reasons").push(reason);
         let result = self.result.clone();
         Box::pin(async move { Some(result) })

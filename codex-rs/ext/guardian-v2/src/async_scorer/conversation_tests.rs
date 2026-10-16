@@ -318,9 +318,18 @@ async fn concurrent_requests_retain_only_the_newest_completed_history() -> Resul
     skip_if_no_network!(Ok(()));
     for older_outcome in ["completed", "cancelled"] {
         let fixture = GuardianFailureFixture::with_config(
-            "[features.guardianv2]\nasync_classifier_mode = 'conversation'",
+            "[features.guardianv2]\nasync_classifier_mode = 'conversation'\nthread_context = true",
         )
         .await?;
+        assert!(
+            fixture
+                .test
+                .codex
+                .conversation_history_snapshot()
+                .await
+                .retained_context()
+                .is_some()
+        );
         let mut streams = ["seed", "older", "newer", "unretained", "probe"]
             .map(|label| {
                 vec![StreamingSseChunk {
