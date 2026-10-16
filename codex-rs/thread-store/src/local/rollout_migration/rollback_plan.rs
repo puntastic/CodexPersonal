@@ -215,10 +215,11 @@ impl RollbackPlan {
             && let RolloutItem::Compacted(compacted) = &mut line.item
             && let Some(metadata) = &mut compacted.resume_metadata
         {
-            // Rewritten history cannot attest to its old last-started turn or prior settings.
+            // Rewritten history cannot attest to its old last-started turn, attribution, or settings.
             // Preserve the checkpoint-local contract and runtime selection, but do not allow
             // removed-turn metadata to authorize a continuation after migration drops markers.
             metadata.last_started_turn_id = None;
+            metadata.turn_attribution = None;
             metadata.previous_turn_settings = None;
         }
 

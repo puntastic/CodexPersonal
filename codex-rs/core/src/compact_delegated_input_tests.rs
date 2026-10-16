@@ -45,6 +45,8 @@ fn delivery(text: &str) -> ResponseItemEnvelope {
 
 fn message(role: &str, text: &str) -> ResponseItemEnvelope {
     ResponseItemEnvelope::new(ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: None,
         role: role.to_owned(),
         content: vec![ContentItem::InputText {

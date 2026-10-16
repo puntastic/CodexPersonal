@@ -23,7 +23,7 @@ impl AsyncManagedClient {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.reconnect_in_flight {
+            if state.reconnect_in_flight.is_some() {
                 return McpConnectionStatusObservation {
                     status: Status::Starting,
                     startup_error: None,

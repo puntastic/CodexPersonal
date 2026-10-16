@@ -73,6 +73,12 @@ impl<H: ReviewHost> ReviewRequest<'_, H> {
         mut self,
         registry: &ExtensionRegistry<C>,
     ) -> Option<ReviewDecision> {
+        // Include fast decisions and cancellation while retaining the fork's
+        // captured authority policy and approval-lane-only circuit breaker.
+        let _decision_timer = self
+            .telemetry
+            .start_timer("codex.guardian.decision.duration_ms", &[])
+            .ok();
         // Full Access neither consults review policy nor reads or mutates the breaker.
         if self.full_access {
             return Some(ReviewDecision::Approved);
@@ -148,10 +154,18 @@ impl<H: ReviewHost> ReviewRequest<'_, H> {
                     Some(self.cached_approval().await)
                 }
                 Some(ApprovalDecision::Allow) => {
-                    self.review(GuardianReviewReason::FreshRequired).await
+                    self.review(
+                        GuardianReviewReason::FreshRequired,
+                        /*async_approval*/ None,
+                    )
+                    .await
                 }
                 None | Some(ApprovalDecision::AskUser) if input.require_fresh_review => {
-                    self.review(GuardianReviewReason::FreshRequired).await
+                    self.review(
+                        GuardianReviewReason::FreshRequired,
+                        /*async_approval*/ None,
+                    )
+                    .await
                 }
                 Some(ApprovalDecision::AskUser) if !self.require_guardian => None,
                 None if !self.require_guardian
@@ -163,7 +177,8 @@ impl<H: ReviewHost> ReviewRequest<'_, H> {
                     None
                 }
                 None | Some(ApprovalDecision::AskUser) => {
-                    self.review(GuardianReviewReason::Policy).await
+                    self.review(GuardianReviewReason::Policy, /*async_approval*/ None)
+                        .await
                 }
             }
         };
@@ -193,7 +208,7 @@ impl<H: ReviewHost> ReviewRequest<'_, H> {
         }
     }
 
-    async fn cached_approval(&self) -> ReviewDecision {
+    pub(super) async fn cached_approval(&self) -> ReviewDecision {
         let (turn_id, item_id) = match self.host.validate_action() {
             Ok(target) => target,
             Err(decision) => return decision,

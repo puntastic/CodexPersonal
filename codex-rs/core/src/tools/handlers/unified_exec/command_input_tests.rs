@@ -1,7 +1,6 @@
 use super::*;
 use crate::shell::default_user_shell;
 use crate::tools::handlers::unified_exec::get_command;
-use codex_tools::UnifiedExecShellMode;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
@@ -25,7 +24,6 @@ fn direct_argv_preserves_literal_arguments_without_a_shell() -> anyhow::Result<(
     let resolved = get_command(
         &args,
         Arc::new(default_user_shell()),
-        &UnifiedExecShellMode::Direct,
         /*allow_login_shell*/ true,
     )
     .map_err(anyhow::Error::msg)?;
@@ -50,7 +48,6 @@ fn ambiguous_or_invalid_execution_requests_fail_before_launch() -> anyhow::Resul
             get_command(
                 &args,
                 Arc::new(default_user_shell()),
-                &UnifiedExecShellMode::Direct,
                 /*allow_login_shell*/ true
             )
             .is_err()

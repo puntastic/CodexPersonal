@@ -1,17 +1,14 @@
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::Shell;
 use crate::shell::ShellInvocation;
-use crate::shell::ShellType;
 use crate::shell::get_shell;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::PostToolUsePayload;
-use codex_exec_server::Environment;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_shell_command::shell_detect::detect_shell_type;
-use codex_tools::UnifiedExecShellMode;
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -107,17 +104,10 @@ fn post_unified_exec_tool_use_payload(
 pub(crate) fn get_command(
     args: &ExecCommandArgs,
     session_shell: Arc<Shell>,
-    shell_mode: &UnifiedExecShellMode,
     allow_login_shell: bool,
 ) -> Result<ResolvedCommand, String> {
     let script = match args.input()? {
         CommandInput::Argv(argv) => {
-            if !matches!(shell_mode, UnifiedExecShellMode::Direct) {
-                return Err(
-                    "direct argv is unavailable with zsh-fork; use cmd for that execution mode"
-                        .to_string(),
-                );
-            }
             return Ok(ResolvedCommand {
                 command: argv.to_vec(),
                 shell: None,
@@ -135,34 +125,19 @@ pub(crate) fn get_command(
         None => allow_login_shell,
     };
 
-    let shell = match shell_mode {
-        UnifiedExecShellMode::Direct => {
-            let model_shell = args
-                .shell
-                .as_ref()
-                .map(|shell_str| {
-                    let shell_type = detect_shell_type(Path::new(shell_str)).ok_or_else(|| {
-                        "unsupported requested shell type; supported types are bash, zsh, sh, powershell and cmd".to_string()
-                    })?;
-                    get_shell(shell_type).ok_or_else(|| {
-                        format!("requested {} shell is unavailable; no command was executed", shell_type.name())
-                    })
-                })
-                .transpose()?;
-            model_shell.unwrap_or_else(|| session_shell.as_ref().clone())
-        }
-        UnifiedExecShellMode::ZshFork(zsh_fork_config) => {
-            if args.shell.is_some() {
-                return Err(
-                    "`shell` is not supported for local zsh-fork exec; omit `shell` to use zsh-fork, or target a remote environment where `shell` is supported.".to_string(),
-                );
-            }
-            Shell {
-                shell_type: ShellType::Zsh,
-                shell_path: zsh_fork_config.shell_zsh_path.as_path().to_path_buf(),
-            }
-        }
-    };
+    let model_shell = args
+        .shell
+        .as_ref()
+        .map(|shell_str| {
+            let shell_type = detect_shell_type(Path::new(shell_str)).ok_or_else(|| {
+                "unsupported requested shell type; supported types are bash, zsh, sh, powershell and cmd".to_string()
+            })?;
+            get_shell(shell_type).ok_or_else(|| {
+                format!("requested {} shell is unavailable; no command was executed", shell_type.name())
+            })
+        })
+        .transpose()?;
+    let shell = model_shell.unwrap_or_else(|| session_shell.as_ref().clone());
     Ok(ResolvedCommand {
         command: shell.derive_exec_args(script, use_login_shell),
         shell: Some(ShellInvocation {
@@ -170,17 +145,6 @@ pub(crate) fn get_command(
             use_login_shell,
         }),
     })
-}
-
-pub(crate) fn shell_mode_for_environment(
-    turn_shell_mode: &UnifiedExecShellMode,
-    environment: &Environment,
-) -> UnifiedExecShellMode {
-    if environment.is_remote() {
-        UnifiedExecShellMode::Direct
-    } else {
-        turn_shell_mode.clone()
-    }
 }
 
 #[cfg(test)]

@@ -10,8 +10,9 @@ use opentelemetry_sdk::metrics::data::MetricData;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 
-#[test]
-fn records_bounded_spawn_phase_metrics() {
+#[test_case::test_case(SpawnAgentForkMode::FullHistory, "all"; "full history")]
+#[test_case::test_case(SpawnAgentForkMode::LastNTurns(3), "last_n"; "last turns")]
+fn records_bounded_spawn_phase_metrics(fork_mode: SpawnAgentForkMode, expected_fork_label: &str) {
     let metrics = MetricsClient::new(
         MetricsConfig::in_memory(
             "test",
@@ -39,7 +40,7 @@ fn records_bounded_spawn_phase_metrics() {
 
     record_spawn_success(
         &telemetry,
-        Some(&SpawnAgentForkMode::LastNTurns(3)),
+        Some(&fork_mode),
         MultiAgentVersion::V2,
         SpawnMeasurements {
             history_mode: ThreadHistoryMode::Paginated,
@@ -74,7 +75,7 @@ fn records_bounded_spawn_phase_metrics() {
                 })
                 .collect::<BTreeMap<_, _>>();
             assert_eq!(attributes.len(), 5);
-            assert_eq!(attributes["fork_mode"], "last_n");
+            assert_eq!(attributes["fork_mode"], expected_fork_label);
             assert_eq!(attributes["history_mode"], "paginated");
             assert_eq!(attributes["multi_agent_version"], "v2");
             assert_eq!(attributes["product_sku"], "codex");

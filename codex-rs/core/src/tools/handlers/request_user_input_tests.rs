@@ -183,11 +183,17 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
         .expect("request_user_input handler should succeed");
     assert!(output.success_for_logging());
     let history = session.conversation_history_snapshot().await;
+    // Legacy review still retains verified answers without enabling retained
+    // instruction delivery or parent-checkpoint reuse.
+    assert!(history.retained_context().is_none());
+    assert!(!history.uses_parent_context_for_review());
     let RenderedVerifiedAnswers {
         fragments,
         complete,
     } = codex_guardian_context::render_verified_answers(
-        history.retained_context().expect("host context snapshot"),
+        history
+            .verified_answer_context()
+            .expect("verified answer snapshot"),
     );
     let expected_fragments = expected
         .fragments
@@ -208,6 +214,10 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
         .services
         .thread_extension_data
         .get_or_init(GuardianReviewEvidence::default);
+    assert_eq!(
+        evidence.user_input_snapshot(history.as_ref()).fragments,
+        expected_fragments,
+    );
     let has_answer = matches!(&answer, Some(("pick_one", answer)) if !answer.trim().is_empty());
     assert_eq!(
         evidence.authorization_version(history.as_ref()),

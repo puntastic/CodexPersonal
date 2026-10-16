@@ -218,26 +218,20 @@ async fn revert_preserves_refs_v1_and_resolves_bounded_model_context() {
         root_turn_id: None,
         disabled_plugin_ids: None,
         cwd: serde_json::from_value(serde_json::json!(home.path())).expect("absolute cwd"),
-        workspace_roots: None,
-        current_date: None,
-        timezone: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: None,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         permission_profile: None,
         active_permission_profile: None,
-        network: None,
         file_system_sandbox_policy: None,
         model: "test-model".to_string(),
         comp_hash: None,
-        personality: None,
         collaboration_mode: None,
         multi_agent_version: None,
-        multi_agent_mode: None,
         realtime_active: None,
         cyber_access_program: None,
         effort: None,
-        summary: ReasoningSummary::Auto,
+        summary: Some(ReasoningSummary::Auto),
     });
     let selected_checkpoint = RolloutItem::Compacted(CompactedItem {
         message: "selected checkpoint".to_string(),
@@ -525,6 +519,7 @@ async fn turn_ids(store: &LocalThreadStore, thread_id: ThreadId) -> Vec<String> 
 
 fn turn_started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+        turn_attribution: None,
         turn_id: turn_id.to_string(),
         root_turn_id: None,
         trace_id: None,
@@ -536,6 +531,7 @@ fn turn_started(turn_id: &str) -> RolloutItem {
 
 fn turn_completed(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+        root_turn_id: None,
         turn_id: turn_id.to_string(),
         last_agent_message: None,
         error: None,
@@ -549,6 +545,8 @@ fn turn_completed(turn_id: &str) -> RolloutItem {
 fn source_response(item_id: &str, text: &str) -> RolloutItem {
     RolloutItem::ResponseItem(
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: Some(ResponseItemId::from_server(item_id.to_string())),
             role: "user".to_string(),
             content: vec![ContentItem::InputText {

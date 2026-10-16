@@ -7,7 +7,6 @@ use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
-use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -21,9 +20,13 @@ fn response_item(item: ResponseItem) -> RolloutItem {
 
 fn user_msg(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: text.to_string(),
         }],
         phase: None,
@@ -33,9 +36,13 @@ fn user_msg(text: &str) -> ResponseItem {
 
 fn assistant_msg(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: text.to_string(),
         }],
         phase: None,
@@ -45,6 +52,8 @@ fn assistant_msg(text: &str) -> ResponseItem {
 
 fn developer_msg(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "developer".to_string(),
         content: vec![ContentItem::InputText {
@@ -78,6 +87,7 @@ fn inter_agent_communication(text: &str, trigger_turn: bool) -> RolloutItem {
 
 fn turn_started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+        turn_attribution: None,
         turn_id: turn_id.to_string(),
         root_turn_id: None,
         trace_id: None,
@@ -89,6 +99,7 @@ fn turn_started(turn_id: &str) -> RolloutItem {
 
 fn turn_completed(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+        root_turn_id: None,
         turn_id: turn_id.to_string(),
         started_at: None,
         last_agent_message: None,
@@ -278,6 +289,8 @@ fn truncates_rollout_from_start_before_nth_user_only() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             call_id: "c1".to_string(),
             name: "tool".to_string(),
@@ -367,10 +380,11 @@ async fn ignores_session_prefix_messages_when_truncating_rollout_from_start() {
     let turn_context = Arc::new(turn_context);
     let world_state = build_world_state_from_turn_context(&session, &turn_context).await;
     let step_context = StepContext::for_test(turn_context);
-    let mut items = session
+    let updates = session
         .build_initial_context_with_world_state(&step_context, &world_state)
         .await
         .0;
+    let mut items = crate::context_manager::updates::merge_world_state_updates(updates);
     items.push(user_msg("feature request"));
     items.push(assistant_msg("ack"));
     items.push(user_msg("second question"));

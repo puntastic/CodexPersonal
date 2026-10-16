@@ -14,6 +14,8 @@ mod auth_storage_originator;
 mod auto_env;
 #[path = "bedrock_gov_cloud_tests.rs"]
 mod bedrock_gov_cloud;
+#[path = "bedrock_service_tier_tests.rs"]
+mod bedrock_service_tier;
 mod bedrock_setup;
 mod client_metadata;
 mod code_mode_host;
@@ -52,6 +54,8 @@ mod exec_server_test_support;
 #[cfg(not(target_os = "windows"))]
 mod executor_mcp;
 mod executor_skills;
+#[path = "executor_skills_spawn_tests.rs"]
+mod executor_skills_spawn;
 mod experimental_api;
 mod experimental_feature_list;
 mod external_agent_config;
@@ -101,6 +105,7 @@ mod plugin_search;
 mod plugin_share;
 mod plugin_uninstall;
 mod process_exec;
+mod project_peer_messages;
 mod projects;
 mod rate_limit_reset_credits;
 mod rate_limits;
@@ -147,6 +152,7 @@ mod thread_name_persistence;
 mod thread_name_websocket;
 mod thread_queue;
 mod thread_read;
+mod thread_read_state;
 mod thread_resume;
 mod thread_revert;
 mod thread_rollback;
@@ -157,12 +163,12 @@ mod thread_start;
 mod thread_status;
 mod thread_timeline;
 mod thread_unarchive;
+mod thread_unload;
 mod thread_unsubscribe;
 mod turn_cost_otel;
 mod turn_interrupt;
 mod turn_settings_update;
 mod turn_start;
-mod turn_start_zsh_fork;
 mod turn_steer;
 mod view_image;
 mod web_search;

@@ -1,7 +1,6 @@
 //! Genuine sender context stays reviewer-only and is replaced on every delivery.
 
 use anyhow::Result;
-use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
 use codex_features::Feature;
@@ -46,10 +45,7 @@ async fn guardian_receives_sender_user_messages_with_thread_context(
     let sender = test.session_configured.thread_id;
     let receiver = test
         .thread_manager
-        .start_thread(StartThreadOptions {
-            environments: Some(test.codex.environment_selections().await),
-            ..StartThreadOptions::new(test.config.clone())
-        })
+        .start_thread(test.start_thread_options().await)
         .await?
         .thread;
     let done = || responses::sse(vec![responses::ev_completed("done")]);

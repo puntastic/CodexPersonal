@@ -15,6 +15,8 @@ use pretty_assertions::assert_eq;
 
 fn source_envelope(id: &str, text: &str) -> ResponseItemEnvelope {
     ResponseItemEnvelope::new(ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: Some(ResponseItemId::from_server(id.to_string())),
         role: "developer".to_string(),
         content: vec![ContentItem::InputText {

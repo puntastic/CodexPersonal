@@ -267,6 +267,8 @@ mod tests {
             MigrationOccurrenceIds::new(rollout_id, HashSet::from([reserved_id.to_string()]));
         let mut item = RolloutItem::ResponseItem(
             ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {

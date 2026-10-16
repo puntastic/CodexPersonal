@@ -1,0 +1,28 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-project-peer-messages"
+version.workspace = true
+
+[lib]
+name = "codex_project_peer_messages"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-extension-api = { workspace = true }
+codex-protocol = { workspace = true }
+codex-tools = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

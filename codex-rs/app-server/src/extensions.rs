@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::time::Duration;
@@ -32,6 +33,7 @@ use crate::thread_state::ThreadListenerCommand;
 use crate::thread_state::ThreadStateManager;
 
 pub(crate) struct ThreadExtensionDependencies {
+    pub(crate) codex_home: PathBuf,
     pub(crate) event_sink: Arc<dyn ExtensionEventSink>,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) state_db: Option<StateDbHandle>,
@@ -51,6 +53,7 @@ pub(crate) fn thread_extensions(
     dependencies: ThreadExtensionDependencies,
 ) -> Arc<ExtensionRegistry<Config>> {
     let ThreadExtensionDependencies {
+        codex_home,
         event_sink,
         auth_manager,
         state_db,
@@ -73,6 +76,15 @@ pub(crate) fn thread_extensions(
     }
     codex_history_notes_extension::install(&mut builder, auth_manager.clone());
     codex_core::install_agent_message_board(&mut builder, thread_manager.clone());
+    match codex_project_peer_messages::process_policy(&codex_home) {
+        Ok(Some(policy)) => {
+            let host =
+                codex_core::project_peer_message_host(thread_manager.clone(), Arc::clone(&policy));
+            codex_project_peer_messages::install(&mut builder, policy, host);
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "native peer messages disabled until host restart"),
+    }
     if let Some(state_db) = state_db {
         codex_goal_extension::install_with_backend(
             &mut builder,

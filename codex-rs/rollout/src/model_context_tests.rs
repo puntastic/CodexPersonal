@@ -246,6 +246,7 @@ fn explicit_empty_resume_metadata_owns_its_companion_boundary() {
         compacted.resume_metadata = Some(codex_history::CompactionResumeMetadata {
             multi_agent_version: None,
             last_started_turn_id: None,
+            turn_attribution: None,
             previous_turn_settings: None,
         });
         assert_eq!(
@@ -601,6 +602,8 @@ fn top_level_large_response(item_id: &str, text_len: usize) -> RolloutItem {
 
 fn response_with_text(item_id: &str, text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: Some(ResponseItemId::from_server(item_id.to_string())),
         role: "developer".to_string(),
         content: vec![ContentItem::InputText {
@@ -629,26 +632,20 @@ fn turn_context() -> RolloutItem {
         root_turn_id: None,
         disabled_plugin_ids: None,
         cwd: AbsolutePathBuf::from_absolute_path(cwd).expect("absolute current directory"),
-        workspace_roots: None,
-        current_date: None,
-        timezone: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: None,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         permission_profile: None,
         active_permission_profile: None,
-        network: None,
         file_system_sandbox_policy: None,
         model: "test-model".to_string(),
         comp_hash: None,
-        personality: None,
         collaboration_mode: None,
         multi_agent_version: None,
-        multi_agent_mode: None,
         realtime_active: None,
         cyber_access_program: None,
         effort: None,
-        summary: ReasoningSummary::Auto,
+        summary: Some(ReasoningSummary::Auto),
     })
 }
 
@@ -669,6 +666,7 @@ fn agent_message() -> RolloutItem {
 
 fn turn_started() -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+        turn_attribution: None,
         turn_id: "turn-1".to_string(),
         root_turn_id: None,
         trace_id: None,

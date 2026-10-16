@@ -23,6 +23,7 @@ use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout::CompactedHistoryResolver;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -304,12 +305,7 @@ impl LegacyRolloutCanonicalizer {
                     }
                 } else {
                     let item = RolloutItem::EventMsg(event);
-                    if codex_rollout::is_persisted_rollout_item(
-                        &item,
-                        ThreadHistoryMode::PaginatedRefsV1,
-                    ) {
-                        self.write_item(writer, &timestamp, item).await?;
-                    }
+                    self.write_item(writer, &timestamp, item).await?;
                 }
             }
             item @ RolloutItem::InterAgentCommunication(_) => {
@@ -387,6 +383,7 @@ impl LegacyRolloutCanonicalizer {
             writer,
             timestamp,
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_attribution: None,
                 turn_id,
                 root_turn_id: None,
                 trace_id: None,
@@ -416,6 +413,7 @@ impl LegacyRolloutCanonicalizer {
             writer,
             timestamp,
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id,
                 last_agent_message: None,
                 error: None,
@@ -519,9 +517,17 @@ impl LegacyRolloutCanonicalizer {
         &mut self,
         writer: &mut BufWriter<File>,
         timestamp: &str,
-        mut item: RolloutItem,
+        item: RolloutItem,
         compaction_resolution: CompactionResolution,
     ) -> ThreadStoreResult<()> {
+        let mut item = match codex_rollout::persisted_rollout_item(
+            &item,
+            ThreadHistoryMode::PaginatedRefsV1,
+        ) {
+            Some(Cow::Borrowed(_)) => item,
+            Some(Cow::Owned(item)) => item,
+            None => return Ok(()),
+        };
         let (is_history_checkpoint, is_guardian_only_checkpoint) = match &item {
             RolloutItem::Compacted(compacted) => {
                 let is_history_checkpoint = compacted.replacement_history.is_some()

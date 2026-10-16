@@ -560,7 +560,7 @@ unsafe fn ensure_allow_mask_aces_with_inheritance_impl(
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
                 .open(path)
-                .context("open ACL target for root-only update")?,
+                .context("open ACL target for root-only update (MAXIMUM_ALLOWED)")?,
         )
     } else {
         None
@@ -660,7 +660,7 @@ unsafe fn ensure_allow_mask_aces_with_inheritance_impl(
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
                 .open(path)
-                .context("open ACL target for update")?,
+                .context("open ACL target for update (READ_CONTROL | WRITE_DAC)")?,
         };
         let code3 = SetSecurityInfo(
             handle.as_raw_handle() as _,
@@ -910,7 +910,8 @@ unsafe fn add_deny_ace(path: &Path, psid: *mut c_void, kind: DenyAceKind) -> Res
             if deny_ace_already_present(&read_handle, path, psid, kind)? {
                 return Ok(false);
             }
-            return Err(write_error).context("open deny ACL target for update");
+            return Err(write_error)
+                .context("open deny ACL target for update (READ_CONTROL | WRITE_DAC)");
         }
     };
     if matches!(kind, DenyAceKind::Read) {
@@ -1104,9 +1105,9 @@ pub unsafe fn allow_null_device(psid: *mut c_void) {
         std::ptr::null_mut(),
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL,
-        0,
+        std::ptr::null_mut(),
     );
-    if h == 0 || h == INVALID_HANDLE_VALUE {
+    if h.is_null() || h == INVALID_HANDLE_VALUE {
         return;
     }
     let mut p_sd: *mut c_void = std::ptr::null_mut();

@@ -20,6 +20,8 @@ use super::compacted_history::retained_checkpoint_reference_item_ids;
 
 fn message(id: &str, text: &str) -> ResponseItemEnvelope {
     ResponseItemEnvelope::new(ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: Some(ResponseItemId::with_suffix("msg", id)),
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
