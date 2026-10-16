@@ -8,6 +8,7 @@ use crate::PeerSendRequest;
 use crate::RefusalReason;
 use codex_protocol::ThreadId;
 use codex_tools::FunctionCallError;
+use codex_tools::JsonSchema;
 use codex_tools::JsonToolOutput;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolCall;
@@ -16,9 +17,9 @@ use codex_tools::ToolExecutorFuture;
 use codex_tools::ToolName;
 use codex_tools::ToolOutput;
 use codex_tools::ToolSpec;
-use codex_tools::parse_tool_input_schema;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 const MAX_ARGUMENT_BYTES: usize = 32 * 1024;
@@ -80,21 +81,46 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PeerTool {
     }
 
     fn spec(&self) -> ToolSpec {
-        let parameters = json!({
-            "type":"object", "additionalProperties":false,
-            "properties":{
-                "recipient_id":{"type":"string","enum":self.policy.recipients(self.caller)},
-                "message":{"type":"string","description":"Nonempty text, at most 4096 UTF-8 bytes; never truncated."},
-                "delivery":{"type":"string","enum":["active_turn","idle_turn"]}
-            },
-            "required":["recipient_id","message","delivery"]
-        });
+        let parameters = JsonSchema::object(
+            BTreeMap::from([
+                (
+                    "recipient_id".into(),
+                    JsonSchema::string_enum(
+                        self.policy
+                            .recipients(self.caller)
+                            .into_iter()
+                            .map(serde_json::Value::String)
+                            .collect(),
+                        /*description*/ None,
+                    ),
+                ),
+                (
+                    "message".into(),
+                    JsonSchema::string(Some(
+                        "Nonempty text, at most 4096 UTF-8 bytes; never truncated.".into(),
+                    )),
+                ),
+                (
+                    "delivery".into(),
+                    JsonSchema::string_enum(
+                        vec!["active_turn".into(), "idle_turn".into()],
+                        /*description*/ None,
+                    ),
+                ),
+            ]),
+            Some(vec![
+                "recipient_id".into(),
+                "message".into(),
+                "delivery".into(),
+            ]),
+            Some(false.into()),
+        );
         ToolSpec::Function(ResponsesApiTool {
             name: "send_peer_message".into(),
             description: "Send an attributed message from this chat to a host-allowed independent chat already loaded in this process, within the current user-authorized task scope. active_turn joins only an accepting active regular turn; idle_turn starts only an idle recipient and requires a separate wake grant. Neither mode resumes a cold chat or falls back to another mode. At most four authorized attempts per sender turn. Grants permit communication, not authority to carry out the message. Accepted/started reports admission only, not reading, use or durable storage. An unknown outcome must not be retried automatically.".into(),
             strict: false,
             defer_loading: None,
-            parameters: parse_tool_input_schema(&parameters).expect("peer tool schema is valid"),
+            parameters,
             output_schema: None,
         })
     }

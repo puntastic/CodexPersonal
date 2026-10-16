@@ -44,6 +44,11 @@ struct LocalPeerHost {
     policy: Arc<PeerPolicy>,
 }
 
+struct PreparedPeerMessage {
+    communication: InterAgentCommunication,
+    message_id: ResponseItemId,
+}
+
 #[derive(Default)]
 struct TurnAttemptBudget(AtomicU32);
 
@@ -136,7 +141,10 @@ impl LocalPeerHost {
         if cancellation.is_cancelled() {
             return PeerSendOutcome::refused(RefusalReason::SenderTurnInactive);
         }
-        let communication = communication(&request);
+        let message = match communication(&request) {
+            Ok(message) => message,
+            Err(reason) => return PeerSendOutcome::refused(reason),
+        };
         match request.delivery {
             DeliveryMode::ActiveTurn => {
                 let expected = {
@@ -153,9 +161,9 @@ impl LocalPeerHost {
                 let Some(expected) = expected else {
                     return PeerSendOutcome::refused(RefusalReason::NoActiveRecipientTurn);
                 };
-                deliver_current_turn(&recipient, expected, communication).await
+                deliver_current_turn(&recipient, expected, message).await
             }
-            DeliveryMode::IdleTurn => deliver_idle_turn(&recipient, communication).await,
+            DeliveryMode::IdleTurn => deliver_idle_turn(&recipient, message).await,
         }
     }
 }
@@ -166,15 +174,15 @@ async fn independent_root(thread: &CodexThread) -> bool {
         && thread.config_snapshot().await.parent_thread_id.is_none()
 }
 
-fn communication(request: &PeerSendRequest) -> InterAgentCommunication {
+fn communication(request: &PeerSendRequest) -> Result<PreparedPeerMessage, RefusalReason> {
     // These flat ID addresses do not register children or imply a shared agent tree.
     let address = |id: ThreadId| {
         AgentPath::root()
             .join(&id.to_string().replace('-', ""))
-            .expect("UUID is a valid address segment")
+            .map_err(|_| RefusalReason::HostUnavailable)
     };
-    let author = address(request.sender);
-    let recipient = address(request.recipient);
+    let author = address(request.sender)?;
+    let recipient = address(request.recipient)?;
     let message_type = match request.delivery {
         DeliveryMode::ActiveTurn => InterAgentMessageType::Message,
         DeliveryMode::IdleTurn => InterAgentMessageType::NewTask,
@@ -196,29 +204,29 @@ fn communication(request: &PeerSendRequest) -> InterAgentCommunication {
         content,
         request.delivery == DeliveryMode::IdleTurn,
     );
-    communication.id = Some(ResponseItemId::new("amsg"));
-    communication
+    let message_id = ResponseItemId::new("amsg");
+    communication.id = Some(message_id.clone());
+    Ok(PreparedPeerMessage {
+        communication,
+        message_id,
+    })
 }
 
 async fn deliver_current_turn(
     target: &CodexThread,
     expected: String,
-    communication: InterAgentCommunication,
+    message: PreparedPeerMessage,
 ) -> PeerSendOutcome {
     if expected.len() > 128 {
         return PeerSendOutcome::refused(RefusalReason::AdmissionDeclined);
     }
-    let message_id = communication
-        .id
-        .as_ref()
-        .expect("host assigned message id")
-        .to_string();
+    let message_id = message.message_id.to_string();
     if target
         .session
         .input_queue
         .deliver_mailbox_communication_to_current_turn(
             &target.session.active_turn,
-            communication,
+            message.communication,
             Some(&expected),
         )
         .await
@@ -232,16 +240,9 @@ async fn deliver_current_turn(
     }
 }
 
-async fn deliver_idle_turn(
-    target: &CodexThread,
-    communication: InterAgentCommunication,
-) -> PeerSendOutcome {
-    let message_id = communication
-        .id
-        .as_ref()
-        .expect("host assigned message id")
-        .to_string();
-    let request = TurnInputRequest::new(TurnInput::InterAgentCommunication(communication))
+async fn deliver_idle_turn(target: &CodexThread, message: PreparedPeerMessage) -> PeerSendOutcome {
+    let message_id = message.message_id.to_string();
+    let request = TurnInputRequest::new(TurnInput::InterAgentCommunication(message.communication))
         .on_start(TurnStartOptions {
             turn_trigger: Some("peer_message".into()),
             // No caller settings, parent/child lineage, or inherited root turn.

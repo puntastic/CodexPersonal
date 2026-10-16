@@ -202,7 +202,9 @@ async fn independent_roots_receive_typed_bounded_content_without_parentage() {
 async fn active_terminal_race_refuses_without_idle_wake_or_backlog() {
     let h = Harness::new().await;
     let expected = Harness::hold(&h.recipient).await;
-    let message = communication(&h.request("unused".into(), DeliveryMode::ActiveTurn));
+    let Ok(message) = communication(&h.request("unused".into(), DeliveryMode::ActiveTurn)) else {
+        panic!("valid peer address fixture");
+    };
     h.recipient
         .session
         .abort_all_tasks(TurnAbortReason::Interrupted)
@@ -226,24 +228,19 @@ async fn active_terminal_race_refuses_without_idle_wake_or_backlog() {
 async fn idle_active_race_refuses_without_steering_the_new_turn() {
     let h = Harness::new().await;
     assert!(h.recipient.session.active_turn.lock().await.is_none());
-    let message = communication(&h.request("unused".into(), DeliveryMode::IdleTurn));
+    let Ok(message) = communication(&h.request("unused".into(), DeliveryMode::IdleTurn)) else {
+        panic!("valid peer address fixture");
+    };
     Harness::hold(&h.recipient).await;
     assert_eq!(
         deliver_idle_turn(&h.recipient, message).await,
         PeerSendOutcome::refused(RefusalReason::NotIdle)
     );
-    let active = h.recipient.session.active_turn.lock().await;
-    assert!(
-        active
-            .as_ref()
-            .unwrap()
-            .turn_state
-            .lock()
-            .await
-            .pending_input
-            .is_empty()
-    );
-    drop(active);
+    let turn_state = {
+        let active = h.recipient.session.active_turn.lock().await;
+        Arc::clone(&active.as_ref().unwrap().turn_state)
+    };
+    assert!(turn_state.lock().await.pending_input.is_empty());
     h.close().await;
 }
 

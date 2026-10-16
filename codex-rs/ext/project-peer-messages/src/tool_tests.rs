@@ -37,8 +37,24 @@ fn tool(sender: &str) -> (PeerTool, Arc<FakeHost>) {
 }
 
 #[tokio::test]
-async fn sender_spoofing_and_wake_or_reverse_grants_do_not_reach_host() {
+async fn sender_spoofing_and_wake_or_reverse_grants_do_not_reach_host() -> serde_json::Result<()> {
+    let parameters = |tool: &PeerTool| {
+        let ToolSpec::Function(spec) = tool.spec() else {
+            panic!("peer tool must have a function schema");
+        };
+        serde_json::to_value(spec.parameters)
+    };
     let (tool, host) = tool(A);
+    let mut expected_parameters = json!({
+        "type":"object", "additionalProperties":false,
+        "properties":{
+            "recipient_id":{"type":"string","enum":[B]},
+            "message":{"type":"string","description":"Nonempty text, at most 4096 UTF-8 bytes; never truncated."},
+            "delivery":{"type":"string","enum":["active_turn","idle_turn"]}
+        },
+        "required":["recipient_id","message","delivery"]
+    });
+    assert_eq!(parameters(&tool)?, expected_parameters);
     let mut args = json!({"recipient_id":B,"message":"hello","delivery":"active_turn"});
     args["sender"] = json!(B);
     assert!(tool.send(&args.to_string(), "turn".into()).await.is_err());
@@ -50,6 +66,8 @@ async fn sender_spoofing_and_wake_or_reverse_grants_do_not_reach_host() {
     );
     assert!(host.0.lock().unwrap().is_empty());
     let (reverse, host) = self::tool(B);
+    expected_parameters["properties"]["recipient_id"]["enum"] = json!([]);
+    assert_eq!(parameters(&reverse)?, expected_parameters);
     args["recipient_id"] = json!(A);
     args["delivery"] = json!("active_turn");
     assert_eq!(
@@ -60,6 +78,7 @@ async fn sender_spoofing_and_wake_or_reverse_grants_do_not_reach_host() {
         PeerSendOutcome::refused(RefusalReason::Denied)
     );
     assert!(host.0.lock().unwrap().is_empty());
+    Ok(())
 }
 
 #[tokio::test]

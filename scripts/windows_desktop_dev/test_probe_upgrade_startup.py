@@ -228,6 +228,8 @@ class ProbeTests(unittest.TestCase):
         recover=False,
         fail_startup=False,
         damage_companion=False,
+        expected_added_migrations=None,
+        candidate_added_migrations=(),
     ):
         executable = self.root / "not-an-executable"
         executable.touch()
@@ -241,6 +243,18 @@ class ProbeTests(unittest.TestCase):
             if check_attachments:
                 migrate(home / self.source.name)
                 migrate(home / companion.name)
+                for version in candidate_added_migrations:
+                    execute(
+                        home / self.source.name,
+                        "INSERT OR IGNORE INTO _sqlx_migrations VALUES (?, ?, ?, 1, ?, ?)",
+                        (
+                            version,
+                            f"migration {version}",
+                            "2026-10-16T00:00:00Z",
+                            bytes([version]),
+                            version * 10,
+                        ),
+                    )
             if count == 2 and damage_companion:
                 execute(
                     home / companion.name,
@@ -265,6 +279,7 @@ class ProbeTests(unittest.TestCase):
             source_db=self.source,
             source_companion_db=[companion],
             output=self.root / "output",
+            expected_added_migration=expected_added_migrations,
         )
         with patch.object(probe, "startup", side_effect=startup) as mocked:
             report = probe.run_probe(args)
@@ -275,6 +290,7 @@ class ProbeTests(unittest.TestCase):
         original_hash = probe.file_hash(self.source)
         report = self.run_synthetic_probe()
         self.assertTrue(report["passed"])
+        self.assertEqual(report["expected_added_migrations"], [58])
         for key in (
             "after_candidate",
             "after_previous",
@@ -289,6 +305,90 @@ class ProbeTests(unittest.TestCase):
             )
         self.assertEqual(report["backup_sha256"], report["backup_sha256_final"])
         self.assertEqual(original_hash, probe.file_hash(self.source))
+
+    def test_explicit_added_migrations_are_recorded_and_accepted(self):
+        migrate(self.source)
+        report = self.run_synthetic_probe(
+            expected_added_migrations=(59, 60, 61),
+            candidate_added_migrations=(59, 60, 61),
+        )
+        self.assertTrue(report["passed"])
+        self.assertTrue(report["untouched_backups_verified"])
+        self.assertEqual(report["expected_added_migrations"], [59, 60, 61])
+        self.assertEqual(
+            report["after_candidate_after_previous"]["applied_migrations"],
+            [55, 56, 57, 58, 59, 60, 61],
+        )
+        receipt = json.loads(
+            (self.root / "output" / "receipt.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(receipt["expected_added_migrations"], [59, 60, 61])
+
+    def test_explicit_added_migrations_reject_unexpected_62(self):
+        migrate(self.source)
+        with self.assertRaisesRegex(RuntimeError, "unexpected added state migrations"):
+            self.run_synthetic_probe(
+                expected_added_migrations=(59, 60, 61),
+                candidate_added_migrations=(59, 60, 61, 62),
+            )
+        receipt = json.loads(
+            (self.root / "output" / "receipt.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(receipt["passed"])
+        self.assertEqual(receipt["expected_added_migrations"], [59, 60, 61])
+        self.assertTrue(receipt["untouched_backups_verified"])
+
+    def test_explicit_added_migrations_do_not_also_allow_default_58(self):
+        with self.assertRaisesRegex(RuntimeError, "unexpected added state migrations"):
+            self.run_synthetic_probe(
+                expected_added_migrations=(59, 60, 61),
+                candidate_added_migrations=(59, 60, 61),
+            )
+
+    def test_explicit_added_migrations_require_every_qualified_addition(self):
+        migrate(self.source)
+        with self.assertRaisesRegex(RuntimeError, "unexpected added state migrations"):
+            self.run_synthetic_probe(
+                expected_added_migrations=(59, 60, 61),
+                candidate_added_migrations=(59, 60),
+            )
+
+    def test_cli_repeated_added_migrations_replace_the_legacy_default(self):
+        required = [
+            "probe_upgrade_startup.py",
+            "--candidate",
+            "candidate.exe",
+            "--previous",
+            "previous.exe",
+            "--source-db",
+            "state.sqlite",
+            "--output",
+            "fresh-output",
+        ]
+        for flags, expected in (
+            ([], None),
+            (
+                [
+                    "--expected-added-migration",
+                    "59",
+                    "--expected-added-migration",
+                    "60",
+                    "--expected-added-migration",
+                    "61",
+                ],
+                [59, 60, 61],
+            ),
+        ):
+            with self.subTest(flags=flags):
+                with (
+                    patch("sys.argv", required + flags),
+                    patch.object(probe, "run_probe", return_value={}) as run,
+                    patch("builtins.print"),
+                ):
+                    probe.main()
+                self.assertEqual(
+                    run.call_args.args[0].expected_added_migration, expected
+                )
 
     def test_third_startup_data_loss_is_a_failure_with_readback_receipt(self):
         with self.assertRaisesRegex(RuntimeError, "evidence changed"):

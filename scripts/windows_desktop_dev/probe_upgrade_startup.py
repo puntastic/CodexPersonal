@@ -2,7 +2,8 @@
 
 The source opens read-only. A new output directory keeps an untouched backup and
 an isolated trial home. Neither package is selected for Desktop by this probe.
-The schema assertions target an upgrade from migrations55–57 through58. Optional
+The schema assertions preserve migrations55–58 and require an explicit expected
+addition set for newer candidates; existing callers default to migration58. Optional
 companion copies preserve history/memory recovery without claiming that startup
 exercised every lazy store or a model turn. No test resumes a real source rollout.
 Green DB startup does not prove that an older reader can replay new V2
@@ -25,6 +26,7 @@ import time
 
 
 ARCHIVE_SORT_KEYS = ("created_at", "updated_at", "recency_at")
+DEFAULT_EXPECTED_ADDED_MIGRATIONS = (58,)
 
 
 def require(condition, message):
@@ -157,7 +159,13 @@ def schema(path):
         return result
 
 
-def validate_readback(before, after, *, primary=False):
+def validate_readback(
+    before,
+    after,
+    *,
+    primary=False,
+    expected_added_migrations=DEFAULT_EXPECTED_ADDED_MIGRATIONS,
+):
     require(after["quick_check"] == "ok", "copied database quick_check failed")
     require(
         before["file_identity"] == after["file_identity"],
@@ -175,7 +183,10 @@ def validate_readback(before, after, *, primary=False):
     )
     if not primary:
         return
-    require(set(new) - set(old) == {58} - set(old), "unexpected added state migrations")
+    require(
+        set(new) - set(old) == set(expected_added_migrations) - set(old),
+        "unexpected added state migrations",
+    )
     require(
         {55, 56, 57, 58} <= set(after["applied_migrations"]),
         "required state migrations missing",
@@ -372,6 +383,17 @@ def startup(executable, home, *, check_attachments=False):
 
 
 def run_probe(args):
+    expected_added_migrations = getattr(args, "expected_added_migration", None)
+    if expected_added_migrations is None:
+        expected_added_migrations = DEFAULT_EXPECTED_ADDED_MIGRATIONS
+    require(
+        all(
+            isinstance(version, int) and version > 0
+            for version in expected_added_migrations
+        ),
+        "expected added migration versions must be positive integers",
+    )
+    expected_added_migrations = sorted(set(expected_added_migrations))
     source = args.source_db.resolve(strict=True)
     candidate = args.candidate.resolve(strict=True)
     previous = args.previous.resolve(strict=True)
@@ -397,6 +419,7 @@ def run_probe(args):
         }
     report = databases.pop(source.name)
     report["companions"] = databases
+    report["expected_added_migrations"] = expected_added_migrations
     report["scope_limit"] = (
         "DB startup/schema/metadata only; no model turn or real rollout resumed. "
         "This does not establish old-reader replay of new V2 retained_source metadata: "
@@ -441,10 +464,15 @@ def run_probe(args):
             if startup_error is not None:
                 raise startup_error
             require(not found, "startup created a recovery backup/rebuilt database")
-            validate_readback(report["before"], report[readback_key], primary=True)
+            validate_readback(
+                report["before"],
+                report[readback_key],
+                primary=True,
+                expected_added_migrations=expected_added_migrations,
+            )
             for detail in databases.values():
                 validate_readback(detail["before"], detail[readback_key])
-            # After the first migration, the full ledger (including migration58)
+            # After the first migration, the full ledger (including qualified additions)
             # must survive both subsequent startups without additions or edits.
             if readback_key != "after_candidate":
                 for detail in [report, *databases.values()]:
@@ -488,6 +516,17 @@ def main():
     parser.add_argument("--previous", type=Path, required=True)
     parser.add_argument("--source-db", type=Path, required=True)
     parser.add_argument("--source-companion-db", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--expected-added-migration",
+        type=int,
+        action="append",
+        metavar="N",
+        help=(
+            "Expected added primary-state migration; repeat for each qualified version. "
+            "Supplying any versions replaces the default of 58; already-applied versions "
+            "need not be added again."
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     print(json.dumps(run_probe(parser.parse_args())))
 
