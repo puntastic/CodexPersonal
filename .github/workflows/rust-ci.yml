@@ -133,7 +133,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           foreach ($name in @('RUNFILES_MANIFEST_ONLY', 'CODEX_WINDOWS_REGISTERED_CORE')) {
-            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            # A null method argument can leave an empty-but-present marker in pwsh.
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            if ([Environment]::GetEnvironmentVariables('Process').Contains($name)) {
+              throw "Inherited environment marker is still present: $name"
+            }
           }
           function Save-DiskObservation([string]$Phase) {
             $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($env:CARGO_TARGET_DIR))
