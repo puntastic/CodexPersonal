@@ -1,263 +1,359 @@
-name: rust-ci
+# THROWAWAY PURPOSE-BRANCH PILOT ONLY. Do not merge this replacement into main.
+# Reuses the existing workflow ID/path for dispatch with ref=codex/windows-isolated-tests-20261017.
+# Production code is checked out at SOURCE_SHA; the workflow revision is recorded separately.
+name: Windows isolated sandbox qualification pilot
+
 on:
-  workflow_call:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-isolated-sandbox-qualification-pilot
+  cancel-in-progress: false
+
 jobs:
-  # --- Detect changed paths so the fast PR workflow only runs relevant jobs ---
-  changed:
-    name: Detect changed areas
-    runs-on: ubuntu-24.04
-    outputs:
-      argument_comment_lint: ${{ steps.detect.outputs.argument_comment_lint }}
-      argument_comment_lint_package: ${{ steps.detect.outputs.argument_comment_lint_package }}
-      codex: ${{ steps.detect.outputs.codex }}
-      workflows: ${{ steps.detect.outputs.workflows }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Detect changed paths (no external action)
-        id: detect
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BASE_SHA='${{ github.event.pull_request.base.sha }}'
-            HEAD_SHA='${{ github.event.pull_request.head.sha }}'
-            echo "Base SHA: $BASE_SHA"
-            echo "Head SHA: $HEAD_SHA"
-            mapfile -t files < <(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA")
-          else
-            # On manual runs, default to the full fast-PR bundle.
-            files=("codex-rs/force" "tools/argument-comment-lint/force" ".github/force")
-          fi
-
-          codex=false
-          argument_comment_lint=false
-          argument_comment_lint_package=false
-          workflows=false
-          for f in "${files[@]}"; do
-            [[ $f == codex-rs/* ]] && codex=true
-            [[ $f == codex-rs/* || $f == tools/argument-comment-lint/* || $f == justfile ]] && argument_comment_lint=true
-            [[ $f == defs.bzl || $f == workspace_root_test_launcher.sh.tpl || $f == workspace_root_test_launcher.bat.tpl ]] && argument_comment_lint=true
-            [[ $f == tools/argument-comment-lint/* || $f == .github/workflows/rust-ci.yml || $f == .github/workflows/rust-ci-full.yml ]] && argument_comment_lint_package=true
-            [[ $f == .github/* ]] && workflows=true
-          done
-
-          echo "argument_comment_lint=$argument_comment_lint" >> "$GITHUB_OUTPUT"
-          echo "argument_comment_lint_package=$argument_comment_lint_package" >> "$GITHUB_OUTPUT"
-          echo "codex=$codex" >> "$GITHUB_OUTPUT"
-          echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
-
-      - name: Check for a clean worktree
-        if: always() && !cancelled()
-        uses: ./.github/actions/check-clean-worktree
-
-  # --- Fast Cargo-native PR checks -------------------------------------------
-  general:
-    name: Format / etc
-    runs-on: ubuntu-24.04
-    needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
+  qualify-eleven:
+    if: >-
+      github.repository == 'puntastic/CodexPersonal' &&
+      github.ref == 'refs/heads/codex/windows-isolated-tests-20261017' &&
+      github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    timeout-minutes: 180
     defaults:
       run:
-        working-directory: codex-rs
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: rustfmt
-      - name: cargo fmt
-        run: cargo fmt -- --config imports_granularity=Item --check
-      - name: Rust benchmark smoke test
-        run: just bench-smoke
-
-      - name: Check for a clean worktree
-        if: always() && !cancelled()
-        uses: ./.github/actions/check-clean-worktree
-
-  cargo_shear:
-    name: cargo shear
-    runs-on: ubuntu-24.04
-    needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
-    defaults:
-      run:
-        working-directory: codex-rs
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: cargo-shear@1.11.2
-      - name: cargo shear
-        run: cargo shear --deny-warnings
-
-      - name: Check for a clean worktree
-        if: always() && !cancelled()
-        uses: ./.github/actions/check-clean-worktree
-
-  argument_comment_lint_package:
-    name: Argument comment lint package
-    runs-on: ubuntu-24.04
-    needs: changed
-    if: ${{ needs.changed.outputs.argument_comment_lint_package == 'true' }}
+        shell: pwsh
     env:
-      CARGO_DYLINT_VERSION: 6.1.0
-      DYLINT_LINK_VERSION: 6.1.0
+      SOURCE_SHA: a836ce4fcdee8b42e6616a9099eae26ea02969c4
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      RUST_MIN_STACK: "8388608"
+      NEXTEST_PROFILE: local
+
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check out only the qualified source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: a836ce4fcdee8b42e6616a9099eae26ea02969c4
+          fetch-depth: 1
           persist-credentials: false
-      - uses: ./.github/actions/setup-ci
+
+      - name: Verify disposable host and establish private run directories
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+            throw 'This pilot must run only on a disposable GitHub-hosted Windows VM.'
+          }
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'The isolated sandbox tests require an elevated unattended runner.'
+          }
+          foreach ($name in @('CodexSandboxOffline', 'CodexSandboxOnline')) {
+            if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) {
+              throw "Unexpected pre-existing sandbox account: $name"
+            }
+          }
+          if (Get-LocalGroup -Name 'CodexSandboxUsers' -ErrorAction SilentlyContinue) {
+            throw 'Unexpected pre-existing sandbox group.'
+          }
+          $head = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch.' }
+          $root = Join-Path $env:RUNNER_TEMP "cw11-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $root) { throw 'Pilot output root must be new.' }
+          foreach ($child in @('target', 'test-tmp', 'evidence')) {
+            New-Item -ItemType Directory -Path (Join-Path $root $child) | Out-Null
+          }
+          $evidence = Join-Path $root 'evidence'
+          @{
+            source_sha = $head
+            workflow_sha = $env:GITHUB_SHA
+            workflow_ref = $env:GITHUB_WORKFLOW_REF
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            image_os = $env:ImageOS
+            image_version = $env:ImageVersion
+            runner_arch = $env:RUNNER_ARCH
+            sandbox_accounts_initially_absent = $true
+            cleanup_boundary = 'Task data stays on this disposable VM; VM destruction removes shared account/firewall/ACL effects. No global uninstall is run.'
+            proof_boundary = 'Exactly eleven Windows shared-account cases only; no voice-host, ignored tests, full workspace, deployment or personal credentials.'
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'provenance.json') -Encoding utf8
+          @{
+            PILOT_ROOT = $root
+            PILOT_EVIDENCE = $evidence
+            CARGO_TARGET_DIR = (Join-Path $root 'target')
+            CODEX_REPO_ROOT = $env:GITHUB_WORKSPACE
+            TEST_TMPDIR = (Join-Path $root 'test-tmp')
+            TEMP = (Join-Path $root 'test-tmp')
+            TMP = (Join-Path $root 'test-tmp')
+          }.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" >> $env:GITHUB_ENV }
+          # Do not invoke setup-ci: its Dev Drive/VHD provisioning is outside this small pilot.
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, Free, Used |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'initial-disks.json') -Encoding utf8
+
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-      - name: Install nightly argument-comment-lint toolchain
-        shell: bash
-        run: |
-          rustup toolchain install nightly-2026-08-20 \
-            --profile minimal \
-            --component llvm-tools-preview \
-            --component rustc-dev \
-            --component rust-src \
-            --no-self-update
-          rustup default nightly-2026-08-20
-      - name: Cache cargo-dylint tooling
-        id: cargo_dylint_cache
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
+          toolchain: "1.95.0"
+          targets: x86_64-pc-windows-msvc
+
+      - name: Select Python for the existing build adapters
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Expose the existing MSVC x64 SDK
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Configure checksum-verified V8 inputs
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Install pinned just
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: just@1.51.0
+
+      - name: Install pinned nextest
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+          version: 0.9.103
+
+      - name: Build, verify the exact selection, then qualify serially
+        working-directory: codex-rs
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          foreach ($name in @('RUNFILES_MANIFEST_ONLY', 'CODEX_WINDOWS_REGISTERED_CORE')) {
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+          }
+          function Save-DiskObservation([string]$Phase) {
+            $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($env:CARGO_TARGET_DIR))
+            @{
+              phase = $Phase
+              utc = [DateTime]::UtcNow.ToString('o')
+              available_bytes = $drive.AvailableFreeSpace
+              total_bytes = $drive.TotalSize
+            } | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'disk-observations.jsonl')
+            if ($drive.AvailableFreeSpace -lt 2GB) { throw "Less than 2 GiB free before $Phase; resource pilot stopped." }
+          }
+          function Save-DiagnosticTail([string]$Source, [string]$Name) {
+            if (Test-Path -LiteralPath $Source) {
+              Get-Content -LiteralPath $Source -Tail 200 |
+                ForEach-Object { if ($_.Length -gt 4096) { $_.Substring(0, 4096) } else { $_ } } |
+                Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE "$Name.txt") -Encoding utf8
+            }
+          }
+          function Get-SelectedCases([hashtable]$Inventory, [hashtable]$Plan) {
+            if (-not $Inventory.ContainsKey('rust-suites')) { throw 'Unsupported nextest inventory.' }
+            $actual = @()
+            foreach ($suite in $Inventory['rust-suites'].Values) {
+              if ($suite['status'] -ne 'listed') { continue }
+              foreach ($case in $suite['testcases'].GetEnumerator()) {
+                if ($case.Value['filter-match']['status'] -ne 'matches') { continue }
+                if ($suite['package-name'] -ne $Plan.package -or $suite['binary-name'] -ne $Plan.binary -or
+                    $suite['binary-id'] -isnot [string] -or [string]::IsNullOrWhiteSpace($suite['binary-id']) -or
+                    $case.Value['ignored'] -isnot [bool] -or $case.Value['ignored']) {
+                  throw 'Unexpected package/binary, unsupported inventory or ignored case selected.'
+                }
+                $actual += @{ package = $suite['package-name']; binary = $suite['binary-name']; binary_id = $suite['binary-id']; test = $case.Key; binary_path = $suite['binary-path'] }
+              }
+            }
+            if ($actual.Count -ne $Plan.names.Count -or
+                @(Compare-Object ($Plan.names | Sort-Object) ($actual.test | Sort-Object)).Count -ne 0) {
+              throw "Selected test names differ from the exact allowlist for $($Plan.label); no tests executed."
+            }
+            return $actual
+          }
+          function Assert-JUnitReport([string]$Path, [hashtable]$Plan, [DateTime]$StartedUtc) {
+            $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+            if ($file.PSIsContainer -or $file.Length -eq 0 -or $file.Length -gt 32MB -or $file.LastWriteTimeUtc -lt $StartedUtc) {
+              throw 'JUnit report is empty, oversized or older than this test invocation.'
+            }
+            $settings = [Xml.XmlReaderSettings]::new()
+            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+            $settings.XmlResolver = $null
+            $document = [Xml.XmlDocument]::new()
+            $document.XmlResolver = $null
+            $reader = [Xml.XmlReader]::Create($file.FullName, $settings)
+            try { $document.Load($reader) } finally { $reader.Dispose() }
+            $cases = @($document.SelectNodes('/testsuites/testsuite/testcase'))
+            $actualIdentities = @($cases | ForEach-Object {
+              ConvertTo-Json -InputObject @($_.GetAttribute('classname'), $_.GetAttribute('name')) -Compress
+            })
+            $expectedIdentities = @($Plan.caseIdentities | ForEach-Object {
+              ConvertTo-Json -InputObject @($_.classname, $_.name) -Compress
+            })
+            if ($document.DocumentElement.Name -ne 'testsuites' -or $cases.Count -ne $Plan.names.Count -or
+                $document.SelectNodes('//testcase').Count -ne $cases.Count -or
+                @(Compare-Object ($expectedIdentities | Sort-Object) ($actualIdentities | Sort-Object)).Count -ne 0) {
+              throw 'JUnit cases do not exactly match the selected test allowlist.'
+            }
+            if ($document.SelectNodes('//failure | //error | //skipped | //flakyFailure | //flakyError | //rerunFailure | //rerunError').Count -ne 0) {
+              throw 'JUnit contains a failed, errored, skipped or retried case.'
+            }
+            foreach ($node in $document.SelectNodes('/testsuites | /testsuites/testsuite')) {
+              $requiredCounters = @('tests', 'failures', 'errors')
+              foreach ($counter in $requiredCounters) {
+                if (-not $node.HasAttribute($counter) -or $node.GetAttribute($counter) -notmatch '^\d+$') {
+                  throw 'JUnit required counters are missing or invalid.'
+                }
+              }
+              if ([long]$node.GetAttribute('tests') -ne $node.SelectNodes('.//testcase').Count) {
+                throw 'JUnit declared test count disagrees with its actual cases.'
+              }
+              foreach ($counter in @('failures', 'errors', 'disabled', 'skipped')) {
+                if ($node.HasAttribute($counter) -and ($node.GetAttribute($counter) -notmatch '^\d+$' -or [long]$node.GetAttribute($counter) -ne 0)) {
+                  throw 'JUnit declares failures, errors or skipped tests.'
+                }
+              }
+            }
+          }
+          $plans = @(
+            @{
+              label = 'core-windows-sandbox'; package = 'codex-core'; binary = 'windows_sandbox'; target = @('--test', 'windows_sandbox')
+              names = @(
+                'windows_sandbox_cli_preserves_managed_deny_reads_across_launches',
+                'windows_elevated_temp_only_core_and_direct_spawn_enforce_carveouts',
+                'windows_elevated_does_not_create_missing_workspace_metadata',
+                'windows_elevated_enforces_deny_read_and_protects_setup_marker',
+                'windows_elevated_powershell_preserves_relative_paths',
+                'windows_elevated_unified_exec_enforces_large_recursive_deny_reads',
+                'windows_elevated_approved_git_pull_preserves_deny_read'
+              )
+            },
+            @{
+              label = 'exec-server-filesystem'; package = 'codex-exec-server'; binary = 'file_system_windows'; target = @('--test', 'file_system_windows')
+              names = @('file_system_elevated_relative_read_denial_uses_policy_cwd::local', 'file_system_elevated_relative_read_denial_uses_policy_cwd::remote')
+            },
+            @{
+              label = 'exec-server-process'; package = 'codex-exec-server'; binary = 'exec_process'; target = @('--test', 'exec_process')
+              names = @('windows_sandbox::tmpdir_uses_command_environment_over_rpc::elevated')
+            },
+            @{
+              label = 'sandbox-library'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
+              names = @('unified_exec::tests::elevated_non_tty_cmd_forwards_env_output_and_exit')
+            }
+          )
+          $plans | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'expected-tests.json') -Encoding utf8
+          @{
+            cargo = (& cargo --version)
+            rustc = (& rustc -Vv) -join "`n"
+            nextest = (& cargo nextest --version)
+            just = (& just --version)
+            python = (& python --version)
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'tool-versions.json') -Encoding utf8
+          Save-DiskObservation 'helper-build'
+          $buildLog = Join-Path $env:PILOT_ROOT 'helper-build.log'
+          & cargo build --locked --profile dev-small -p codex-cli --bin codex -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner --bin codex-windows-managed-deny-probe 2>&1 | Tee-Object -FilePath $buildLog
+          $buildExit = $LASTEXITCODE
+          Save-DiagnosticTail $buildLog 'helper-build-tail'
+          if ($buildExit -ne 0) { throw "Helper build failed with exit $buildExit; no tests executed." }
+          $helpers = @{}
+          foreach ($name in @('codex', 'codex-windows-sandbox-setup', 'codex-command-runner', 'codex-windows-managed-deny-probe')) {
+            $path = (Resolve-Path -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "dev-small/$name.exe")).Path
+            [Environment]::SetEnvironmentVariable("CARGO_BIN_EXE_$name", $path, 'Process')
+            [Environment]::SetEnvironmentVariable("CARGO_BIN_EXE_$($name.Replace('-', '_'))", $path, 'Process')
+            $helpers[$name] = @{ path = $path; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
+          }
+          $helpers | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'helper-hashes.json') -Encoding utf8
+          $selected = @()
+          $testDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+          foreach ($plan in $plans) {
+            Save-DiskObservation "list-$($plan.label)"
+            $filter = ($plan.names | ForEach-Object { "test(=$_)"} ) -join ' | '
+            $plan.arguments = @('--locked', '--cargo-profile', 'dev-small', '-p', $plan.package) + $plan.target + @('-E', $filter)
+            $inventoryPath = Join-Path $env:PILOT_ROOT "$($plan.label)-inventory.json"
+            $listLog = Join-Path $env:PILOT_ROOT "$($plan.label)-list.log"
+            & cargo nextest list @($plan.arguments) --message-format json 1> $inventoryPath 2> $listLog
+            $listExit = $LASTEXITCODE
+            Save-DiagnosticTail $listLog "$($plan.label)-compile-tail"
+            if ($listExit -ne 0) { throw "Listing/build failed for $($plan.label); no tests executed." }
+            $inventory = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json -AsHashtable
+            $cases = @(Get-SelectedCases $inventory $plan)
+            $plan.caseIdentities = @($cases | ForEach-Object { @{ classname = $_.binary_id; name = $_.test } })
+            $selected += $cases
+            foreach ($case in $cases) {
+              $testDirectories.Add((Split-Path -Parent $case.binary_path)) | Out-Null
+            }
+          }
+          if ($selected.Count -ne 11) { throw 'Expected exactly eleven selected, nonignored tests.' }
+          $selected | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'selected-tests.json') -Encoding utf8
+          # The sandbox library test uses production sibling lookup, not Cargo overrides.
+          foreach ($directory in $testDirectories) {
+            $targetRoot = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR).TrimEnd('\') + '\'
+            if (-not ([IO.Path]::GetFullPath($directory)).StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
+              throw 'Test executable escaped this pilot target directory.'
+            }
+            $resources = Join-Path $directory 'codex-resources'
+            New-Item -ItemType Directory -Path $resources -Force | Out-Null
+            foreach ($name in @('codex-windows-sandbox-setup', 'codex-command-runner')) {
+              Copy-Item -LiteralPath $helpers[$name].path -Destination (Join-Path $resources "$name.exe") -Force
+            }
+          }
+          $results = @()
+          # nextest 0.9.103 defaults store.dir to workspace-root/target/nextest,
+          # independently of CARGO_TARGET_DIR. The pinned repo sets local's inherited
+          # junit.path to junit.xml; the Cargo workspace root is codex-rs.
+          $junit = Join-Path $env:CODEX_REPO_ROOT 'codex-rs/target/nextest/local/junit.xml'
+          foreach ($plan in $plans) {
+            Save-DiskObservation "run-$($plan.label)"
+            if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
+            $log = Join-Path $env:PILOT_ROOT "$($plan.label)-run.log"
+            $startedUtc = [DateTime]::UtcNow
+            & just test @($plan.arguments) --test-threads 1 --retries 0 2>&1 | Tee-Object -FilePath $log
+            $exit = $LASTEXITCODE
+            Save-DiagnosticTail $log "$($plan.label)-run-tail"
+            $hasJunit = Test-Path -LiteralPath $junit -PathType Leaf
+            $validJunit = $false
+            $junitProblem = $null
+            try {
+              Assert-JUnitReport $junit $plan $startedUtc
+              $validJunit = $true
+            } catch {
+              $junitProblem = $_.Exception.Message
+              if ($junitProblem.Length -gt 300) { $junitProblem = $junitProblem.Substring(0, 300) }
+            }
+            if ($hasJunit -and (Get-Item -LiteralPath $junit).Length -le 32MB) {
+              Copy-Item -LiteralPath $junit -Destination (Join-Path $env:PILOT_EVIDENCE "$($plan.label).xml")
+            }
+            $results += @{ group = $plan.label; selected_tests = $plan.names.Count; exit_code = $exit; junit_present = $hasJunit; junit_valid = $validJunit; junit_problem = $junitProblem }
+            $results | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'results.json') -Encoding utf8
+          }
+          Save-DiskObservation 'after-tests'
+          if (@($results | Where-Object { $_.exit_code -ne 0 -or -not $_.junit_valid }).Count) {
+            throw 'At least one selected test group failed or did not produce a fresh, complete, passing JUnit receipt.'
+          }
+
+      - name: Final resource observation
+        if: always()
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "cw11-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $evidence = Join-Path $root 'evidence'
+          if (Test-Path -LiteralPath $evidence) {
+            Get-PSDrive -PSProvider FileSystem | Select-Object Name, Free, Used |
+              ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'final-disks.json') -Encoding utf8
+          }
+          # No global uninstall or broad host cleanup: the GitHub VM is discarded.
+          # No test homes, .sandbox-secrets, profiles, config or credentials are retained.
+
+      - name: Retain only qualification evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: windows-isolated-eleven-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ~/.cargo/bin/cargo-dylint
-            ~/.cargo/bin/dylint-link
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: argument-comment-lint-${{ runner.os }}-${{ env.CARGO_DYLINT_VERSION }}-${{ env.DYLINT_LINK_VERSION }}-${{ hashFiles('tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain', '.github/workflows/rust-ci.yml', '.github/workflows/rust-ci-full.yml') }}
-      - name: Install cargo-dylint tooling
-        if: ${{ steps.cargo_dylint_cache.outputs.cache-hit != 'true' }}
-        shell: bash
-        run: |
-          cargo install --locked cargo-dylint --version "$CARGO_DYLINT_VERSION"
-          cargo install --locked dylint-link --version "$DYLINT_LINK_VERSION"
-      - name: Check Python wrapper syntax
-        run: python3 -m py_compile tools/argument-comment-lint/wrapper_common.py tools/argument-comment-lint/run.py tools/argument-comment-lint/run-prebuilt-linter.py tools/argument-comment-lint/test_wrapper_common.py
-      - name: Test Python wrapper helpers
-        run: python3 -m unittest discover -s tools/argument-comment-lint -p 'test_*.py'
-      - name: Test argument comment lint package
-        working-directory: tools/argument-comment-lint
-        run: cargo test
-        env:
-          RUST_MIN_STACK: "8388608" # 8 MiB
-
-      - name: Check for a clean worktree
-        if: always() && !cancelled()
-        uses: ./.github/actions/check-clean-worktree
-
-  argument_comment_lint_prebuilt:
-    name: Argument comment lint - ${{ matrix.name }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout_minutes }}
-    needs: changed
-    environment:
-      name: bazel
-      deployment: false
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux
-            runner: ubuntu-24.04
-            timeout_minutes: 30
-          - name: macOS
-            runner: macos-15-xlarge
-            timeout_minutes: 30
-          - name: Windows
-            runner: windows-x64
-            timeout_minutes: 30
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-x64
-    steps:
-      - name: Check whether argument comment lint should run
-        id: argument_comment_lint_gate
-        shell: bash
-        env:
-          ARGUMENT_COMMENT_LINT: ${{ needs.changed.outputs.argument_comment_lint }}
-          WORKFLOWS: ${{ needs.changed.outputs.workflows }}
-        run: |
-          if [[ "$ARGUMENT_COMMENT_LINT" == "true" || "$WORKFLOWS" == "true" ]]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "No argument-comment-lint relevant changes."
-          echo "run=false" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        if: ${{ steps.argument_comment_lint_gate.outputs.run == 'true' }}
-        with:
-          persist-credentials: false
-      - name: Run argument comment lint on codex-rs via Bazel
-        if: ${{ steps.argument_comment_lint_gate.outputs.run == 'true' }}
-        uses: ./.github/actions/run-argument-comment-lint
-        with:
-          target: ${{ runner.os }}
-          buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
-
-      - name: Check for a clean worktree
-        if: always() && !cancelled() && steps.argument_comment_lint_gate.outputs.run == 'true'
-        uses: ./.github/actions/check-clean-worktree
-
-  # --- Gatherer job that you mark as the ONLY required status -----------------
-  results:
-    name: CI results (required)
-    needs:
-      [
-        changed,
-        general,
-        cargo_shear,
-        argument_comment_lint_package,
-        argument_comment_lint_prebuilt,
-      ]
-    if: always()
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Summarize
-        shell: bash
-        run: |
-          echo "argpkg : ${{ needs.argument_comment_lint_package.result }}"
-          echo "arglint: ${{ needs.argument_comment_lint_prebuilt.result }}"
-          echo "general: ${{ needs.general.result }}"
-          echo "shear  : ${{ needs.cargo_shear.result }}"
-
-          # If nothing relevant changed (PR touching only root README, etc.),
-          # declare success regardless of other jobs.
-          if [[ "${NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT}" != 'true' && "${NEEDS_CHANGED_OUTPUTS_CODEX}" != 'true' && "${NEEDS_CHANGED_OUTPUTS_WORKFLOWS}" != 'true' ]]; then
-            echo 'No relevant changes -> CI not required.'
-            exit 0
-          fi
-
-          if [[ "${NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT_PACKAGE}" == 'true' ]]; then
-            [[ '${{ needs.argument_comment_lint_package.result }}' == 'success' ]] || { echo 'argument_comment_lint_package failed'; exit 1; }
-          fi
-
-          if [[ "${NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT}" == 'true' || "${NEEDS_CHANGED_OUTPUTS_WORKFLOWS}" == 'true' ]]; then
-            [[ '${{ needs.argument_comment_lint_prebuilt.result }}' == 'success' ]] || { echo 'argument_comment_lint_prebuilt failed'; exit 1; }
-          fi
-
-          if [[ "${NEEDS_CHANGED_OUTPUTS_CODEX}" == 'true' || "${NEEDS_CHANGED_OUTPUTS_WORKFLOWS}" == 'true' ]]; then
-            [[ '${{ needs.general.result }}' == 'success' ]] || { echo 'general failed'; exit 1; }
-            [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
-          fi
-        env:
-          NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT: ${{ needs.changed.outputs.argument_comment_lint }}
-          NEEDS_CHANGED_OUTPUTS_CODEX: ${{ needs.changed.outputs.codex }}
-          NEEDS_CHANGED_OUTPUTS_WORKFLOWS: ${{ needs.changed.outputs.workflows }}
-          NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT_PACKAGE: ${{ needs.changed.outputs.argument_comment_lint_package }}
+            ${{ runner.temp }}/cw11-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
+            ${{ runner.temp }}/cw11-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
+            ${{ runner.temp }}/cw11-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
+            ${{ runner.temp }}/cw11-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
+          retention-days: 1
+          if-no-files-found: warn
