@@ -25,6 +25,12 @@ fn recognizes_platform_specific_tls_protocol_negotiation_failures() {
         ),
         ("Schannel protocol error 0x80090302", true),
         ("SCHANNEL PROTOCOL ERROR 0X80090302", true),
+        (
+            "The message received was unexpected or badly formatted. (os error -2146893018)",
+            false,
+        ),
+        ("Schannel TLS error 0x80090326", false),
+        ("SCHANNEL TLS ERROR 0X80090326", false),
         ("certificate validation failed: bad protocol version", false),
         ("bad protocol version: certificate has expired", false),
         (
@@ -43,6 +49,8 @@ fn recognizes_platform_specific_tls_protocol_negotiation_failures() {
         ("unknown issuer", false),
         ("self-signed certificate", false),
         ("hostname mismatch", false),
+        ("bad protocol version: hostname mismatch", false),
+        ("tlsv1 alert protocol version: peer revoked", false),
         ("connection refused", false),
         ("connection reset", false),
         ("dns lookup failed", false),
@@ -68,13 +76,15 @@ fn recognizes_platform_specific_tls_protocol_negotiation_failures() {
 fn recognizes_schannel_protocol_version_error_codes() {
     let protocol_error = io::Error::from_raw_os_error(SCHANNEL_PROTOCOL_VERSION_ERROR);
     let another_schannel_error = io::Error::from_raw_os_error(/*code*/ -2_146_893_007);
+    let illegal_message_error = io::Error::from_raw_os_error(/*code*/ 0x8009_0326_u32 as i32);
 
     assert_eq!(
         (
             has_retryable_tls_error(&protocol_error),
             has_retryable_tls_error(&another_schannel_error),
+            has_retryable_tls_error(&illegal_message_error),
         ),
-        (true, false)
+        (true, false, false)
     );
 }
 

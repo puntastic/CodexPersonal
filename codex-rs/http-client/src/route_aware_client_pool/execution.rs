@@ -23,6 +23,16 @@ use crate::route_aware_redirect::redirect_url;
 use crate::route_aware_redirect::remove_sensitive_headers;
 use crate::tls_backend_fallback::should_retry_with_rustls;
 
+// Retry mechanics require a classified failure, not an arbitrary transport error.
+pub(super) struct ClassifiedTlsProtocolFailure(reqwest::Error);
+
+#[cfg(test)]
+impl ClassifiedTlsProtocolFailure {
+    pub(super) fn for_retry_mechanics_test(error: reqwest::Error) -> Self {
+        Self(error)
+    }
+}
+
 impl RouteAwareClientPool {
     /// Executes requests through shared routing, destination, and redirect checks.
     ///
@@ -54,13 +64,40 @@ impl RouteAwareClientPool {
         F: Fn(String) -> Fut,
         Fut: Future<Output = io::Result<OutboundProxyRoute>>,
     {
+        self.send_with_resolver_and_tls_classifier(request, resolve_route, |error| {
+            if should_retry_with_rustls(&error) {
+                Ok(ClassifiedTlsProtocolFailure(error))
+            } else {
+                Err(error)
+            }
+        })
+        .await
+    }
+
+    // Per-call seam for retry-mechanics tests; normal request paths always classify above.
+    pub(super) async fn send_with_resolver_and_tls_classifier<F, Fut>(
+        &self,
+        request: impl Into<RequestDraft>,
+        resolve_route: F,
+        classify_tls_failure: fn(
+            reqwest::Error,
+        ) -> Result<ClassifiedTlsProtocolFailure, reqwest::Error>,
+    ) -> Result<HttpResponse, RouteAwareRequestError>
+    where
+        F: Fn(String) -> Fut,
+        Fut: Future<Output = io::Result<OutboundProxyRoute>>,
+    {
         let request = request.into();
         let permit = self
             .http_client_factory
             .network_policy()
             .acquire(request.request.url())?;
         permit
-            .run(Box::pin(self.send_authorized(request, resolve_route)))
+            .run(Box::pin(self.send_authorized(
+                request,
+                resolve_route,
+                classify_tls_failure,
+            )))
             .await?
     }
 
@@ -68,6 +105,9 @@ impl RouteAwareClientPool {
         &self,
         draft: RequestDraft,
         resolve_route: F,
+        classify_tls_failure: fn(
+            reqwest::Error,
+        ) -> Result<ClassifiedTlsProtocolFailure, reqwest::Error>,
     ) -> Result<HttpResponse, RouteAwareRequestError>
     where
         F: Fn(String) -> Fut,
@@ -130,16 +170,20 @@ impl RouteAwareClientPool {
                 let response = match result {
                     Ok(response) => response,
                     Err(error) => {
-                        let result = self
-                            .retry_with_rustls(
-                                &current_url,
-                                &current_route,
-                                selected_tls_backend,
-                                replay.as_ref(),
-                                error,
-                                timeout_deadline,
-                            )
-                            .await;
+                        let result = match classify_tls_failure(error) {
+                            Ok(error) => {
+                                self.retry_with_rustls(
+                                    &current_url,
+                                    &current_route,
+                                    selected_tls_backend,
+                                    replay.as_ref(),
+                                    error,
+                                    timeout_deadline,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error.into()),
+                        };
                         if follows_redirects_manually
                             && let Err(RouteAwareRequestError::Request(error)) = &result
                         {
@@ -206,7 +250,7 @@ impl RouteAwareClientPool {
         current_route: &OutboundProxyRoute,
         selected_tls_backend: SelectedTlsBackend,
         replay: Option<&reqwest::Request>,
-        error: reqwest::Error,
+        ClassifiedTlsProtocolFailure(error): ClassifiedTlsProtocolFailure,
         timeout_deadline: Option<tokio::time::Instant>,
     ) -> Result<reqwest::Response, RouteAwareRequestError> {
         let Some(rustls_clients) = self.rustls_clients.as_ref() else {
@@ -215,7 +259,6 @@ impl RouteAwareClientPool {
 
         if current_url.scheme() != "https"
             || selected_tls_backend == SelectedTlsBackend::RustlsFallback
-            || !should_retry_with_rustls(&error)
         {
             return Err(error.into());
         }
