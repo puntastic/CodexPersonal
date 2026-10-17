@@ -207,7 +207,7 @@ async fn turn_tip_placements_and_completion_barrier() -> Result<()> {
         let mut tui = crate::tui::test_support::make_test_tui()?;
         tui.set_owned_screen(/*owned*/ true)?;
         let size = Size::new(width, height);
-        tui.terminal.resize(size)?;
+        crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, size)?;
         while events.try_recv().is_ok() {}
         app.transcript_cells = vec![
             user_cell("Show a response."),
@@ -269,7 +269,7 @@ async fn turn_tip_placements_and_completion_barrier() -> Result<()> {
         ));
         if shown {
             let narrow = Size::new(/*width*/ 8, height);
-            tui.terminal.resize(narrow)?;
+            crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, narrow)?;
             app.render_owned_transcript(&mut tui, narrow)?;
             assert!(
                 !buffer_text(crate::custom_terminal::test_support::last_rendered_buffer(
@@ -277,7 +277,7 @@ async fn turn_tip_placements_and_completion_barrier() -> Result<()> {
                 ))
                 .contains("Tip:")
             );
-            tui.terminal.resize(size)?;
+            crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, size)?;
             app.render_owned_transcript(&mut tui, size)?;
             assert_eq!(app.turn_tips.completions_shown, usize::from(!working));
         }

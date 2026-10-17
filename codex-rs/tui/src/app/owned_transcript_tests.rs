@@ -212,7 +212,7 @@ async fn older_page_loading_uses_the_status_row_without_moving_content_or_cursor
     let mut snapshots = Vec::new();
     for width in [80, 40, 28] {
         let size = Size::new(width, /*height*/ 12);
-        tui.terminal.resize(size)?;
+        crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, size)?;
         app.transcript_view.history = TranscriptHistoryState::Partial;
         app.render_owned_transcript(&mut tui, size)?;
         app.transcript_view
@@ -289,7 +289,7 @@ async fn recap_spacing_belongs_to_the_transcript_tail() -> Result<()> {
         let mut tui = crate::tui::test_support::make_test_tui()?;
         tui.set_owned_screen(/*owned*/ true)?;
         let size = Size::new(width, height);
-        tui.terminal.resize(size)?;
+        crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, size)?;
         let mut snapshot = |app: &mut App, label: &str| -> Result<()> {
             app.render_owned_transcript(&mut tui, size)?;
             let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
@@ -349,7 +349,7 @@ async fn owned_transcript_reserves_a_row_above_the_composer() -> Result<()> {
         ("Detailed", 80, 12, "preserved draft"),
     ] {
         let size = Size::new(width, height);
-        tui.terminal.resize(size)?;
+        crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, size)?;
         app.chat_widget.apply_external_edit(draft.to_string());
         if label == "Detailed" {
             app.transcript_cells = vec![Arc::new(crate::history_cell::new_view_image_tool_call(
@@ -1189,7 +1189,7 @@ async fn slash_picker_overlays_history_without_moving_the_transcript_or_composer
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     for (width, height) in [(80, 14), (32, 14), (80, 7), (80, 5)] {
         let size = Size::new(width, height);
-        tui.terminal.resize(size)?;
+        crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, size)?;
         app.chat_widget.apply_external_edit(String::new());
         app.chat_widget.toggle_vim_mode_and_notify();
         app.chat_widget.handle_key_event(KeyCode::Esc.into());
@@ -1644,7 +1644,7 @@ async fn fullscreen_composer_scrolls_without_moving_caret_or_transcript() -> Res
     let mut tui = crate::tui::test_support::make_test_tui()?;
     tui.set_owned_screen(/*owned*/ true)?;
     let size = Size::new(/*width*/ 60, /*height*/ 24);
-    tui.terminal.resize(size)?;
+    crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, size)?;
     app.transcript_cells = vec![Arc::new(crate::history_cell::PlainHistoryCell::new(
         (1..=40).map(|n| format!("History {n:02}").into()).collect(),
     ))];
@@ -1718,7 +1718,7 @@ async fn fullscreen_composer_scrolls_without_moving_caret_or_transcript() -> Res
 
     // A shorter screen still leaves a usable composer.
     let small = Size::new(/*width*/ 40, /*height*/ 10);
-    tui.terminal.resize(small)?;
+    crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, small)?;
     app.render_owned_transcript(&mut tui, small)?;
     let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
     frames.push(format!("Short screen\n{}", buffer_text(buffer)));
@@ -1737,7 +1737,7 @@ async fn fullscreen_composer_remote_images_leave_an_editable_prompt_row() -> Res
     let mut tui = crate::tui::test_support::make_test_tui()?;
     tui.set_owned_screen(/*owned*/ true)?;
     let size = Size::new(/*width*/ 60, /*height*/ 12);
-    tui.terminal.resize(size)?;
+    crate::custom_terminal::test_support::set_screen_size(&mut tui.terminal, size)?;
     app.transcript_cells = vec![Arc::new(crate::history_cell::PlainHistoryCell::new(vec![
         "History stays visible".into(),
     ]))];

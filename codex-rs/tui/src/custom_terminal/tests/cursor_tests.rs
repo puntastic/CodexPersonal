@@ -2,6 +2,100 @@ use super::*;
 use crate::terminal_palette::rgb_color;
 use pretty_assertions::assert_eq;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ColorMode {
+    Enabled,
+    Disabled,
+}
+
+/// Crossterm memoizes NO_COLOR, so exercise both contracts in isolated child processes.
+fn isolated_color_mode(test_name: &str) -> Option<ColorMode> {
+    const CHILD_ENV: &str = "CODEX_CURSOR_COLOR_TEST_CHILD";
+    const OUTPUT_LIMIT: u64 = 64 * 1024;
+    if let Ok(child) = std::env::var(CHILD_ENV) {
+        let (child_test, mode) = child.rsplit_once(':').expect("child fixture mode");
+        assert_eq!(child_test, test_name);
+        let mode = match mode {
+            "enabled" => ColorMode::Enabled,
+            "disabled" => ColorMode::Disabled,
+            _ => panic!("unknown color fixture mode: {mode}"),
+        };
+        assert_eq!(
+            Colored::ansi_color_disabled_memoized(),
+            mode == ColorMode::Disabled
+        );
+        return Some(mode);
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("color fixture runtime");
+    for mode in ["enabled", "disabled"] {
+        runtime.block_on(async {
+            use tokio::io::AsyncReadExt;
+
+            let mut command =
+                tokio::process::Command::new(std::env::current_exe().expect("current test binary"));
+            command
+                .args(["--exact", test_name, "--nocapture", "--color", "never"])
+                .env(CHILD_ENV, format!("{test_name}:{mode}"))
+                .env_remove("FORCE_COLOR")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            if mode == "enabled" {
+                command.env_remove("NO_COLOR");
+            } else {
+                command.env("NO_COLOR", "1");
+            }
+            let mut child = command.spawn().expect("spawn color fixture child");
+            let mut stdout = child
+                .stdout
+                .take()
+                .expect("child stdout")
+                .take(OUTPUT_LIMIT + 1);
+            let mut stderr = child
+                .stderr
+                .take()
+                .expect("child stderr")
+                .take(OUTPUT_LIMIT + 1);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 20), async {
+                tokio::try_join!(
+                    stdout.read_to_end(&mut out),
+                    stderr.read_to_end(&mut err),
+                    child.wait(),
+                )
+            })
+            .await;
+            let status = match result {
+                Ok(Ok((_, _, status))) => status,
+                failure => {
+                    child
+                        .kill()
+                        .await
+                        .expect("stop and reap color fixture child");
+                    panic!("color fixture {test_name} ({mode}) did not finish: {failure:?}");
+                }
+            };
+            assert!(
+                out.len() <= OUTPUT_LIMIT as usize && err.len() <= OUTPUT_LIMIT as usize,
+                "color fixture {test_name} ({mode}) exceeded its output limit"
+            );
+            let stdout = String::from_utf8_lossy(&out);
+            let stderr = String::from_utf8_lossy(&err);
+            assert!(
+                status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+                "color fixture {test_name} ({mode}): {status}\n{stdout}\n{stderr}"
+            );
+        });
+    }
+    None
+}
+
 #[test]
 fn terminal_draw_keeps_intermediate_cursor_positions_hidden() {
     let mut terminal =
@@ -92,6 +186,11 @@ fn terminal_draw_repaints_the_cursor_anchor_only_when_its_style_needs_restoring(
 
 #[test]
 fn terminal_draw_repairs_styled_anchor_on_cursor_only_frames() {
+    let Some(color_mode) = isolated_color_mode(
+        "custom_terminal::tests::cursor::terminal_draw_repairs_styled_anchor_on_cursor_only_frames",
+    ) else {
+        return;
+    };
     let mut terminal =
         Terminal::with_options(CaptureBackend::new(/*width*/ 12, /*height*/ 2)).expect("terminal");
     let area = Rect::new(
@@ -99,6 +198,7 @@ fn terminal_draw_repairs_styled_anchor_on_cursor_only_frames() {
     );
     terminal.set_viewport_area(area);
     let mut frames = Vec::new();
+    let mut previous_style = None;
     let mut parser =
         vt100::Parser::new(/*rows*/ 2, /*cols*/ 12, /*scrollback_len*/ 0);
 
@@ -119,12 +219,30 @@ fn terminal_draw_repairs_styled_anchor_on_cursor_only_frames() {
             })
             .expect("draw");
 
+        let mut style_command = Vec::new();
+        queue!(style_command, style).expect("expected cursor style");
+        let style_command = String::from_utf8(style_command).expect("cursor style ANSI");
+        assert_eq!(
+            terminal
+                .backend()
+                .output()
+                .matches(style_command.as_str())
+                .count(),
+            usize::from(previous_style != Some(style))
+        );
+        previous_style = Some(style);
         parser.process(&terminal.backend().output);
         assert_eq!(parser.screen().contents(), "\nab  cd  ef  ");
         assert_eq!(parser.screen().cursor_position(), (1, x));
         for column in 0..area.width {
             let cell = parser.screen().cell(1, column).expect("viewport cell");
-            assert_eq!(cell.bgcolor(), vt100::Color::Rgb(80, 80, 80));
+            assert_eq!(
+                cell.bgcolor(),
+                match color_mode {
+                    ColorMode::Enabled => vt100::Color::Rgb(80, 80, 80),
+                    ColorMode::Disabled => vt100::Color::Default,
+                }
+            );
             assert!(
                 cell.bold(),
                 "lost anchor or trailing-cell modifier at {column}"
@@ -132,11 +250,18 @@ fn terminal_draw_repairs_styled_anchor_on_cursor_only_frames() {
         }
         frames.push(terminal.backend().output().escape_debug().to_string());
     }
-    assert_snapshot!("cursor_style_styled_frames", frames.join("\n"));
+    if color_mode == ColorMode::Enabled {
+        assert_snapshot!("cursor_style_styled_frames", frames.join("\n"));
+    }
 }
 
 #[test]
 fn terminal_draw_repairs_owned_wide_hyperlink_after_skipped_glyphs() {
+    let Some(color_mode) = isolated_color_mode(
+        "custom_terminal::tests::cursor::terminal_draw_repairs_owned_wide_hyperlink_after_skipped_glyphs",
+    ) else {
+        return;
+    };
     let mut terminal =
         Terminal::with_options(CaptureBackend::new(/*width*/ 8, /*height*/ 1)).expect("terminal");
     let area = Rect::new(
@@ -144,7 +269,9 @@ fn terminal_draw_repairs_owned_wide_hyperlink_after_skipped_glyphs() {
     );
     terminal.set_viewport_area(area);
     let mut frames = Vec::new();
-    for _ in 0..2 {
+    let mut parser =
+        vt100::Parser::new(/*rows*/ 1, /*cols*/ 8, /*scrollback_len*/ 0);
+    for index in 0..2 {
         terminal.backend_mut().output.clear();
         terminal
             .draw(|frame| {
@@ -158,13 +285,53 @@ fn terminal_draw_repairs_owned_wide_hyperlink_after_skipped_glyphs() {
                 frame.set_cursor_position((5, 0));
             })
             .expect("draw");
+        parser.process(&terminal.backend().output);
+        assert_eq!(parser.screen().cursor_position(), (0, 5));
+        assert!(!parser.screen().hide_cursor());
+        for column in 0..3 {
+            assert_eq!(
+                parser
+                    .screen()
+                    .cell(0, column)
+                    .expect("skipped cell")
+                    .contents(),
+                ""
+            );
+        }
+        assert_eq!(
+            parser.screen().cell(0, 3).expect("wide anchor").contents(),
+            "界"
+        );
+        assert_eq!(
+            parser.screen().cell(0, 3).expect("wide anchor").bgcolor(),
+            match color_mode {
+                ColorMode::Enabled => vt100::Color::Idx(4),
+                ColorMode::Disabled => vt100::Color::Default,
+            }
+        );
+        let output = terminal.backend().output();
+        assert_eq!(output.matches("\x1b[0 q").count(), usize::from(index == 0));
+        assert_eq!(
+            output
+                .matches("\x1b]8;;https://example.com\x07界\x1b]8;;\x07")
+                .count(),
+            if index == 0 { 2 } else { 0 },
+            "both initial draw and cursor repair must preserve the hyperlink"
+        );
         frames.push(terminal.backend().output().escape_debug().to_string());
     }
-    assert_snapshot!("cursor_style_owned_wide_frames", frames.join("\n"));
+    if color_mode == ColorMode::Enabled {
+        assert_snapshot!("cursor_style_owned_wide_frames", frames.join("\n"));
+    }
 }
 
 #[test]
 fn terminal_draw_repairs_single_column_without_scrolling() {
+    let Some(color_mode) = isolated_color_mode(
+        "custom_terminal::tests::cursor::terminal_draw_repairs_single_column_without_scrolling",
+    ) else {
+        return;
+    };
     let mut terminal =
         Terminal::with_options(CaptureBackend::new(/*width*/ 1, /*height*/ 1)).expect("terminal");
     let area = Rect::new(
@@ -174,7 +341,7 @@ fn terminal_draw_repairs_single_column_without_scrolling() {
     let mut frames = Vec::new();
     let mut parser =
         vt100::Parser::new(/*rows*/ 1, /*cols*/ 1, /*scrollback_len*/ 1);
-    for _ in 0..3 {
+    for index in 0..3 {
         terminal.backend_mut().output.clear();
         terminal
             .draw(|frame| {
@@ -187,15 +354,37 @@ fn terminal_draw_repairs_single_column_without_scrolling() {
         parser.process(&terminal.backend().output);
         assert_eq!(parser.screen().contents(), "x");
         assert_eq!(parser.screen().cursor_position(), (0, 0));
+        assert_eq!(
+            terminal.backend().output().matches("\x1b[0 q").count(),
+            usize::from(index == 0)
+        );
+        assert_eq!(
+            parser.screen().cell(0, 0).expect("single column").bgcolor(),
+            match color_mode {
+                ColorMode::Enabled => vt100::Color::Idx(4),
+                ColorMode::Disabled => vt100::Color::Default,
+            }
+        );
         frames.push(terminal.backend().output().escape_debug().to_string());
     }
     parser.screen_mut().set_scrollback(/*rows*/ 1);
     assert_eq!(parser.screen().scrollback(), 0);
-    assert_snapshot!("cursor_style_single_column_frames", frames.join("\n"));
+    if color_mode == ColorMode::Enabled {
+        assert_snapshot!("cursor_style_single_column_frames", frames.join("\n"));
+    }
 }
 
 #[test]
 fn terminal_draw_omits_cursor_style_without_an_owned_glyph() {
+    let Some(color_mode) = isolated_color_mode(
+        "custom_terminal::tests::cursor::terminal_draw_omits_cursor_style_without_an_owned_glyph",
+    ) else {
+        return;
+    };
+    let reset = match color_mode {
+        ColorMode::Enabled => "\x1b[39m\x1b[49m\x1b[0m",
+        ColorMode::Disabled => "\x1b[0m",
+    };
     let mut terminal =
         Terminal::with_options(CaptureBackend::new(/*width*/ 2, /*height*/ 1)).expect("terminal");
     for width in [0, 2] {
@@ -219,14 +408,11 @@ fn terminal_draw_omits_cursor_style_without_an_owned_glyph() {
             .expect("draw");
         assert_eq!(
             terminal.backend().output(),
-            "\x1b[39m\x1b[49m\x1b[0m\x1b[1;2H\x1b[?25h"
+            format!("{reset}\x1b[1;2H\x1b[?25h")
         );
     }
     terminal.set_viewport_area(Rect::default());
     terminal.backend_mut().output.clear();
     terminal.draw(|_| {}).expect("hide cursor");
-    assert_eq!(
-        terminal.backend().output(),
-        "\x1b[39m\x1b[49m\x1b[0m\x1b[?25l"
-    );
+    assert_eq!(terminal.backend().output(), format!("{reset}\x1b[?25l"));
 }
