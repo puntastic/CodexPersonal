@@ -115,8 +115,7 @@ async fn external_writer_fork_shortcut_respects_input_ownership() -> Result<()> 
     Ok(())
 }
 
-#[tokio::test]
-async fn external_writer_fork_opens_editable_thread_without_taking_source_lease() -> Result<()> {
+crate::test_support::boxed_async_test!(external_writer_fork_opens_editable_thread_without_taking_source_lease() -> Result<()> {
     let (mut app, mut events, _operations) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
@@ -227,7 +226,7 @@ async fn external_writer_fork_opens_editable_thread_without_taking_source_lease(
     server.shutdown().await?;
     proxy.await??;
     Ok(())
-}
+});
 
 #[tokio::test]
 async fn external_writer_fork_failure_keeps_the_locked_view_and_draft() -> Result<()> {

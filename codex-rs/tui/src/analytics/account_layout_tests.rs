@@ -331,49 +331,87 @@ fn business_chats_display_only_supplied_dollars() {
     assert!(screen(&mut view, /*width*/ 42, /*height*/ 30).contains("$123.45"));
 }
 
-#[tokio::test]
-async fn unsupported_workspace_plans_hide_top_chats_and_skip_loading() {
-    for plan in [
-        "team",
-        "self_serve_business_prolite",
-        "self_serve_business_usage_based",
-        "enterprise",
-        "ent26",
-        "edu",
-        "edu_plus",
-        "edu_pro",
-    ] {
-        let server = test_support::server().await;
-        let (_home, _app_server, mut view) = client::tests::connected_view(&server, plan).await;
-        test_support::settle(&mut view).await;
-        assert_eq!(
-            view.visible_sections(),
-            &[
-                Section::Summary,
-                Section::Credits,
-                Section::Usage,
-                Section::Plugins,
-                Section::Skills
-            ],
-            "{plan}"
-        );
-        assert!(matches!(view.chats, Load::Unavailable), "{plan}");
-        let selected = view.section;
-        press(&mut view, KeyCode::Char('6'));
-        assert_eq!(view.section, selected);
+enum WorkspaceTopChats {
+    Hidden,
+    Visible,
+}
+
+async fn unsupported_workspace_plans_hide_top_chats_and_skip_loading(
+    plan: &str,
+    top_chats: WorkspaceTopChats,
+) {
+    let deadline = std::time::Duration::from_secs(/*secs*/ 10);
+    let server = tokio::time::timeout(deadline, test_support::server())
+        .await
+        .unwrap_or_else(|_| panic!("{plan}: mock server startup timed out"));
+    let (_home, app_server, mut view) = tokio::time::timeout(
+        deadline,
+        crate::test_support::boxed_future!(client::tests::connected_view(&server, plan)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{plan}: embedded app-server startup timed out"));
+    test_support::settle(&mut view).await;
+    match top_chats {
+        WorkspaceTopChats::Hidden => {
+            assert_eq!(
+                view.visible_sections(),
+                &[
+                    Section::Summary,
+                    Section::Credits,
+                    Section::Usage,
+                    Section::Plugins,
+                    Section::Skills
+                ],
+                "{plan}"
+            );
+            assert!(matches!(view.chats, Load::Unavailable), "{plan}");
+            let selected = view.section;
+            press(&mut view, KeyCode::Char('6'));
+            assert_eq!(view.section, selected);
+        }
+        WorkspaceTopChats::Visible => {
+            assert!(view.visible_sections().contains(&Section::Chats), "{plan}");
+            press(&mut view, KeyCode::Char('6'));
+            assert_eq!(view.section, Section::Chats);
+        }
     }
-    for plan in [
-        "business",
-        "enterprise_cbp_usage_based",
-        "enterprise_cbp_automation",
-    ] {
-        let server = test_support::server().await;
-        let (_home, _app_server, mut view) = client::tests::connected_view(&server, plan).await;
-        test_support::settle(&mut view).await;
-        assert!(view.visible_sections().contains(&Section::Chats), "{plan}");
-        press(&mut view, KeyCode::Char('6'));
-        assert_eq!(view.section, Section::Chats);
-    }
+    view.cancel_loads();
+    drop(view);
+    tokio::time::timeout(deadline, app_server.shutdown())
+        .await
+        .unwrap_or_else(|_| panic!("{plan}: embedded app-server shutdown timed out"))
+        .unwrap_or_else(|error| panic!("{plan}: embedded app-server shutdown failed: {error}"));
+}
+
+// Give every plan its own nextest timeout and result instead of accumulating
+// eleven embedded app-server lifecycles in one test.
+macro_rules! workspace_top_chats_cases {
+    ($($name:ident: $plan:literal => $visibility:ident),+ $(,)?) => {
+        $(
+            #[tokio::test]
+            async fn $name() {
+                unsupported_workspace_plans_hide_top_chats_and_skip_loading(
+                    $plan,
+                    WorkspaceTopChats::$visibility,
+                )
+                .await;
+            }
+        )+
+    };
+}
+
+workspace_top_chats_cases! {
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_team: "team" => Hidden,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_self_serve_business_prolite: "self_serve_business_prolite" => Hidden,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_self_serve_business_usage_based: "self_serve_business_usage_based" => Hidden,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_enterprise: "enterprise" => Hidden,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_ent26: "ent26" => Hidden,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_edu: "edu" => Hidden,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_edu_plus: "edu_plus" => Hidden,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_edu_pro: "edu_pro" => Hidden,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_business: "business" => Visible,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_enterprise_cbp_usage_based: "enterprise_cbp_usage_based" => Visible,
+    unsupported_workspace_plans_hide_top_chats_and_skip_loading_enterprise_cbp_automation: "enterprise_cbp_automation" => Visible,
 }
 
 #[tokio::test]

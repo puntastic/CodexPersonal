@@ -34,8 +34,7 @@ async fn start_session(
     .await
 }
 
-#[tokio::test]
-async fn archived_session_requires_confirmation_before_resume_or_fork() -> Result<()> {
+crate::test_support::boxed_async_test!(archived_session_requires_confirmation_before_resume_or_fork() -> Result<()> {
     for action in [
         SessionStartAction::Resume(
             ResumeModelSettings::RestoreFromThread,
@@ -187,7 +186,7 @@ async fn archived_session_requires_confirmation_before_resume_or_fork() -> Resul
         app_server.shutdown().await?;
     }
     Ok(())
-}
+});
 
 #[test]
 fn session_start_error_surfaces_archived_guidance_without_rollout_path() {

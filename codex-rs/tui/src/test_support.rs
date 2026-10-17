@@ -24,6 +24,15 @@ pub(crate) fn test_path_display(path: &str) -> String {
     test_path_buf(path).display().to_string()
 }
 
+/// Stabilize only the exact CLI title in opted-in display fixtures.
+/// Version notices, server versions, and actual wrapping remain observable.
+pub(crate) fn normalize_codex_title_version(rendered: &str) -> String {
+    rendered.replace(
+        &format!("OpenAI Codex (v{})", crate::version::CODEX_CLI_VERSION),
+        "OpenAI Codex (v0.0.0)",
+    )
+}
+
 pub(crate) fn session_source_cli<T>() -> T
 where
     T: DeserializeOwned,
@@ -70,3 +79,14 @@ macro_rules! boxed_future {
     };
 }
 pub(crate) use boxed_future;
+
+// Keep large scenarios on the heap while preserving Tokio's default test runtime and test names.
+macro_rules! boxed_async_test {
+    ($name:ident() -> $output:ty $body:block) => {
+        #[tokio::test]
+        async fn $name() -> $output {
+            $crate::test_support::boxed_future!(async { $body }).await
+        }
+    };
+}
+pub(crate) use boxed_async_test;

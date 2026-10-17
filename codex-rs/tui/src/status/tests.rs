@@ -189,6 +189,7 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
     lines
         .into_iter()
         .map(|line| {
+            let line = crate::test_support::normalize_codex_title_version(&line);
             if let Some((prefix, value)) = line.split_once("Directory:") {
                 let padding = &value[..value.len() - value.trim_start().len()];
                 format!("{prefix}Directory:{padding}[[workspace]]")
@@ -197,6 +198,20 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
             }
         })
         .collect()
+}
+
+#[test]
+fn title_normalization_preserves_version_notices_and_wrapping() {
+    let version = crate::version::CODEX_CLI_VERSION;
+    let rendered = format!(
+        "  >_ OpenAI Codex (v{version})\nServer v{version}\nWarning: Codex CLI v{version}\nOpenAI Codex (v{version}-other)\nOpenAI\nCodex (v{version})"
+    );
+    assert_eq!(
+        crate::test_support::normalize_codex_title_version(&rendered),
+        format!(
+            "  >_ OpenAI Codex (v0.0.0)\nServer v{version}\nWarning: Codex CLI v{version}\nOpenAI Codex (v{version}-other)\nOpenAI\nCodex (v{version})"
+        )
+    );
 }
 
 fn buffer_to_text(buffer: &Buffer, width: u16) -> String {

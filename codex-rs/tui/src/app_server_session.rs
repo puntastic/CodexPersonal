@@ -3807,8 +3807,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn side_fork_skips_parent_title_lookup_but_normal_ephemeral_fork_keeps_it() -> Result<()>
+    crate::test_support::boxed_async_test!(side_fork_skips_parent_title_lookup_but_normal_ephemeral_fork_keeps_it() -> Result<()>
     {
         let codex_home = tempfile::tempdir().expect("tempdir");
         let config = build_config(&codex_home).await;
@@ -3861,7 +3860,7 @@ mod tests {
         assert_eq!(side_fork.session.fork_parent_title, None);
         app_server.shutdown().await?;
         Ok(())
-    }
+    });
 
     #[tokio::test]
     async fn ephemeral_paginated_fork_skips_unsupported_history_hydration() -> Result<()> {
@@ -3898,8 +3897,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn side_fork_uses_one_request_for_long_paginated_history() -> Result<()> {
+    crate::test_support::boxed_async_test!(side_fork_uses_one_request_for_long_paginated_history() -> Result<()> {
         let codex_home = tempfile::tempdir().expect("tempdir");
         let mut config = build_config(&codex_home).await;
         config.terminal_resize_reflow.max_rows =
@@ -3993,7 +3991,7 @@ mod tests {
 
         app_server.shutdown().await?;
         Ok(())
-    }
+    });
 
     #[tokio::test]
     async fn thread_fork_params_forward_instruction_overrides() {

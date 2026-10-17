@@ -16,7 +16,7 @@ fn has_blossom(tui: &tui::Tui) -> bool {
 fn text(buffer: &Buffer) -> String {
     let project = crate::test_support::test_path_display("/tmp/project");
     let normalized_project = format!("{:<width$}", "/tmp/project", width = project.len());
-    buffer
+    let rendered = buffer
         .content
         .chunks(usize::from(buffer.area.width))
         .map(|row| {
@@ -28,7 +28,8 @@ fn text(buffer: &Buffer) -> String {
                 .to_string()
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    crate::test_support::normalize_codex_title_version(&rendered)
 }
 
 fn draw(app: &mut App, tui: &mut tui::Tui, size: Size) -> Result<Rect> {
@@ -124,6 +125,7 @@ async fn non_startup_history_dismisses_logo_until_a_new_thread() -> Result<()> {
     app.insert_history_cell(
         &mut tui,
         Box::new(history_cell::UpdateAvailableHistoryCell::new(
+            "0.0.0".into(),
             "99.0.0".into(),
             /*update_action*/ None,
         )),

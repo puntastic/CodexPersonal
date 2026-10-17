@@ -300,8 +300,7 @@ async fn complete_managed_worktree_creation(
     }
 }
 
-#[tokio::test]
-async fn same_thread_retry_keeps_subscription_and_restores_draft() -> Result<()> {
+crate::test_support::boxed_async_test!(same_thread_retry_keeps_subscription_and_restores_draft() -> Result<()> {
     let (mut app, codex_home) = make_history_test_app().await?;
     let thread_id = ThreadId::from_string(
         &create_fake_rollout(
@@ -362,7 +361,7 @@ async fn same_thread_retry_keeps_subscription_and_restores_draft() -> Result<()>
     );
     proxy.abort();
     Ok(())
-}
+});
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HistoryCapabilities {
@@ -488,7 +487,8 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
     let state_db =
         crate::init_state_db_for_app_server_target(config, &crate::AppServerTarget::Embedded)
             .await?;
-    let mut embedded = crate::start_embedded_app_server(
+    // Construct startup separately so proxy fixtures do not enlarge each scenario's poll frame.
+    let mut embedded = boxed_future!(crate::start_embedded_app_server(
         codex_arg0::Arg0DispatchPaths::default(),
         config.clone(),
         Vec::new(),
@@ -500,7 +500,7 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
         state_db,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
         Default::default(),
-    )
+    ))
     .await?;
     let codex_home = config.codex_home.display().to_string();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -929,8 +929,7 @@ async fn make_history_test_app() -> Result<(Box<App>, tempfile::TempDir)> {
     Ok((app, codex_home))
 }
 
-#[tokio::test]
-async fn delete_current_thread_navigates_only_after_success() -> Result<()> {
+crate::test_support::boxed_async_test!(delete_current_thread_navigates_only_after_success() -> Result<()> {
     let endpoint = crate::resolve_remote_addr("ws://127.0.0.1:4500")?;
     for target in [
         AppServerTarget::Embedded,
@@ -1066,7 +1065,7 @@ async fn delete_current_thread_navigates_only_after_success() -> Result<()> {
         proxy.await??;
     }
     Ok(())
-}
+});
 
 fn spawn_approved_task_tool_call(
     app: &App,
@@ -2760,8 +2759,7 @@ async fn transcript_alt_beginning_loads_every_older_history_page() -> Result<()>
     Ok(())
 }
 
-#[tokio::test]
-async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Result<()> {
+crate::test_support::boxed_async_test!(remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Result<()> {
     let (app, _codex_home) = make_history_test_app().await?;
     let legacy_thread_id =
         create_history_rollout(&app.config, ThreadHistoryMode::Legacy, "legacy history")?;
@@ -2859,7 +2857,7 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
     app_server.shutdown().await?;
     proxy.await??;
     Ok(())
-}
+});
 
 #[tokio::test]
 async fn remote_legacy_history_start_retries_unsupported_paginated_variant() -> Result<()> {
@@ -3657,8 +3655,7 @@ async fn cold_paginated_subagent_transcript_excludes_inherited_parent_history() 
     Ok(())
 }
 
-#[tokio::test]
-async fn managed_worktree_transitions_bind_owner_and_preserve_only_fork_history() -> Result<()> {
+crate::test_support::boxed_async_test!(managed_worktree_transitions_bind_owner_and_preserve_only_fork_history() -> Result<()> {
     use crate::app_event::ManagedWorktreeMode;
     use std::fs;
     use std::process::Command;
@@ -4136,16 +4133,45 @@ terminal_visualization_instructions = true
             _ => None,
         })
         .expect("browser should resolve a saved owner");
-    // Archive stops the writer; unarchive leaves a stored thread eligible for compression.
+    // Preserve archive/unarchive coverage for the modern worktree owner.
     server.thread_archive(saved_owner.id).await?;
     let saved_path = server
         .thread_unarchive(saved_owner.id)
         .await?
         .path
         .expect("saved rollout path");
+    // Modern owners use reference-backed history, which compression must leave seekable.
+    // Give the historical compression seed its own checkout; the invalid owner stays bound.
+    let compression_checkout = manager
+        .create(&codex_worktree::CreateWorktree {
+            source_cwd: source.clone(),
+            base: None,
+        })
+        .map_err(|error| color_eyre::eyre::eyre!(error.to_string()))?;
+    let compression_owner = create_history_rollout(
+        &app.config,
+        ThreadHistoryMode::Legacy,
+        "compressed worktree owner",
+    )?;
+    manager
+        .bind_thread(&compression_checkout.root, &compression_owner.to_string())
+        .map_err(|error| color_eyre::eyre::eyre!(error.to_string()))?;
+    server.thread_archive(compression_owner).await?;
+    let compression_path = server
+        .thread_unarchive(compression_owner)
+        .await?
+        .path
+        .expect("historical rollout path");
+    assert_eq!(
+        codex_rollout::read_session_meta_line(&compression_path)
+            .await?
+            .meta
+            .history_mode,
+        codex_protocol::protocol::ThreadHistoryMode::Legacy
+    );
     fs::OpenOptions::new()
         .write(true)
-        .open(&saved_path)?
+        .open(&compression_path)?
         .set_times(std::fs::FileTimes::new().set_modified(
             std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 60 * 60),
         ))?;
@@ -4154,11 +4180,14 @@ terminal_visualization_instructions = true
         codex_rollout::RolloutCompressionTrigger::Startup,
     );
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while saved_path.exists() || !saved_path.with_extension("jsonl.zst").is_file() {
+        while compression_path.exists()
+            || !compression_path.with_extension("jsonl.zst").is_file()
+        {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     })
     .await?;
+    assert!(saved_path.is_file());
     let (browser_tx, mut browser_rx) = tokio::sync::mpsc::unbounded_channel();
     crate::worktree_browser::fetch(
         crate::worktree_browser::Request {
@@ -4181,7 +4210,12 @@ terminal_visualization_instructions = true
         &entry.owner,
         crate::worktree_browser::Owner::Resumable(thread) if thread.id == saved_owner.id
     )));
+    assert!(compressed_entries.iter().any(|entry| matches!(
+        &entry.owner,
+        crate::worktree_browser::Owner::Resumable(thread) if thread.id == compression_owner
+    )));
     server.thread_archive(saved_owner.id).await?;
+    server.thread_archive(compression_owner).await?;
     let (browser_tx, mut browser_rx) = tokio::sync::mpsc::unbounded_channel();
     crate::worktree_browser::fetch(
         crate::worktree_browser::Request {
@@ -4208,13 +4242,16 @@ terminal_visualization_instructions = true
         &entry.owner,
         crate::worktree_browser::Owner::Archived(thread) if thread.id == saved_owner.id
     )));
+    assert!(entries.iter().any(|entry| matches!(
+        &entry.owner,
+        crate::worktree_browser::Owner::Archived(thread) if thread.id == compression_owner
+    )));
     server.shutdown().await?;
     proxy.await??;
     Ok(())
-}
+});
 
-#[tokio::test]
-async fn changing_directory_preserves_project_trust_permissions_history_and_hooks() -> Result<()> {
+crate::test_support::boxed_async_test!(changing_directory_preserves_project_trust_permissions_history_and_hooks() -> Result<()> {
     use codex_protocol::config_types::TrustLevel as T;
     use serde_json::json;
     use std::fs;
@@ -4586,7 +4623,7 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     server.shutdown().await?;
     proxy.await??;
     Ok(())
-}
+});
 
 #[test]
 fn fresh_session_applies_requested_name() -> Result<()> {

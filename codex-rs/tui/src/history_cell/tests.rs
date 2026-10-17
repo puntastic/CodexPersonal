@@ -1375,9 +1375,37 @@ fn web_search_history_cell_snapshot() {
 }
 
 #[test]
+fn update_available_history_cell_keeps_supplied_versions_in_rich_and_raw_output() {
+    let cell = UpdateAvailableHistoryCell::new(
+        "1.2.3-custom.4".to_string(),
+        "9.9.9".to_string(),
+        /*update_action*/ None,
+    );
+    assert_eq!(
+        render_lines(&cell.raw_lines()),
+        vec![
+            "Update available!",
+            "1.2.3-custom.4 -> 9.9.9",
+            "See https://github.com/openai/codex for installation options.",
+            "",
+            "See full release notes:",
+            "https://github.com/openai/codex/releases/latest",
+        ]
+    );
+    assert!(
+        render_lines(&cell.display_lines(/*width*/ 110))
+            .join("\n")
+            .contains("1.2.3-custom.4 -> 9.9.9")
+    );
+}
+
+#[test]
 fn standalone_unix_update_available_history_cell_snapshot() {
-    let cell =
-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneUnix));
+    let cell = UpdateAvailableHistoryCell::new(
+        "0.0.0".to_string(),
+        "9.9.9".to_string(),
+        Some(UpdateAction::StandaloneUnix),
+    );
     let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
@@ -1385,8 +1413,11 @@ fn standalone_unix_update_available_history_cell_snapshot() {
 
 #[test]
 fn standalone_windows_update_available_history_cell_snapshot() {
-    let cell =
-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneWindows));
+    let cell = UpdateAvailableHistoryCell::new(
+        "0.0.0".to_string(),
+        "9.9.9".to_string(),
+        Some(UpdateAction::StandaloneWindows),
+    );
     let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
@@ -1394,8 +1425,11 @@ fn standalone_windows_update_available_history_cell_snapshot() {
 
 #[test]
 fn pnpm_update_available_history_cell_snapshot() {
-    let cell =
-        UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::PnpmGlobalLatest));
+    let cell = UpdateAvailableHistoryCell::new(
+        "0.0.0".to_string(),
+        "9.9.9".to_string(),
+        Some(UpdateAction::PnpmGlobalLatest),
+    );
     let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);

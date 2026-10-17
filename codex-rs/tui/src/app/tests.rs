@@ -6834,7 +6834,9 @@ async fn app_server_thread_replacement_clears_previous_transcript_before_replay(
         .join("\n");
     assert!(!rendered.contains("Previous thread transcript"));
     assert!(!rendered.contains("Previous queued history"));
-    assert_snapshot!(rendered);
+    assert_snapshot!(crate::test_support::normalize_codex_title_version(
+        &rendered
+    ));
     app_server.shutdown().await?;
     Ok(())
 }

@@ -22,8 +22,7 @@ async fn build_config(temp_dir: &TempDir) -> Config {
         .expect("config should build")
 }
 
-#[tokio::test]
-async fn remote_resume_restores_saved_server_profile_without_permission_overrides() -> Result<()> {
+crate::test_support::boxed_async_test!(remote_resume_restores_saved_server_profile_without_permission_overrides() -> Result<()> {
     let home = tempfile::tempdir()?;
     std::fs::write(
         home.path().join("config.toml"),
@@ -233,7 +232,7 @@ async fn remote_resume_restores_saved_server_profile_without_permission_override
     );
     server.shutdown().await?;
     Ok(())
-}
+});
 
 #[tokio::test]
 async fn viewing_thread_reads_history_without_resuming_it() -> Result<()> {

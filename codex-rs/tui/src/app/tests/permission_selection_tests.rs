@@ -134,8 +134,7 @@ async fn matching_builtin_permission_selection_submits_pending_prompt() -> Resul
     Ok(())
 }
 
-#[tokio::test]
-async fn custom_permission_selection_uses_server_definition_and_preserves_state_on_rejection()
+crate::test_support::boxed_async_test!(custom_permission_selection_uses_server_definition_and_preserves_state_on_rejection()
 -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     app.config.ephemeral = false;
@@ -311,7 +310,7 @@ async fn custom_permission_selection_uses_server_definition_and_preserves_state_
     }
     server.shutdown().await?;
     Ok(())
-}
+});
 
 #[tokio::test]
 async fn accepted_permissions_survive_directory_change_before_notification() -> Result<()> {

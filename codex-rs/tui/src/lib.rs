@@ -658,7 +658,8 @@ pub(crate) async fn start_embedded_app_server_for_picker(
 ) -> color_eyre::Result<AppServerSession> {
     let mut target = AppServerTarget::Embedded;
     let mut state_db = init_state_db_for_app_server_target(config, &target).await?;
-    let app_server = start_app_server(
+    // Keep embedded startup out of the surrounding lifecycle test's future and poll frame.
+    let app_server = crate::test_support::boxed_future!(start_app_server(
         &mut target,
         Arg0DispatchPaths::default(),
         config.clone(),
@@ -671,7 +672,7 @@ pub(crate) async fn start_embedded_app_server_for_picker(
         &mut state_db,
         Arc::new(EnvironmentManager::default_for_tests()),
         Default::default(),
-    )
+    ))
     .await?;
     Ok(
         AppServerSession::new(app_server, target.thread_params_mode())
@@ -2731,8 +2732,7 @@ requires_openai_auth = {requires_openai_auth}
         .await
     }
 
-    #[tokio::test]
-    async fn startup_resume_and_fork_use_configured_or_explicit_cwd() -> color_eyre::Result<()> {
+    crate::test_support::boxed_async_test!(startup_resume_and_fork_use_configured_or_explicit_cwd() -> color_eyre::Result<()> {
         for (action, configured_mode, has_explicit_cwd, expected_directory) in [
             (CwdPromptAction::Resume, "current", false, "launch"),
             (CwdPromptAction::Resume, "session", false, "session"),
@@ -2822,14 +2822,14 @@ requires_openai_auth = {requires_openai_auth}
                 final_config.cwd.as_path(),
                 &expected_cwd,
             ));
-            let mut app_server = start_app_server_for_picker(
+            let mut app_server = crate::test_support::boxed_future!(start_app_server_for_picker(
                 &final_config,
                 &AppServerTarget::Embedded,
                 Vec::new(),
                 LoaderOverrides::without_managed_config_for_tests(),
                 state_db,
                 Arc::new(EnvironmentManager::default_for_tests()),
-            )
+            ))
             .await?;
             let started = match action {
                 CwdPromptAction::Resume => {
@@ -2861,7 +2861,7 @@ requires_openai_auth = {requires_openai_auth}
         }
 
         Ok(())
-    }
+    });
 
     #[tokio::test]
     async fn startup_remote_current_cwd_without_override_is_rejected() -> color_eyre::Result<()> {

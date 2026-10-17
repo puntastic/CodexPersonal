@@ -7,8 +7,7 @@ use codex_config::types::HistoryPersistence;
 use codex_message_history::HistoryConfig;
 use pretty_assertions::assert_eq;
 
-#[tokio::test]
-async fn lifecycle_metadata_uses_local_prompt_history() -> Result<()> {
+crate::test_support::boxed_async_test!(lifecycle_metadata_uses_local_prompt_history() -> Result<()> {
     let local_home = tempfile::tempdir()?;
     let local_config = ConfigBuilder::default()
         .codex_home(local_home.path().to_path_buf())
@@ -94,4 +93,4 @@ async fn lifecycle_metadata_uses_local_prompt_history() -> Result<()> {
         app_server.shutdown().await?;
     }
     Ok(())
-}
+});

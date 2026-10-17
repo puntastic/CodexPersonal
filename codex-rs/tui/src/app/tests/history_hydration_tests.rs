@@ -111,8 +111,7 @@ async fn history_fixture(
     Ok((app, codex_home, target))
 }
 
-#[tokio::test]
-async fn history_hydration_metadata_tracks_missing_turns_and_stale_completions_keep_new_request()
+crate::test_support::boxed_async_test!(history_hydration_metadata_tracks_missing_turns_and_stale_completions_keep_new_request()
 -> Result<()> {
     let (mut app, _codex_home, target) =
         history_fixture(&[1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1]).await?;
@@ -239,7 +238,7 @@ async fn history_hydration_metadata_tracks_missing_turns_and_stale_completions_k
     server.shutdown().await?;
     proxy.await??;
     Ok(())
-}
+});
 
 #[tokio::test]
 async fn history_hydration_archived_retry_uses_first_attempt_runtime_settings() -> Result<()> {

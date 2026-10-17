@@ -5,8 +5,7 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use pretty_assertions::assert_eq;
 
-#[tokio::test]
-async fn starts_and_forks_use_server_provider_unless_explicitly_selected() -> Result<()> {
+crate::test_support::boxed_async_test!(starts_and_forks_use_server_provider_unless_explicitly_selected() -> Result<()> {
     let home = tempfile::tempdir()?;
     std::fs::write(
         home.path().join("config.toml"),
@@ -118,7 +117,7 @@ requires_openai_auth = false
     assert_eq!(forked.session.model_provider_id, "server-provider");
     server.shutdown().await?;
     Ok(())
-}
+});
 
 #[tokio::test]
 async fn selected_profile_provider_is_explicit() -> Result<()> {

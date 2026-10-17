@@ -5,8 +5,7 @@ use super::session_lifecycle_requests::start_recording_app_server_with_history;
 use super::*;
 use pretty_assertions::assert_eq;
 
-#[tokio::test]
-async fn projectless_permissions_survive_session_transitions_without_trust() -> Result<()> {
+crate::test_support::boxed_async_test!(projectless_permissions_survive_session_transitions_without_trust() -> Result<()> {
     let (mut app, mut events, _) = make_test_app_with_channels().await;
     let home = tempfile::tempdir()?;
     app.config.codex_home = home.path().to_path_buf().abs();
@@ -233,7 +232,7 @@ sandbox = "unelevated"
     );
     server.shutdown().await?;
     Ok(())
-}
+});
 
 #[tokio::test]
 async fn local_projectless_defaults_respect_trust_scope_and_explicit_settings() -> Result<()> {
