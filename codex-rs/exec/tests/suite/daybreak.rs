@@ -101,7 +101,7 @@ async fn exec_rejects_daybreak_for_non_openai_provider() -> anyhow::Result<()> {
 async fn configured_daybreak_exec() -> anyhow::Result<(TestCodexExecBuilder, wiremock::MockServer)>
 {
     let test = test_codex_exec();
-    let server = responses::start_mock_server().await;
+    let server = core_test_support::test_codex_exec::start_sse_mock_server().await;
     let token = concat!(
         "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.",
         "eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9wbGFuX3R5cGUiOiJlbnRlcnByaXNlIiwiY2hhdGdwdF9hY2NvdW50X2lkIjoid29ya3NwYWNlIn19.",

@@ -198,7 +198,7 @@ async fn exec_resume_last_appends_to_existing_file() -> anyhow::Result<()> {
             .next()
             .expect("rollout should contain session metadata"),
     )?;
-    assert_eq!(meta["payload"]["history_mode"], "paginated");
+    assert_eq!(meta["payload"]["history_mode"], "paginated_refs_v1");
     assert_eq!(meta["payload"]["thread_source"], "user");
 
     // 2) Second run: resume the most recent file with a new marker.
@@ -501,7 +501,7 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
-    let server = MockServer::start().await;
+    let server = core_test_support::test_codex_exec::start_sse_mock_server().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 5).await;
 
     let dir_a = TempDir::new()?;

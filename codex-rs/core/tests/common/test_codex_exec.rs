@@ -3,6 +3,19 @@ use std::path::Path;
 use tempfile::TempDir;
 use wiremock::MockServer;
 
+/// Start an Exec fixture that serves SSE and explicitly declines WebSocket upgrades.
+/// Keep transport retry/fallback fixtures on their separately configured servers.
+pub async fn start_sse_mock_server() -> MockServer {
+    let server = crate::responses::start_mock_server().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(".*/responses$"))
+        .and(wiremock::matchers::header("upgrade", "websocket"))
+        .respond_with(wiremock::ResponseTemplate::new(/*s*/ 426))
+        .mount(&server)
+        .await;
+    server
+}
+
 pub struct TestCodexExecBuilder {
     home: TempDir,
     cwd: TempDir,

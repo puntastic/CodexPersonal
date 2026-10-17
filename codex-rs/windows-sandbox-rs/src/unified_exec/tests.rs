@@ -97,6 +97,21 @@ fn sandbox_log(codex_home: &Path) -> String {
         .unwrap_or_else(|err| format!("failed to read {}: {err}", log_path.display()))
 }
 
+fn capture_result_diagnostics(result: &crate::CaptureResult) -> String {
+    const OUTPUT_LIMIT: usize = 8 * 1024;
+    let exit_code = result.exit_code;
+    let timed_out = result.timed_out;
+    let stdout_len = result.stdout.len();
+    let stderr_len = result.stderr.len();
+    let stdout_preview_len = stdout_len.min(OUTPUT_LIMIT);
+    let stderr_preview_len = stderr_len.min(OUTPUT_LIMIT);
+    let stdout = String::from_utf8_lossy(&result.stdout[..stdout_preview_len]);
+    let stderr = String::from_utf8_lossy(&result.stderr[..stderr_preview_len]);
+    format!(
+        "exit_code={exit_code} timed_out={timed_out} stdout(first {stdout_preview_len}/{stdout_len} bytes)={stdout:?} stderr(first {stderr_preview_len}/{stderr_len} bytes)={stderr:?}"
+    )
+}
+
 fn workspace_roots_for(root: &Path) -> Vec<AbsolutePathBuf> {
     vec![AbsolutePathBuf::from_absolute_path(root).expect("absolute workspace root")]
 }
@@ -670,11 +685,13 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     };
     let _guard = legacy_process_test_guard();
     let cwd = sandbox_cwd();
+    // Descendant files belong in the writable workspace, not sandbox control state.
+    let fixture = TempDir::new_in(&cwd).expect("create descendant lifecycle fixture");
     let codex_home = sandbox_home("legacy-capture-pwsh");
     println!("capture pwsh codex_home={}", codex_home.path().display());
-    let ready_marker = codex_home.path().join("descendant-started");
-    let release_marker = codex_home.path().join("release-descendant");
-    let survival_marker = codex_home.path().join("descendant-survived");
+    let ready_marker = fixture.path().join("descendant-started");
+    let release_marker = fixture.path().join("release-descendant");
+    let survival_marker = fixture.path().join("descendant-survived");
     let descendant_command = format!(
         "$deadline=(Get-Date).AddSeconds(30); Set-Content -LiteralPath '{}' -Value $PID; while (-not (Test-Path -LiteralPath '{}')) {{ if ((Get-Date) -ge $deadline) {{ exit 3 }}; Start-Sleep -Milliseconds 25 }}; Set-Content -LiteralPath '{}' -Value survived",
         powershell_literal(&ready_marker),
@@ -687,7 +704,7 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     );
     let parent_command = format!(
         "{ASSERT_NO_CONSOLE} Write-Output LEGACY-CAPTURE-DIRECT; {}",
-        start_powershell_child(&pwsh, codex_home.path(), &descendant_command, &parent_tail,),
+        start_powershell_child(&pwsh, fixture.path(), &descendant_command, &parent_tail,),
     );
     let permission_profile = PermissionProfile::workspace_write();
     let result = run_windows_sandbox_capture(
@@ -707,7 +724,12 @@ fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
     )
     .expect("run legacy capture powershell");
     let descendant_pid = fs::read_to_string(&ready_marker)
-        .expect("read descendant pid")
+        .unwrap_or_else(|err| {
+            panic!(
+                "read descendant pid: {err}; {}",
+                capture_result_diagnostics(&result)
+            )
+        })
         .trim()
         .parse()
         .expect("parse descendant pid");
@@ -850,9 +872,10 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
     };
     let _guard = legacy_process_test_guard();
     let cwd = sandbox_cwd();
+    let fixture = TempDir::new_in(&cwd).expect("create descendant lifecycle fixture");
     let codex_home = sandbox_home("legacy-capture-cancel");
-    let descendant_marker = codex_home.path().join("descendant-survived");
-    let ready_marker = codex_home.path().join("descendant-started");
+    let descendant_marker = fixture.path().join("descendant-survived");
+    let ready_marker = fixture.path().join("descendant-started");
     let descendant_command = format!(
         "Set-Content -LiteralPath '{}' -Value $PID; Start-Sleep -Seconds 1; Set-Content -LiteralPath '{}' -Value survived",
         powershell_literal(&ready_marker),
@@ -860,7 +883,7 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
     );
     let parent_command = start_powershell_child(
         &pwsh,
-        codex_home.path(),
+        fixture.path(),
         &descendant_command,
         "Start-Sleep -Seconds 30",
     );
@@ -904,11 +927,13 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
 
     assert!(
         started_at.elapsed() < Duration::from_secs(10),
-        "cancellation should end capture before the timeout"
+        "cancellation should end capture before the timeout; {}",
+        capture_result_diagnostics(&result)
     );
     assert!(
         !result.timed_out,
-        "cancellation should not be reported as a timeout"
+        "cancellation should not be reported as a timeout; {}",
+        capture_result_diagnostics(&result)
     );
     assert_ne!(result.exit_code, 0);
     let descendant_process = descendant_process
@@ -935,13 +960,14 @@ async fn assert_legacy_tty_descendant_lifecycle(
     lifecycle: LegacyTtyDescendantLifecycle,
 ) {
     let cwd = sandbox_cwd();
+    let fixture = TempDir::new_in(&cwd).expect("create descendant lifecycle fixture");
     let codex_home = sandbox_home(match lifecycle {
         LegacyTtyDescendantLifecycle::Terminate => "legacy-tty-descendant-terminate",
         LegacyTtyDescendantLifecycle::Preserve => "legacy-tty-descendant-preserve",
     });
-    let ready_marker = codex_home.path().join("descendant-started");
-    let release_marker = codex_home.path().join("release-descendant");
-    let survival_marker = codex_home.path().join("descendant-survived");
+    let ready_marker = fixture.path().join("descendant-started");
+    let release_marker = fixture.path().join("release-descendant");
+    let survival_marker = fixture.path().join("descendant-survived");
     let child_tail = match lifecycle {
         LegacyTtyDescendantLifecycle::Terminate => "Start-Sleep -Seconds 30".to_string(),
         LegacyTtyDescendantLifecycle::Preserve => format!(
@@ -961,8 +987,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
             powershell_literal(&ready_marker),
         ),
     };
-    let parent_command =
-        start_powershell_child(pwsh, codex_home.path(), &child_command, &parent_tail);
+    let parent_command = start_powershell_child(pwsh, fixture.path(), &child_command, &parent_tail);
     let permission_profile = PermissionProfile::workspace_write();
     let spawned = spawn_windows_sandbox_session_legacy(
         &permission_profile,

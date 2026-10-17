@@ -64,9 +64,15 @@ mod tests {
         assert!(!super::embedded_v8_version().is_empty());
     }
 
+    // Other workspace crates can enable the shared V8 dependency's sandbox feature.
+    // An absent local feature does not require the linked sandbox to be disabled.
+    #[cfg(feature = "sandbox")]
     #[test]
-    fn sandbox_feature_matches_linked_v8() {
-        assert_eq!(super::linked_v8_has_sandbox(), cfg!(feature = "sandbox"));
+    fn requested_sandbox_is_enabled_in_linked_v8() {
+        assert!(
+            super::linked_v8_has_sandbox(),
+            "the sandbox feature must link sandbox-enabled V8"
+        );
     }
 
     #[test]
