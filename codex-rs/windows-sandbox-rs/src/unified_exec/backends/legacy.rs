@@ -395,6 +395,14 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
         },
     )?;
 
+    #[cfg(test)]
+    super::super::legacy_token_diagnostics::observe_before_launch(
+        cwd,
+        // SAFETY: security owns the selected primary token throughout this call.
+        unsafe { BorrowedHandle::borrow_raw(security.h_token) },
+        &security.write_root_sids,
+    );
+
     let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(128);
     let (stdout_tx, stdout_rx) = broadcast::channel::<Vec<u8>>(256);
     let stderr_rx = if tty {

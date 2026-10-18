@@ -779,6 +779,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         ]);
 
         let permission_profile = PermissionProfile::workspace_write();
+        let token_observer = super::legacy_token_diagnostics::register(test_root.path());
         let spawned = spawn_windows_sandbox_session_legacy(
             &permission_profile,
             workspace_roots_for(workspace.as_path()).as_slice(),
@@ -799,6 +800,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         )
         .await
         .expect("spawn legacy delete session");
+        let token_observation = token_observer.take();
         let mut observed = legacy_fixture_diagnostics::ObservedProcess::new(spawned);
         let completion = observed.finish(Duration::from_secs(10)).await;
         let cleanup = if completion.is_err() {
@@ -833,7 +835,8 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             let post_observation_dacl =
                 legacy_fixture_diagnostics::workspace_dacl_snapshot(test_root.path());
             diagnostics.push_str(&format!(
-                "\nDACL phase=pre_spawn_after_fixture_creation cleanup_ran=false\n{pre_spawn_dacl}\nDACL phase=post_observation cleanup_ran={cleanup_ran}\n{post_observation_dacl}"
+                "\nDACL phase=pre_spawn_after_fixture_creation cleanup_ran=false\n{pre_spawn_dacl}\nDACL phase=post_observation cleanup_ran={cleanup_ran}\n{post_observation_dacl}\n{}",
+                token_observation.diagnostics(),
             ));
         }
         let outcome = outcome.unwrap_or_else(|error| panic!("{error}\n{diagnostics}"));

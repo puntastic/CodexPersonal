@@ -187,3 +187,7 @@ pub(crate) use backends::windows_common::start_runner_stdin_writer;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "legacy_token_diagnostics_tests.rs"]
+mod legacy_token_diagnostics;
