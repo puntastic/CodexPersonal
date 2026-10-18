@@ -3,6 +3,7 @@
 //! These tests simulate VSCode's shell preview on Windows/WSL where the output
 //! may be encoded with a legacy code page before it reaches Codex.
 
+use super::OutputCaptureEnd;
 use super::StreamOutput;
 use pretty_assertions::assert_eq;
 
@@ -67,10 +68,52 @@ fn test_invalid_bytes_still_fall_back_to_lossy() {
     assert_eq!(decode_shell_output(bytes), String::from_utf8_lossy(bytes));
 }
 
+#[test]
+fn decoding_preserves_capture_end_and_truncation_independently() {
+    for capture_end in [
+        None,
+        Some(OutputCaptureEnd::Eof),
+        Some(OutputCaptureEnd::DrainDeadline),
+        Some(OutputCaptureEnd::Cancelled),
+        Some(OutputCaptureEnd::ReadError { os_error: Some(5) }),
+        Some(OutputCaptureEnd::ReadError { os_error: None }),
+    ] {
+        let decoded = StreamOutput {
+            text: b"Output: caf\xE9".to_vec(), // codespell:ignore caf
+            truncated_after_lines: Some(3),
+            capture_end,
+        }
+        .from_utf8_lossy();
+
+        assert_eq!(
+            (
+                decoded.text,
+                decoded.truncated_after_lines,
+                decoded.capture_end
+            ),
+            ("Output: café".to_string(), Some(3), capture_end),
+        );
+    }
+}
+
+#[test]
+fn text_without_capture_evidence_does_not_claim_eof() {
+    let output = StreamOutput::new("already decoded".to_string());
+    assert_eq!(
+        (
+            output.text,
+            output.truncated_after_lines,
+            output.capture_end
+        ),
+        ("already decoded".to_string(), None, None),
+    );
+}
+
 fn decode_shell_output(bytes: &[u8]) -> String {
     StreamOutput {
         text: bytes.to_vec(),
         truncated_after_lines: None,
+        capture_end: None,
     }
     .from_utf8_lossy()
     .text

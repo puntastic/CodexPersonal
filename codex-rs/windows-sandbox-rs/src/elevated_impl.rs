@@ -296,6 +296,8 @@ mod windows_impl {
                 exit_code,
                 stdout,
                 stderr,
+                stdout_end: None,
+                stderr_end: None,
                 timed_out,
             })
         })()
@@ -310,12 +312,17 @@ mod stub {
     use super::ElevatedSandboxProfileCaptureRequest;
     use anyhow::Result;
     use anyhow::bail;
+    use codex_protocol::exec_output::OutputCaptureEnd;
 
     #[derive(Debug, Default)]
     pub struct CaptureResult {
         pub exit_code: i32,
         pub stdout: Vec<u8>,
         pub stderr: Vec<u8>,
+        /// Observed stdout collection end; `None` means unreported, not complete.
+        pub stdout_end: Option<OutputCaptureEnd>,
+        /// Observed stderr collection end; `None` means unreported, not complete.
+        pub stderr_end: Option<OutputCaptureEnd>,
         pub timed_out: bool,
     }
 

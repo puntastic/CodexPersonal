@@ -510,6 +510,28 @@ MXC uses the standard `command/exec` streaming and process-control path, includi
 ConPTY when `tty` is enabled. The buffered legacy Windows sandbox restrictions on
 process control and custom output caps do not apply to MXC.
 
+### Buffered command output termination
+
+`command/exec` keeps process outcome and output collection separate. Its nullable
+`stdoutCaptureEnd` and `stderrCaptureEnd` describe an observed collector ending:
+`eof`, `drainDeadline`, `cancelled`, or `readError` (with `osError` when available).
+Fields omitted by older servers or returned as null mean the backend did not report
+that observation, not that capture was complete. Initially the legacy unelevated Windows capture reports it;
+elevated, streaming, MXC and other uninstrumented paths remain unknown.
+
+For example, `exitCode: 0` can accompany `stdoutCaptureEnd: {"type":"drainDeadline"}`:
+the command finished successfully, but collection stopped before EOF. Already
+collected output remains useful; the result is not a reason to rerun a potentially
+non-idempotent command automatically. Conversely, `eof` describes the collector,
+not whether output byte caps or later presentation retained every byte.
+
+Legacy Windows collection uses one shared two-second post-exit drain deadline.
+Normal root exit still preserves descendants; closing collection may cause later
+descendant writes to fail with a broken pipe. Helpers requiring complete output,
+including sensitive shell snapshots, reject a known non-EOF result rather than
+using incomplete text as a valid snapshot. Unknown legacy/elevated reports retain
+their prior behavior without gaining a completeness claim.
+
 ### Gateway OAuth sign-in
 
 Providers configured with `gateway_oauth` require a secondary OAuth credential in

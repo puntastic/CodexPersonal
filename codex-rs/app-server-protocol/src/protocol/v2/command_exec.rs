@@ -108,6 +108,26 @@ pub struct CommandExecParams {
     pub permission_profile: Option<String>,
 }
 
+/// Observed end of one output collector, separate from process exit and byte caps.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(tag = "type", rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum CommandExecOutputCaptureEnd {
+    /// The collector reached EOF. Output caps may still truncate returned text.
+    Eof,
+    /// The post-exit drain deadline arrived before EOF was observed.
+    DrainDeadline,
+    /// Collection stopped on cancellation; this does not redefine process exit.
+    Cancelled,
+    /// Collection stopped on an I/O error, with its OS code when available.
+    ReadError {
+        #[serde(rename = "osError")]
+        #[ts(rename = "osError")]
+        os_error: Option<i32>,
+    },
+}
+
 /// Final buffered result for `command/exec`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -123,6 +143,14 @@ pub struct CommandExecResponse {
     ///
     /// Empty when stderr was streamed via `command/exec/outputDelta`.
     pub stderr: String,
+    /// How stdout collection ended, when reported by the execution backend.
+    /// Missing or null means unknown, not complete. Independent of exitCode and output caps.
+    #[serde(default)]
+    pub stdout_capture_end: Option<CommandExecOutputCaptureEnd>,
+    /// How stderr collection ended, when reported by the execution backend.
+    /// Missing or null means unknown, not complete. Independent of exitCode and output caps.
+    #[serde(default)]
+    pub stderr_capture_end: Option<CommandExecOutputCaptureEnd>,
 }
 
 /// Write stdin bytes to a running `command/exec` session, close stdin, or
@@ -211,3 +239,7 @@ pub struct CommandExecOutputDeltaNotification {
     /// truncated later output on that stream.
     pub cap_reached: bool,
 }
+
+#[cfg(test)]
+#[path = "command_exec_capture_tests.rs"]
+mod capture_tests;

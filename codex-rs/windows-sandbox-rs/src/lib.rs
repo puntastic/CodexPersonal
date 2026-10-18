@@ -72,6 +72,8 @@ pub use app_package::registered_core_requested;
 #[cfg(target_os = "windows")]
 mod cap;
 #[cfg(target_os = "windows")]
+mod capture_reader;
+#[cfg(target_os = "windows")]
 mod deny_read_acl;
 #[cfg(target_os = "windows")]
 mod deny_read_state;
@@ -552,6 +554,8 @@ pub use stub::run_windows_sandbox_legacy_preflight;
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::WindowsSandboxCancellationToken;
+    use super::capture_reader::CaptureOutput;
+    use super::capture_reader::CaptureStdio;
     use super::logging::log_failure;
     use super::logging::log_note;
     use super::logging::log_success;
@@ -567,29 +571,24 @@ mod windows_impl {
     use super::spawn_prep::prepare_legacy_spawn_context;
     use super::spawn_prep::root_capability_sids;
     use anyhow::Result;
+    use codex_protocol::exec_output::IO_DRAIN_TIMEOUT_MS;
+    use codex_protocol::exec_output::OutputCaptureEnd;
     use codex_protocol::models::PermissionProfile;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use std::collections::HashMap;
-    use std::io;
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::io::FromRawHandle;
     use std::os::windows::io::OwnedHandle;
     use std::path::Path;
-    use std::ptr;
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::Instant;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
-    use windows_sys::Win32::Foundation::SetHandleInformation;
-    use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::GetExitCodeProcess;
     use windows_sys::Win32::System::Threading::INFINITE;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
-
-    type PipeHandles = ((HANDLE, HANDLE), (HANDLE, HANDLE), (HANDLE, HANDLE));
 
     enum WaitOutcome {
         Exited,
@@ -635,38 +634,14 @@ mod windows_impl {
         }
     }
 
-    unsafe fn setup_stdio_pipes() -> io::Result<PipeHandles> {
-        let mut in_r: HANDLE = std::ptr::null_mut();
-        let mut in_w: HANDLE = std::ptr::null_mut();
-        let mut out_r: HANDLE = std::ptr::null_mut();
-        let mut out_w: HANDLE = std::ptr::null_mut();
-        let mut err_r: HANDLE = std::ptr::null_mut();
-        let mut err_w: HANDLE = std::ptr::null_mut();
-        if CreatePipe(&mut in_r, &mut in_w, ptr::null_mut(), 0) == 0 {
-            return Err(io::Error::from_raw_os_error(GetLastError() as i32));
-        }
-        if CreatePipe(&mut out_r, &mut out_w, ptr::null_mut(), 0) == 0 {
-            return Err(io::Error::from_raw_os_error(GetLastError() as i32));
-        }
-        if CreatePipe(&mut err_r, &mut err_w, ptr::null_mut(), 0) == 0 {
-            return Err(io::Error::from_raw_os_error(GetLastError() as i32));
-        }
-        if SetHandleInformation(in_r, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) == 0 {
-            return Err(io::Error::from_raw_os_error(GetLastError() as i32));
-        }
-        if SetHandleInformation(out_w, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) == 0 {
-            return Err(io::Error::from_raw_os_error(GetLastError() as i32));
-        }
-        if SetHandleInformation(err_w, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) == 0 {
-            return Err(io::Error::from_raw_os_error(GetLastError() as i32));
-        }
-        Ok(((in_r, in_w), (out_r, out_w), (err_r, err_w)))
-    }
-
     pub struct CaptureResult {
         pub exit_code: i32,
         pub stdout: Vec<u8>,
         pub stderr: Vec<u8>,
+        /// Observed stdout collection end; `None` means unreported, not complete.
+        pub stdout_end: Option<OutputCaptureEnd>,
+        /// Observed stderr collection end; `None` means unreported, not complete.
+        pub stderr_end: Option<OutputCaptureEnd>,
         pub timed_out: bool,
     }
 
@@ -750,6 +725,9 @@ mod windows_impl {
             cwd,
             capability_roots,
         )?;
+        // SAFETY: Session preparation transfers this valid token handle to the
+        // caller. LegacySessionSecurity borrows the raw value but does not close it.
+        let token = unsafe { OwnedHandle::from_raw_handle(security.h_token) };
         allow_null_device_for_workspace_write(uses_write_capabilities);
         apply_legacy_session_acl_rules(
             &permissions,
@@ -764,9 +742,18 @@ mod windows_impl {
                 write_root_sids: &security.write_root_sids,
             },
         )?;
-        let (stdin_pair, stdout_pair, stderr_pair) = unsafe { setup_stdio_pipes()? };
-        let ((in_r, in_w), (out_r, out_w), (err_r, err_w)) = (stdin_pair, stdout_pair, stderr_pair);
-        let spawn_res = crate::LaunchDesktop::prepare_legacy(
+        let CaptureStdio {
+            stdin_read,
+            stdin_write,
+            stdout_read,
+            stdout_write,
+            stderr_read,
+            stderr_write,
+        } = CaptureStdio::new()?;
+        // Start the already-nonblocking readers before spawning. Any setup or
+        // launch failure can cancel/join them while all pipe handles remain owned.
+        let output = CaptureOutput::start(stdout_read, stderr_read)?;
+        let created = crate::LaunchDesktop::prepare_legacy(
             &permissions,
             &current_dir,
             &env_map,
@@ -776,98 +763,32 @@ mod windows_impl {
         )
         .and_then(|desktop| unsafe {
             create_process_as_user(
-                security.h_token,
+                token.as_raw_handle(),
                 &command,
                 cwd,
                 &env_map,
                 logs_base_dir,
-                Some((in_r, out_w, err_w)),
+                Some((
+                    stdin_read.as_raw_handle(),
+                    stdout_write.as_raw_handle(),
+                    stderr_write.as_raw_handle(),
+                )),
                 ConsoleMode::NoWindow,
                 desktop,
             )
-        });
-        let created = match spawn_res {
-            Ok(v) => v,
-            Err(err) => {
-                unsafe {
-                    CloseHandle(in_r);
-                    CloseHandle(in_w);
-                    CloseHandle(out_r);
-                    CloseHandle(out_w);
-                    CloseHandle(err_r);
-                    CloseHandle(err_w);
-                    CloseHandle(security.h_token);
-                }
-                return Err(err);
-            }
-        };
+        })?;
         let pi = created.process_info;
         let job = Arc::clone(&created.job);
         let _desktop = created;
 
-        unsafe {
-            CloseHandle(in_r);
-            // Close the parent's stdin write end so the child sees EOF immediately.
-            CloseHandle(in_w);
-            CloseHandle(out_w);
-            CloseHandle(err_w);
-        }
-
-        let (tx_out, rx_out) = std::sync::mpsc::channel::<Vec<u8>>();
-        let (tx_err, rx_err) = std::sync::mpsc::channel::<Vec<u8>>();
-        // SAFETY: setup_stdio_pipes returned valid, uniquely owned read handles.
-        // The spawn failure path has already returned; each handle now moves to
-        // exactly one reader and is not closed elsewhere on this success path.
-        let (out_r, err_r) = unsafe {
-            (
-                OwnedHandle::from_raw_handle(out_r),
-                OwnedHandle::from_raw_handle(err_r),
-            )
-        };
-        let t_out = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 8192];
-            loop {
-                let mut read_bytes: u32 = 0;
-                let ok = unsafe {
-                    windows_sys::Win32::Storage::FileSystem::ReadFile(
-                        out_r.as_raw_handle(),
-                        tmp.as_mut_ptr(),
-                        tmp.len() as u32,
-                        &mut read_bytes,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if ok == 0 || read_bytes == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&tmp[..read_bytes as usize]);
-            }
-            let _ = tx_out.send(buf);
-        });
-        let t_err = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 8192];
-            loop {
-                let mut read_bytes: u32 = 0;
-                let ok = unsafe {
-                    windows_sys::Win32::Storage::FileSystem::ReadFile(
-                        err_r.as_raw_handle(),
-                        tmp.as_mut_ptr(),
-                        tmp.len() as u32,
-                        &mut read_bytes,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if ok == 0 || read_bytes == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&tmp[..read_bytes as usize]);
-            }
-            let _ = tx_err.send(buf);
-        });
+        drop(stdin_read);
+        // Close the parent's stdin write end so the child sees EOF immediately.
+        drop(stdin_write);
+        drop(stdout_write);
+        drop(stderr_write);
 
         let wait_outcome = wait_for_process(pi.hProcess, timeout_ms, cancellation.as_ref());
+        let drain_deadline = Instant::now() + Duration::from_millis(IO_DRAIN_TIMEOUT_MS);
         let timed_out = matches!(wait_outcome, WaitOutcome::TimedOut);
         let cancelled = matches!(wait_outcome, WaitOutcome::Cancelled);
         let mut exit_code_u32: u32 = 1;
@@ -908,12 +829,11 @@ mod windows_impl {
             if !pi.hProcess.is_null() {
                 CloseHandle(pi.hProcess);
             }
-            CloseHandle(security.h_token);
         }
-        let _ = t_out.join();
-        let _ = t_err.join();
-        let stdout = rx_out.recv().unwrap_or_default();
-        let stderr = rx_err.recv().unwrap_or_default();
+        drop(token);
+        // A cancellation observed after root exit stops collection only. The
+        // root outcome and the job/descendant policy above are already decided.
+        let (stdout, stderr) = output.finish(drain_deadline, cancellation.as_ref())?;
         let exit_code = if timed_out {
             128 + 64
         } else {
@@ -928,8 +848,10 @@ mod windows_impl {
 
         Ok(CaptureResult {
             exit_code,
-            stdout,
-            stderr,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+            stdout_end: Some(stdout.end),
+            stderr_end: Some(stderr.end),
             timed_out,
         })
     }
@@ -1044,6 +966,7 @@ mod stub {
     use super::WindowsSandboxCancellationToken;
     use anyhow::Result;
     use anyhow::bail;
+    use codex_protocol::exec_output::OutputCaptureEnd;
     use codex_protocol::models::PermissionProfile;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use std::collections::HashMap;
@@ -1054,6 +977,10 @@ mod stub {
         pub exit_code: i32,
         pub stdout: Vec<u8>,
         pub stderr: Vec<u8>,
+        /// Observed stdout collection end; `None` means unreported, not complete.
+        pub stdout_end: Option<OutputCaptureEnd>,
+        /// Observed stderr collection end; `None` means unreported, not complete.
+        pub stderr_end: Option<OutputCaptureEnd>,
         pub timed_out: bool,
     }
 

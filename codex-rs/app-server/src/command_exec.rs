@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use codex_app_server_protocol::CommandExecOutputCaptureEnd;
 use codex_app_server_protocol::CommandExecOutputDeltaNotification;
 use codex_app_server_protocol::CommandExecOutputStream;
 use codex_app_server_protocol::CommandExecResizeParams;
@@ -23,6 +24,8 @@ use codex_core::exec::ExecExpiration;
 use codex_core::exec::ExecExpirationOutcome;
 use codex_core::exec::IO_DRAIN_TIMEOUT_MS;
 use codex_core::sandboxing::ExecRequest;
+use codex_protocol::exec_output::ExecToolCallOutput;
+use codex_protocol::exec_output::OutputCaptureEnd;
 use codex_protocol::exec_output::bytes_to_string_smart;
 use codex_sandboxing::SandboxType;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
@@ -139,6 +142,27 @@ impl InternalProcessIdExt for InternalProcessId {
     }
 }
 
+fn protocol_capture_end(end: OutputCaptureEnd) -> CommandExecOutputCaptureEnd {
+    match end {
+        OutputCaptureEnd::Eof => CommandExecOutputCaptureEnd::Eof,
+        OutputCaptureEnd::DrainDeadline => CommandExecOutputCaptureEnd::DrainDeadline,
+        OutputCaptureEnd::Cancelled => CommandExecOutputCaptureEnd::Cancelled,
+        OutputCaptureEnd::ReadError { os_error } => {
+            CommandExecOutputCaptureEnd::ReadError { os_error }
+        }
+    }
+}
+
+fn captured_exec_response(output: ExecToolCallOutput) -> CommandExecResponse {
+    CommandExecResponse {
+        exit_code: output.exit_code,
+        stdout: output.stdout.text,
+        stderr: output.stderr.text,
+        stdout_capture_end: output.stdout.capture_end.map(protocol_capture_end),
+        stderr_capture_end: output.stderr.capture_end.map(protocol_capture_end),
+    }
+}
+
 impl CommandExecManager {
     pub(crate) async fn start(
         &self,
@@ -207,14 +231,7 @@ impl CommandExecManager {
                 {
                     Ok(output) => {
                         outgoing
-                            .send_response(
-                                request_id,
-                                CommandExecResponse {
-                                    exit_code: output.exit_code,
-                                    stdout: output.stdout.text,
-                                    stderr: output.stderr.text,
-                                },
-                            )
+                            .send_response(request_id, captured_exec_response(output))
                             .await;
                     }
                     Err(err) => {
@@ -561,6 +578,9 @@ async fn run_command(params: RunCommandParams) {
                 exit_code,
                 stdout,
                 stderr,
+                // This collector does not yet report a typed termination reason.
+                stdout_capture_end: None,
+                stderr_capture_end: None,
             },
         )
         .await;
@@ -701,6 +721,77 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    #[test]
+    fn buffered_response_preserves_capture_limits_beside_successful_exit() {
+        use codex_protocol::exec_output::StreamOutput;
+
+        let response = captured_exec_response(ExecToolCallOutput {
+            exit_code: 0,
+            stdout: StreamOutput {
+                text: "collected prefix".to_string(),
+                truncated_after_lines: Some(1),
+                capture_end: Some(OutputCaptureEnd::DrainDeadline),
+            },
+            stderr: StreamOutput {
+                text: "diagnostic prefix".to_string(),
+                truncated_after_lines: None,
+                capture_end: Some(OutputCaptureEnd::ReadError { os_error: Some(5) }),
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            serde_json::to_value(response).expect("serialize command result"),
+            serde_json::json!({
+                "exitCode": 0,
+                "stdout": "collected prefix",
+                "stderr": "diagnostic prefix",
+                "stdoutCaptureEnd": {"type": "drainDeadline"},
+                "stderrCaptureEnd": {"type": "readError", "osError": 5},
+            })
+        );
+    }
+
+    #[test]
+    fn buffered_response_preserves_every_reported_end_and_unknown() {
+        let cases = [
+            (None, None),
+            (
+                Some(OutputCaptureEnd::Eof),
+                Some(CommandExecOutputCaptureEnd::Eof),
+            ),
+            (
+                Some(OutputCaptureEnd::DrainDeadline),
+                Some(CommandExecOutputCaptureEnd::DrainDeadline),
+            ),
+            (
+                Some(OutputCaptureEnd::Cancelled),
+                Some(CommandExecOutputCaptureEnd::Cancelled),
+            ),
+            (
+                Some(OutputCaptureEnd::ReadError { os_error: None }),
+                Some(CommandExecOutputCaptureEnd::ReadError { os_error: None }),
+            ),
+            (
+                Some(OutputCaptureEnd::ReadError {
+                    os_error: Some(109),
+                }),
+                Some(CommandExecOutputCaptureEnd::ReadError {
+                    os_error: Some(109),
+                }),
+            ),
+        ];
+        for (end, expected) in cases {
+            let mut output = ExecToolCallOutput::default();
+            output.exit_code = 23;
+            output.stdout.capture_end = end;
+            output.stderr.capture_end = end;
+            let response = captured_exec_response(output);
+            assert_eq!(response.exit_code, 23);
+            assert_eq!(response.stdout_capture_end, expected);
+            assert_eq!(response.stderr_capture_end, expected);
+        }
+    }
     #[cfg(not(target_os = "windows"))]
     use crate::outgoing_message::OutgoingEnvelope;
     #[cfg(not(target_os = "windows"))]

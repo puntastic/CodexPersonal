@@ -28,6 +28,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
+use codex_protocol::exec_output::OutputCaptureEnd;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -91,7 +92,7 @@ pub(crate) const MAX_EXEC_OUTPUT_DELTAS_PER_CALL: usize = 10_000;
 // those pipes may stay open after we `kill` the direct child on timeout.
 // That would cause the `read_capped` tasks to block on `read()`
 // indefinitely, effectively hanging the whole agent.
-pub const IO_DRAIN_TIMEOUT_MS: u64 = 2_000; // 2 s should be plenty for local pipes
+pub use codex_protocol::exec_output::IO_DRAIN_TIMEOUT_MS;
 
 #[derive(Debug)]
 pub struct ExecParams {
@@ -764,10 +765,12 @@ async fn exec_windows_sandbox(
     let stdout = StreamOutput {
         text: stdout_text,
         truncated_after_lines: None,
+        capture_end: capture.stdout_end,
     };
     let stderr = StreamOutput {
         text: stderr_text,
         truncated_after_lines: None,
+        capture_end: capture.stderr_end,
     };
     let aggregated_output = aggregate_output(&stdout, &stderr, capture_policy.retained_bytes_cap());
 
@@ -835,6 +838,35 @@ fn finalize_exec_result(
                 }));
             }
 
+            // Only measured non-EOF capture invalidates successful strict helpers.
+            // Unknown capture state preserves the behavior of other backends.
+            if exit_code == 0
+                && matches!(
+                    capture_policy,
+                    ExecCapturePolicy::FullBufferWithExpiration
+                        | ExecCapturePolicy::SensitiveFullBuffer
+                )
+                && [
+                    exec_output.stdout.capture_end,
+                    exec_output.stderr.capture_end,
+                ]
+                .iter()
+                .any(|end| {
+                    matches!(
+                        end,
+                        Some(
+                            OutputCaptureEnd::DrainDeadline
+                                | OutputCaptureEnd::Cancelled
+                                | OutputCaptureEnd::ReadError { .. }
+                        )
+                    )
+                })
+            {
+                return Err(CodexErr::Io(io::Error::other(
+                    "capture output pipes did not reach EOF before collection ended",
+                )));
+            }
+
             Ok(exec_output)
         }
         Err(err) => {
@@ -876,6 +908,7 @@ fn aggregate_output(
         return StreamOutput {
             text: aggregated,
             truncated_after_lines: None,
+            capture_end: None,
         };
     };
 
@@ -888,6 +921,7 @@ fn aggregate_output(
         return StreamOutput {
             text: aggregated,
             truncated_after_lines: None,
+            capture_end: None,
         };
     }
 
@@ -904,6 +938,7 @@ fn aggregate_output(
     StreamOutput {
         text: aggregated,
         truncated_after_lines: None,
+        capture_end: None,
     }
 }
 
@@ -1100,6 +1135,7 @@ async fn consume_output(
                 Ok(StreamOutput {
                     text: Vec::new(),
                     truncated_after_lines: None,
+                    capture_end: None,
                 })
             }
         }
@@ -1167,10 +1203,12 @@ async fn consume_output(
                     StreamOutput {
                         text: Vec::new(),
                         truncated_after_lines: None,
+                        capture_end: None,
                     },
                     StreamOutput {
                         text: Vec::new(),
                         truncated_after_lines: None,
+                        capture_end: None,
                     },
                 )
             }
@@ -1244,6 +1282,7 @@ async fn read_output<R: AsyncRead + Unpin + Send + 'static>(
     Ok(StreamOutput {
         text: buf,
         truncated_after_lines: None,
+        capture_end: None,
     })
 }
 

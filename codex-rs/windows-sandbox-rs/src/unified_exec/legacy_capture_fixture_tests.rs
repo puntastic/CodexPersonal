@@ -13,6 +13,8 @@ use super::workspace_roots_for;
 use crate::run_windows_sandbox_capture;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use codex_protocol::exec_output::IO_DRAIN_TIMEOUT_MS;
+use codex_protocol::exec_output::OutputCaptureEnd;
 use codex_protocol::models::PermissionProfile;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
@@ -279,6 +281,9 @@ pub(super) fn assert_capture_preserves_descendant() {
             let exit_code = (wait == WAIT_OBJECT_0).then(|| process_exit_code(process));
             (observed_at, wait, exit_code)
         });
+    let alive_before_release = state_before_release
+        .as_ref()
+        .is_ok_and(|(_, wait, _)| *wait == WAIT_TIMEOUT);
     // Release before any assertions, including failures in the observations.
     fs::write(&release_marker, "release").expect("release descendant after root exit");
     let descendant_stderr = fs::read(fixture.path().join("descendant.stderr")).unwrap_or_default();
@@ -295,13 +300,40 @@ pub(super) fn assert_capture_preserves_descendant() {
         capture_result_diagnostics(&result)
     );
     println!("{diagnostics}");
-    let (descendant_process, _) = descendant_observation
+    let (descendant_process, observed_at) = descendant_observation
         .unwrap_or_else(|err| panic!("observe descendant while alive: {err}; {diagnostics}"));
     assert_eq!(result.exit_code, 0, "{diagnostics}");
     assert!(!result.timed_out, "{diagnostics}");
-    assert!(
-        String::from_utf8_lossy(&result.stdout).contains("LEGACY-CAPTURE-DIRECT"),
+    assert_eq!(
+        result.stdout.as_slice(),
+        b"LEGACY-CAPTURE-DIRECT\r\n",
         "{diagnostics}"
+    );
+    assert!(result.stderr.is_empty(), "{diagnostics}");
+    assert!(
+        !deadline_expired,
+        "descendant expired before capture returned; {diagnostics}"
+    );
+    assert!(
+        alive_before_release,
+        "descendant was not alive at capture return; {diagnostics}"
+    );
+    assert!(
+        capture_elapsed.saturating_sub(observed_at)
+            < Duration::from_millis(IO_DRAIN_TIMEOUT_MS) + Duration::from_secs(/*secs*/ 5),
+        "capture must not wait for the descendant's lifetime; {diagnostics}"
+    );
+    let ends = [result.stdout_end, result.stderr_end];
+    assert!(
+        ends.iter().all(|end| matches!(
+            end,
+            Some(OutputCaptureEnd::Eof | OutputCaptureEnd::DrainDeadline)
+        )),
+        "normal capture must report each reader's observed end; {diagnostics}"
+    );
+    assert!(
+        ends.contains(&Some(OutputCaptureEnd::DrainDeadline)),
+        "fixture must continue exercising descendant-held capture writers; {diagnostics}"
     );
     assert!(
         wait_for_path(&survival_marker, Duration::from_secs(10)),
