@@ -782,8 +782,10 @@ mod tests {
             ),
         ];
         for (end, expected) in cases {
-            let mut output = ExecToolCallOutput::default();
-            output.exit_code = 23;
+            let mut output = ExecToolCallOutput {
+                exit_code: 23,
+                ..Default::default()
+            };
             output.stdout.capture_end = end;
             output.stderr.capture_end = end;
             let response = captured_exec_response(output);

@@ -68,6 +68,10 @@ impl Drop for FixtureProcess {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "Native fixture setup failures are test assertions."
+)]
 fn fixture_command(phase: &str, fixture: &Path) -> Command {
     let mut command = codex_utils_process::background_command(
         std::env::current_exe().expect("native fixture executable"),
@@ -90,6 +94,10 @@ fn wait_for_path(path: &Path) {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "Native fixture setup failures are test assertions."
+)]
 fn capture_tree_processes(fixture: &Path) -> [FixtureProcess; 2] {
     wait_for_path(&fixture.join("tree-ready"));
     ["root-pid", "child-pid"].map(|name| {
@@ -105,6 +113,10 @@ fn capture_tree_processes(fixture: &Path) -> [FixtureProcess; 2] {
 
 #[test]
 #[ignore = "native subprocess fixture; launched explicitly by behavioral tests"]
+#[allow(
+    clippy::zombie_processes,
+    reason = "This Windows fixture deliberately leaves its child for the owned-job lifetime assertions; child holds are bounded."
+)]
 fn native_process_fixture() {
     let Ok(phase) = std::env::var(PHASE_ENV) else {
         return;

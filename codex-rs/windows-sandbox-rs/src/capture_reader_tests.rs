@@ -246,3 +246,17 @@ fn dropping_capture_joins_readers_even_with_open_writers() {
     assert!(stderr.write_all(b"later").is_err());
     assert!(started.elapsed() < Duration::from_secs(/*secs*/ 1));
 }
+
+#[test]
+fn repeated_reader_join_reports_an_error_without_panicking() {
+    let (read, write) = pipe_pair().expect("create capture pipe");
+    let read = NonblockingReadPipe::new(read).expect("nonblocking read end");
+    let mut reader = CaptureReader::start(read, "capture-join-test").expect("start reader");
+    drop(write);
+    assert_eq!(
+        reader.join().expect("first join").end,
+        OutputCaptureEnd::Eof
+    );
+    let error = reader.join().expect_err("a reader cannot be joined twice");
+    assert_eq!(error.to_string(), "capture output reader already joined");
+}

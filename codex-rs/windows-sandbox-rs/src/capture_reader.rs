@@ -227,9 +227,11 @@ impl CaptureReader {
     }
 
     fn join(&mut self) -> io::Result<CapturedStream> {
-        self.thread
+        let thread = self
+            .thread
             .take()
-            .expect("capture reader is joined once")
+            .ok_or_else(|| io::Error::other("capture output reader already joined"))?;
+        thread
             .join()
             .map_err(|_| io::Error::other("capture output reader panicked"))
     }

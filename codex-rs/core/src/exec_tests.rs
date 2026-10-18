@@ -1,5 +1,6 @@
 use super::*;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -81,8 +82,8 @@ fn finalize_capture_end_policy(capture_policy: ExecCapturePolicy, rejects_incomp
                 capture_policy,
             );
             if rejects_incomplete && !matches!(capture_end, None | Some(OutputCaptureEnd::Eof)) {
-                let CodexErr::Io(err) = result.expect_err("known incomplete capture must fail")
-                else {
+                let error = result.expect_err("known incomplete capture must fail");
+                let CodexErrorDetails::Io(err) = error.details() else {
                     panic!("incomplete capture should use the I/O error path");
                 };
                 // Exact diagnostics also ensure neither strict policy exposes captured content.
@@ -157,21 +158,21 @@ fn finalize_incomplete_capture_preserves_root_failure_and_timeout_precedence(
         capture_policy,
     )
     .expect_err("root timeout must remain a timeout");
-    let CodexErr::Sandbox(SandboxErr::Timeout { output }) = error else {
+    let CodexErrorDetails::Sandbox(SandboxErr::Timeout { output }) = error.details() else {
         panic!("root timeout was replaced by a different error");
     };
     assert_eq!(
         (
             output.exit_code,
             output.timed_out,
-            output.stdout.text,
+            output.stdout.text.as_str(),
             output.stdout.capture_end,
             output.stderr.capture_end,
         ),
         (
             EXEC_TIMEOUT_EXIT_CODE,
             true,
-            "private stdout: café".to_string(),
+            "private stdout: café",
             capture_ends[0],
             capture_ends[1],
         ),
@@ -193,8 +194,8 @@ fn finalize_incomplete_sensitive_capture_preserves_sandbox_denial() {
     )
     .expect_err("sandbox denial must retain precedence");
     assert!(matches!(
-        error,
-        CodexErr::Sandbox(SandboxErr::Denied { .. })
+        error.details(),
+        CodexErrorDetails::Sandbox(SandboxErr::Denied { .. })
     ));
 }
 
@@ -210,7 +211,7 @@ fn finalize_capture_preserves_spawn_error() {
         ExecCapturePolicy::SensitiveFullBuffer,
     )
     .expect_err("spawn failure must retain precedence");
-    let CodexErr::Io(error) = error else {
+    let CodexErrorDetails::Io(error) = error.details() else {
         panic!("spawn failure was replaced by a different error");
     };
     assert_eq!(
