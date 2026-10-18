@@ -8,6 +8,7 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::MultiAgentVersion;
 use core_test_support::ThreadIdle;
+use core_test_support::responses::ResponseMock;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use test_case::test_case;
@@ -151,10 +152,8 @@ async fn guardian_circuit_breaker_closes_lane_without_interrupting_child(
     test.submit_text_turn("Spawn a worker to run the checks.")
         .await?;
     ThreadIdle::wait(&test.codex).await;
-    let worker = test
-        .thread_manager
-        .get_thread(created.recv().await?)
-        .await?;
+    let worker_id = timeout(Duration::from_secs(10), created.recv()).await??;
+    let worker = test.thread_manager.get_thread(worker_id).await?;
     let mut warnings = Vec::new();
     let mut assessments = Vec::new();
     let mut safe_completion_reached = false;
@@ -213,16 +212,46 @@ async fn guardian_circuit_breaker_closes_lane_without_interrupting_child(
         warning.contains("Automatic approval lane is closed for this turn")
             && warning.contains("rejected exec_command request without review")
     }));
-    let threshold_rejection = fourth
+    // ResponseMock records before its custom matcher, including other streams.
+    // Inspect the child's returned tool output, not a reviewer's context copy.
+    let worker_request = |response: &ResponseMock| {
+        let mut requests = response
+            .requests()
+            .into_iter()
+            .filter(|request| {
+                request.body_json()["client_metadata"]["thread_id"] == json!(worker_id)
+                    && request.body_json()["client_metadata"]["x-openai-subagent"] != "guardian"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requests.len(),
+            1,
+            "expected one worker continuation request"
+        );
+        requests.pop().expect("worker continuation request")
+    };
+    let threshold_rejection = worker_request(&fourth)
         .function_call_output_text("third")
         .expect("third denial reaches the child model");
-    assert!(threshold_rejection.contains("closed for the remainder of this turn"));
-    assert!(threshold_rejection.contains("In your next user-visible update"));
-    let fourth_rejection = worker_completed
+    assert!(
+        threshold_rejection.contains("closed for the remainder of this turn"),
+        "threshold rejection: {threshold_rejection:?}",
+    );
+    assert!(
+        threshold_rejection.contains("In your next user-visible update"),
+        "threshold rejection: {threshold_rejection:?}",
+    );
+    let fourth_rejection = worker_request(&worker_completed)
         .function_call_output_text("fourth")
         .expect("closed-lane rejection reaches the child model");
-    assert!(fourth_rejection.contains("closed for the remainder of this turn"));
-    assert!(fourth_rejection.contains("nothing was executed"));
+    assert!(
+        fourth_rejection.contains("closed for the remainder of this turn"),
+        "fourth rejection: {fourth_rejection:?}",
+    );
+    assert!(
+        fourth_rejection.contains("nothing was executed"),
+        "fourth rejection: {fourth_rejection:?}",
+    );
 
     // Ordinary completion is delivered to the parent for either action setting.
     // If mailbox delivery is pending, wait_agent observes it before the next request.
