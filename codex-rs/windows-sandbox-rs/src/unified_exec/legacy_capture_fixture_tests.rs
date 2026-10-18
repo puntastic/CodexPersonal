@@ -211,13 +211,15 @@ pub(super) fn assert_capture_preserves_descendant() {
         (result, capture_elapsed, observation)
     });
     let deadline_expired = expiry_marker.exists();
-    let state_before_release = descendant_observation.as_ref().map(|(process, observed_at)| {
-        let wait = unsafe {
-            WaitForSingleObject(process.as_raw_handle(), /*dwMilliseconds*/ 0)
-        };
-        let exit_code = (wait == WAIT_OBJECT_0).then(|| process_exit_code(process));
-        (observed_at, wait, exit_code)
-    });
+    let state_before_release = descendant_observation
+        .as_ref()
+        .map(|(process, observed_at)| {
+            let wait = unsafe {
+                WaitForSingleObject(process.as_raw_handle(), /*dwMilliseconds*/ 0)
+            };
+            let exit_code = (wait == WAIT_OBJECT_0).then(|| process_exit_code(process));
+            (observed_at, wait, exit_code)
+        });
     // Release before any assertions, including failures in the observations.
     fs::write(&release_marker, "release").expect("release descendant after root exit");
     let descendant_stderr = fs::read(fixture.path().join("descendant.stderr")).unwrap_or_default();
@@ -246,8 +248,9 @@ pub(super) fn assert_capture_preserves_descendant() {
         wait_for_path(&survival_marker, Duration::from_secs(10)),
         "sandbox descendant did not survive normal capture exit; {diagnostics}"
     );
-    wait_for_process_exit(&descendant_process, Duration::from_secs(10))
-        .unwrap_or_else(|err| panic!("descendant did not exit after release: {err}; {diagnostics}"));
+    wait_for_process_exit(&descendant_process, Duration::from_secs(10)).unwrap_or_else(|err| {
+        panic!("descendant did not exit after release: {err}; {diagnostics}")
+    });
     let final_exit_code = process_exit_code(&descendant_process)
         .unwrap_or_else(|err| panic!("query final descendant exit: {err}; {diagnostics}"));
     println!("descendant_after_release(exit_code)={final_exit_code}");
