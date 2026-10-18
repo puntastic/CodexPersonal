@@ -19,6 +19,8 @@ use tracing::warn;
 use zip::ZipArchive;
 
 mod http_client;
+#[cfg(windows)]
+mod windows_git_process;
 
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_API_ACCEPT_HEADER: &str = "application/vnd.github+json";
@@ -273,7 +275,7 @@ fn fetch_curated_plugins_commit_from(
         .args(["fetch", "--depth", "1", "--no-tags"])
         .arg(source)
         .arg(fetch_refspec);
-    let output = run_git_command_with_timeout(&mut command, context, CURATED_PLUGINS_GIT_TIMEOUT)?;
+    let output = run_git_command_with_timeout(command, context, CURATED_PLUGINS_GIT_TIMEOUT)?;
     ensure_git_success(&output, context)
 }
 
@@ -300,7 +302,7 @@ fn run_git_in_repo(
 ) -> Result<(), String> {
     let mut command = git_command(git_binary)?;
     command.arg("-C").arg(repo_path).args(args);
-    let output = run_git_command_with_timeout(&mut command, context, CURATED_PLUGINS_GIT_TIMEOUT)?;
+    let output = run_git_command_with_timeout(command, context, CURATED_PLUGINS_GIT_TIMEOUT)?;
     ensure_git_success(&output, context)
 }
 
@@ -616,7 +618,7 @@ fn git_ls_remote_head_sha(codex_home: &Path, git_binary: &Path) -> Result<String
         .arg(OPENAI_PLUGINS_GIT_URL)
         .arg("HEAD");
     let output = run_git_command_with_timeout(
-        &mut command,
+        command,
         "git ls-remote curated plugins repo",
         CURATED_PLUGINS_GIT_TIMEOUT,
     )?;
@@ -681,16 +683,19 @@ fn git_command(git_binary: &Path) -> Result<Command, String> {
 }
 
 fn run_git_command_with_timeout(
-    command: &mut Command,
+    mut command: Command,
     context: &str,
     timeout: Duration,
 ) -> Result<Output, String> {
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("failed to run {context}: {err}"))?;
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    let spawned = windows_git_process::StartupGitProcess::spawn(command);
+    #[cfg(not(windows))]
+    let spawned = command.spawn();
+    let mut child = spawned.map_err(|err| format!("failed to run {context}: {err}"))?;
 
     let start = std::time::Instant::now();
     loop {
@@ -1131,3 +1136,7 @@ fn apply_zip_permissions(
 #[cfg(test)]
 #[path = "startup_sync_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "startup_sync/windows_git_process_tests.rs"]
+mod windows_git_process_tests;

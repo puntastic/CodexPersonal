@@ -51,12 +51,15 @@ sha2 = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "macros", "rt", "time"] }
+tokio = { workspace = true, features = ["fs", "macros", "process", "rt", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 zip = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+codex-utils-pty = { workspace = true }
 
 [dev-dependencies]
 codex-exec-server-test-support = { workspace = true }
