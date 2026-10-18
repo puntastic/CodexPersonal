@@ -2,6 +2,8 @@
 
 #[path = "legacy_capture_fixture_tests.rs"]
 mod legacy_capture_fixture;
+#[path = "legacy_fixture_diagnostics_tests.rs"]
+mod legacy_fixture_diagnostics;
 
 use super::WindowsSandboxSessionRequest;
 use super::spawn_windows_sandbox_session_elevated_for_permission_profile;
@@ -729,15 +731,22 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         fs::write(&outside_file, "outside").expect("seed outside file");
 
         let script = workspace.join("delete-fixtures.cmd");
+        // CMD status is diagnostic, not a substitute for the filesystem oracle;
+        // retain the original operations, final exit code, and positive controls.
         fs::write(
             &script,
             concat!(
                 "@echo off\r\n",
                 "del /f /q \"%WORKSPACE_DELETE%\"\r\n",
+                "echo LEGACY-DELETE workspace errorlevel=%ERRORLEVEL%\r\n",
                 "del /f /q \"%TEMP_DELETE%\"\r\n",
+                "echo LEGACY-DELETE temp errorlevel=%ERRORLEVEL%\r\n",
                 "del /f /q \"%TMP_DELETE%\"\r\n",
+                "echo LEGACY-DELETE tmp errorlevel=%ERRORLEVEL%\r\n",
                 "del /f /q \"%OUTSIDE_DELETE%\"\r\n",
+                "echo LEGACY-DELETE outside errorlevel=%ERRORLEVEL%\r\n",
                 "rmdir \"%PROTECTED_GIT_DIR%\"\r\n",
+                "echo LEGACY-DELETE protected-git errorlevel=%ERRORLEVEL%\r\n",
                 "exit /b 0\r\n",
             ),
         )
@@ -789,10 +798,23 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         )
         .await
         .expect("spawn legacy delete session");
-        let (stdout, exit_code) =
-            collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(/*secs*/ 10))
-                .await;
-        let stdout = String::from_utf8_lossy(&stdout);
+        let mut observed = legacy_fixture_diagnostics::ObservedProcess::new(spawned);
+        let completion = observed.finish(Duration::from_secs(10)).await;
+        let cleanup = if completion.is_err() {
+            observed
+                .cleanup(/*release_marker*/ None, /*descendant*/ None)
+                .await
+        } else {
+            String::new()
+        };
+        let diagnostics = format!(
+            "{}\n{cleanup}\n{}",
+            observed.diagnostics(),
+            legacy_fixture_diagnostics::file_diagnostics(&crate::current_log_file_path(
+                &codex_home.path().join(".sandbox"),
+            )),
+        );
+        let exit_code = completion.unwrap_or_else(|error| panic!("{error}\n{diagnostics}"));
 
         assert_eq!(
             (
@@ -804,8 +826,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
                 protected_git_dir.is_dir(),
             ),
             (0, false, false, false, Some("outside".to_string()), true),
-            "stdout={stdout:?}\n{}",
-            sandbox_log(codex_home.path())
+            "{diagnostics}"
         );
     });
 }
@@ -923,7 +944,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
         ),
     };
     let child_command = format!(
-        "Set-Content -LiteralPath '{}' -Value $PID; {child_tail}",
+        "Set-Content -ErrorAction Stop -LiteralPath '{}' -Value $PID; Write-Output LEGACY-TTY-PHASE-child-ready; {child_tail}",
         powershell_literal(&ready_marker),
     );
     let parent_tail = match lifecycle {
@@ -933,7 +954,12 @@ async fn assert_legacy_tty_descendant_lifecycle(
             powershell_literal(&ready_marker),
         ),
     };
-    let parent_command = start_powershell_child(pwsh, fixture.path(), &child_command, &parent_tail);
+    let parent_command = legacy_fixture_diagnostics::tty_parent_command(
+        pwsh,
+        fixture.path(),
+        &child_command,
+        &parent_tail,
+    );
     let permission_profile = PermissionProfile::workspace_write();
     let spawned = spawn_windows_sandbox_session_legacy(
         &permission_profile,
@@ -955,39 +981,90 @@ async fn assert_legacy_tty_descendant_lifecycle(
     )
     .await
     .expect("spawn legacy sandbox ConPTY lifecycle test");
-    assert!(
-        wait_for_path(&ready_marker, Duration::from_secs(10)),
-        "{lifecycle:?} descendant did not start"
-    );
-    let descendant_pid = fs::read_to_string(&ready_marker)
-        .expect("read descendant pid")
-        .trim()
-        .parse()
-        .expect("parse descendant pid");
-    let descendant_process = open_process_for_wait(descendant_pid);
+    let mut observed = legacy_fixture_diagnostics::ObservedProcess::new(spawned);
+    let ready = observed
+        .wait_for_path(&ready_marker, Duration::from_secs(10))
+        .await;
+    let descendant_process = fs::read_to_string(&ready_marker)
+        .and_then(|pid| {
+            pid.trim()
+                .parse()
+                .map_err(|error| std::io::Error::other(format!("invalid descendant pid: {error}")))
+        })
+        .and_then(legacy_fixture_diagnostics::open_descendant_for_cleanup);
+    if !ready || descendant_process.is_err() {
+        let before_cleanup = observed.diagnostics();
+        let cleanup = observed
+            .cleanup(Some(&release_marker), descendant_process.as_ref().ok())
+            .await;
+        let diagnostics =
+            legacy_fixture_diagnostics::tty_diagnostics(fixture.path(), codex_home.path());
+        assert!(
+            ready,
+            "{lifecycle:?} descendant did not start\n{before_cleanup}\n{cleanup}\n{diagnostics}"
+        );
+        panic!(
+            "open sandbox ConPTY descendant: {descendant_process:?}\n{before_cleanup}\n{cleanup}\n{diagnostics}"
+        );
+    }
+    let descendant_process = descendant_process.expect("descendant process checked above");
 
     if matches!(lifecycle, LegacyTtyDescendantLifecycle::Terminate) {
-        spawned.session.request_terminate();
+        observed.request_terminate();
     }
-    let (_, exit_code) =
-        collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(15)).await;
-    if matches!(lifecycle, LegacyTtyDescendantLifecycle::Preserve) {
-        fs::write(&release_marker, "release").expect("release preserved descendant");
-    }
-    let descendant_process = descendant_process.expect("open sandbox ConPTY descendant");
+    let completion = observed.finish(Duration::from_secs(15)).await;
+    let release = if matches!(lifecycle, LegacyTtyDescendantLifecycle::Preserve) {
+        fs::write(&release_marker, "release")
+    } else {
+        Ok(())
+    };
+    let survived = if matches!(lifecycle, LegacyTtyDescendantLifecycle::Preserve)
+        && completion.is_ok()
+        && release.is_ok()
+    {
+        observed
+            .wait_for_path(&survival_marker, Duration::from_secs(10))
+            .await
+    } else {
+        false
+    };
+    let descendant_exit = legacy_fixture_diagnostics::wait_for_process_exit(
+        &descendant_process,
+        Duration::from_secs(10),
+    )
+    .await;
+    let status_matches = match lifecycle {
+        LegacyTtyDescendantLifecycle::Terminate => completion.is_ok_and(|code| code != 0),
+        LegacyTtyDescendantLifecycle::Preserve => completion == Ok(0) && survived,
+    };
+    let cleanup = if !status_matches || release.is_err() || descendant_exit.is_err() {
+        observed
+            .cleanup(Some(&release_marker), Some(&descendant_process))
+            .await
+    } else {
+        String::new()
+    };
+    let diagnostics = format!(
+        "{}\n{cleanup}\n{}",
+        observed.diagnostics(),
+        legacy_fixture_diagnostics::tty_diagnostics(fixture.path(), codex_home.path()),
+    );
+    let exit_code = completion.unwrap_or_else(|error| panic!("{error}\n{diagnostics}"));
+    release.unwrap_or_else(|error| panic!("release preserved descendant: {error}\n{diagnostics}"));
 
     match lifecycle {
-        LegacyTtyDescendantLifecycle::Terminate => assert_ne!(exit_code, 0),
+        LegacyTtyDescendantLifecycle::Terminate => assert_ne!(exit_code, 0, "{diagnostics}"),
         LegacyTtyDescendantLifecycle::Preserve => {
-            assert_eq!(exit_code, 0);
+            assert_eq!(exit_code, 0, "{diagnostics}");
             assert!(
-                wait_for_path(&survival_marker, Duration::from_secs(10)),
-                "sandbox ConPTY descendant did not survive normal exit"
+                survived,
+                "sandbox ConPTY descendant did not survive normal exit\n{diagnostics}"
             );
         }
     }
-    wait_for_process_exit(&descendant_process, Duration::from_secs(10))
-        .expect("sandbox ConPTY descendant did not exit");
+    descendant_exit.unwrap_or_else(|error| {
+        panic!("sandbox ConPTY descendant did not exit: {error}\n{diagnostics}")
+    });
 }
 
 #[test]
