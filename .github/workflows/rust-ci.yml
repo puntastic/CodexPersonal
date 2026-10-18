@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  qualify-legacy-six:
+  qualify-legacy-eight:
     if: >-
       github.repository == 'puntastic/CodexPersonal' &&
       github.ref == 'refs/heads/codex/windows-isolated-tests-20261017' &&
@@ -25,7 +25,7 @@ jobs:
       run:
         shell: pwsh
     env:
-      SOURCE_SHA: ae1b7e8e8ecff867f4cc2236abac1aed4c7b2fb6
+      SOURCE_SHA: a7d98dc02a5e637c5f8059802d4d2546d2278a50
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: never
@@ -37,7 +37,7 @@ jobs:
       - name: Check out only the qualified source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ae1b7e8e8ecff867f4cc2236abac1aed4c7b2fb6
+          ref: a7d98dc02a5e637c5f8059802d4d2546d2278a50
           fetch-depth: 1
           persist-credentials: false
 
@@ -66,7 +66,7 @@ jobs:
           }
           $head = (& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch.' }
-          $root = Join-Path $env:RUNNER_TEMP "cwlegacy6-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwlegacy8-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $root) { throw 'Pilot output root must be new.' }
           foreach ($child in @('target', 'test-tmp', 'evidence')) {
             New-Item -ItemType Directory -Path (Join-Path $root $child) | Out-Null
@@ -86,7 +86,7 @@ jobs:
             powershell_fixture_sha256 = (Get-FileHash -LiteralPath $powerShell -Algorithm SHA256).Hash
             sandbox_accounts_initially_absent = $true
             cleanup_boundary = 'Task data and test-path ACL/desktop effects stay on this disposable VM. No extra account provisioning or global uninstall is run; the VM is discarded.'
-            proof_boundary = 'Exactly six nonignored legacy capture/lifecycle/delete-boundary cases on Windows 2025, not local Windows 10 build 19045. No public RPC, elevated-account suite, voice-host, full workspace, deployment or personal credentials. A deletion-boundary failure remains a failure to investigate.'
+            proof_boundary = 'Exactly six nonignored legacy capture/lifecycle/delete-boundary cases plus two pure diagnostic-buffer cases on Windows 2025, not local Windows 10 build 19045. Diagnostic/fixture changes preserve oracles; no production repair is claimed. No public RPC, elevated-account suite, voice-host, full workspace, deployment or personal credentials. A deletion-boundary failure remains a failure to investigate.'
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'provenance.json') -Encoding utf8
           @{
             PILOT_ROOT = $root
@@ -232,7 +232,9 @@ jobs:
                 'unified_exec::tests::legacy_tty_job_terminates_and_preserves_descendants',
                 'unified_exec::tests::legacy_non_tty_powershell_interrupt_terminates_process',
                 'unified_exec::tests::legacy_capture_fixture::console_window_probe_rejects_hidden_console_window',
-                'unified_exec::tests::legacy_workspace_write_delete_is_limited_to_writable_roots'
+                'unified_exec::tests::legacy_workspace_write_delete_is_limited_to_writable_roots',
+                'unified_exec::tests::legacy_fixture_diagnostics::bounded_output_retains_prefix_and_counts_discarded_bytes',
+                'unified_exec::tests::legacy_fixture_diagnostics::bounded_output_accepts_empty_chunks'
               )
             }
           )
@@ -280,7 +282,7 @@ jobs:
             $plan.caseIdentities = @($cases | ForEach-Object { @{ classname = $_.binary_id; name = $_.test } })
             $selected += $cases
           }
-          if ($selected.Count -ne 6) { throw 'Expected exactly six selected, nonignored tests.' }
+          if ($selected.Count -ne 8) { throw 'Expected exactly eight selected, nonignored tests.' }
           $selected | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'selected-tests.json') -Encoding utf8
           $binaryHashes = @{}
           foreach ($path in ($selected.binary_path | Sort-Object -Unique)) {
@@ -325,7 +327,7 @@ jobs:
       - name: Final resource observation
         if: always()
         run: |
-          $root = Join-Path $env:RUNNER_TEMP "cwlegacy6-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwlegacy8-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $evidence = Join-Path $root 'evidence'
           if (Test-Path -LiteralPath $evidence) {
             Get-PSDrive -PSProvider FileSystem | Select-Object Name, Free, Used |
@@ -338,11 +340,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: windows-isolated-legacy-six-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-isolated-legacy-eight-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/cwlegacy6-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
-            ${{ runner.temp }}/cwlegacy6-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
-            ${{ runner.temp }}/cwlegacy6-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
-            ${{ runner.temp }}/cwlegacy6-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
+            ${{ runner.temp }}/cwlegacy8-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
+            ${{ runner.temp }}/cwlegacy8-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
+            ${{ runner.temp }}/cwlegacy8-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
+            ${{ runner.temp }}/cwlegacy8-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
           retention-days: 1
           if-no-files-found: warn
