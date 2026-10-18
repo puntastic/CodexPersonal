@@ -474,8 +474,8 @@ fn legacy_non_tty_powershell_interrupt_terminates_process() {
         println!("pwsh codex_home={}", codex_home.path().display());
         let permission_profile = PermissionProfile::workspace_write();
         let console_fixture = TempDir::new_in(&cwd).expect("create native console probe fixture");
-        let assert_no_console =
-            legacy_capture_fixture::powershell_no_console_probe(console_fixture.path());
+        let assert_no_console_window =
+            legacy_capture_fixture::powershell_no_console_window_probe(console_fixture.path());
         let spawned = spawn_windows_sandbox_session_legacy(
             &permission_profile,
             workspace_roots_for(cwd.as_path()).as_slice(),
@@ -484,7 +484,7 @@ fn legacy_non_tty_powershell_interrupt_terminates_process() {
                 pwsh.display().to_string(),
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
-                format!("{assert_no_console} Write-Output LEGACY-NONTTY-DIRECT; while ($true) {{ Start-Sleep -Seconds 60 }}"),
+                format!("{assert_no_console_window} Write-Output LEGACY-NONTTY-DIRECT; while ($true) {{ Start-Sleep -Seconds 60 }}"),
             ],
             cwd.as_path(),
             legacy_capture_fixture::console_probe_env(),

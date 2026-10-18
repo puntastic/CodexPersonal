@@ -738,7 +738,8 @@ pub struct Config {
     /// preserves stricter parent tool limits.
     pub guardian_conversation_history_max_output_tokens: Option<NonZeroUsize>,
 
-    /// Include a structured error when Guardian's circuit breaker interrupts a turn.
+    /// Retained compatibility choice; both values currently leave the turn active when
+    /// Guardian's denial limit closes its automatic approval lane.
     pub guardian_circuit_break_action: CircuitBreakAction,
 
     /// Whether to inject the `<permissions instructions>` developer block.

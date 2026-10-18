@@ -577,9 +577,10 @@ pub enum ThreadStoreToml {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 pub struct AutoReviewToml {
-    /// Controls whether circuit-breaker interruptions include a structured error.
-    /// Strict mode writes structured errors that older clients may not
-    /// recognize when reading shared history. Defaults to `default`.
+    /// Accepted for compatibility; neither value changes the current denial-limit behavior.
+    /// Repeated denials close the automatic approval lane without interrupting the turn.
+    /// Further approval requests in that turn are rejected without review; other work may
+    /// continue. Defaults to `default`.
     pub circuit_break_action: Option<CircuitBreakAction>,
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
@@ -598,10 +599,10 @@ pub struct AutoReviewToml {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CircuitBreakAction {
-    /// Emit the warning and interrupt without structured error details.
+    /// Compatibility default; denial limits close the approval lane, not the turn.
     #[default]
     Default,
-    /// Emit the same warning and interruption, with structured error details.
+    /// Compatibility value; currently has the same noninterrupting behavior as `default`.
     Strict,
 }
 
