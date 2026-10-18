@@ -677,6 +677,59 @@ class UnknownCommandAction(BaseModel):
     type: Annotated[Literal["unknown"], Field(title="UnknownCommandActionType")]
 
 
+class EofCommandExecOutputCaptureEnd(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["eof"], Field(title="EofCommandExecOutputCaptureEndType")]
+
+
+class DrainDeadlineCommandExecOutputCaptureEnd(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[
+        Literal["drainDeadline"], Field(title="DrainDeadlineCommandExecOutputCaptureEndType")
+    ]
+
+
+class CancelledCommandExecOutputCaptureEnd(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["cancelled"], Field(title="CancelledCommandExecOutputCaptureEndType")]
+
+
+class ReadErrorCommandExecOutputCaptureEnd(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    os_error: Annotated[int | None, Field(alias="osError")] = None
+    type: Annotated[Literal["readError"], Field(title="ReadErrorCommandExecOutputCaptureEndType")]
+
+
+class CommandExecOutputCaptureEnd(
+    RootModel[
+        EofCommandExecOutputCaptureEnd
+        | DrainDeadlineCommandExecOutputCaptureEnd
+        | CancelledCommandExecOutputCaptureEnd
+        | ReadErrorCommandExecOutputCaptureEnd
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: Annotated[
+        EofCommandExecOutputCaptureEnd
+        | DrainDeadlineCommandExecOutputCaptureEnd
+        | CancelledCommandExecOutputCaptureEnd
+        | ReadErrorCommandExecOutputCaptureEnd,
+        Field(
+            description="Observed end of one output collector, separate from process exit and byte caps."
+        ),
+    ]
+
+
 class CommandExecOutputStream(Enum):
     stdout = "stdout"
     stderr = "stderr"
@@ -700,12 +753,26 @@ class CommandExecResponse(BaseModel):
             description="Buffered stderr capture.\n\nEmpty when stderr was streamed via `command/exec/outputDelta`."
         ),
     ]
+    stderr_capture_end: Annotated[
+        CommandExecOutputCaptureEnd | None,
+        Field(
+            alias="stderrCaptureEnd",
+            description="How stderr collection ended, when reported by the execution backend. Missing or null means unknown, not complete. Independent of exitCode and output caps.",
+        ),
+    ] = None
     stdout: Annotated[
         str,
         Field(
             description="Buffered stdout capture.\n\nEmpty when stdout was streamed via `command/exec/outputDelta`."
         ),
     ]
+    stdout_capture_end: Annotated[
+        CommandExecOutputCaptureEnd | None,
+        Field(
+            alias="stdoutCaptureEnd",
+            description="How stdout collection ended, when reported by the execution backend. Missing or null means unknown, not complete. Independent of exitCode and output caps.",
+        ),
+    ] = None
 
 
 class CommandExecTerminalSize(BaseModel):
