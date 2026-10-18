@@ -47,18 +47,19 @@ async fn retained_tool_output_survives_compaction_and_resume() -> Result<()> {
             .await?;
         let details = "Investigate the failing tests carefully. ".repeat(7_000);
         let latest_instruction = "Report your findings without changing files.";
+        // Generic client retention must not also opt in to admitted-delegation retention.
         for (name, output) in [
             (
-                "send_message_to_thread",
+                "task_instructions",
                 "Investigate the failing tests; report your findings without changing files.",
             ),
             ("task_details", details.as_str()),
-            ("send_message_to_thread", latest_instruction),
+            ("task_instructions", latest_instruction),
         ] {
             let request = TurnInputRequest::new(TurnInput::AnnotatedResponseItem(
                 AnnotatedResponseItem {
                     item: serde_json::from_value(json!({
-                        "type": "function_call_output", "name": name, "namespace": "codex_app", "output": output,
+                        "type": "function_call_output", "name": name, "namespace": "example", "output": output,
                     }))?,
                     annotations: ResponseItemAnnotations { retain: true },
                 },
@@ -104,9 +105,9 @@ async fn retained_tool_output_survives_compaction_and_resume() -> Result<()> {
                 .map(|output| output["name"].as_str())
                 .collect::<Vec<_>>(),
             [
-                Some("send_message_to_thread"),
+                Some("task_instructions"),
                 Some("task_details"),
-                Some("send_message_to_thread"),
+                Some("task_instructions"),
                 Some("progress"),
             ]
         );

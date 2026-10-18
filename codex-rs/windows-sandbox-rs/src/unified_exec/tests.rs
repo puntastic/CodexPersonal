@@ -1,5 +1,8 @@
 #![cfg(target_os = "windows")]
 
+#[path = "legacy_capture_fixture_tests.rs"]
+mod legacy_capture_fixture;
+
 use super::WindowsSandboxSessionRequest;
 use super::spawn_windows_sandbox_session_elevated_for_permission_profile;
 use super::spawn_windows_sandbox_session_for_level;
@@ -50,8 +53,6 @@ use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
 static TEST_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
 static LEGACY_PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-const ASSERT_NO_CONSOLE: &str = r#"Add-Type -ErrorAction Stop 'using System; using System.Runtime.InteropServices; public class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; if ([ConsoleProbe]::GetConsoleWindow() -ne [IntPtr]::Zero) { throw 'piped sandbox process unexpectedly has a console' };"#;
 
 fn legacy_process_test_guard() -> MutexGuard<'static, ()> {
     LEGACY_PROCESS_TEST_LOCK
@@ -472,6 +473,9 @@ fn legacy_non_tty_powershell_interrupt_terminates_process() {
         let codex_home = sandbox_home("legacy-non-tty-pwsh");
         println!("pwsh codex_home={}", codex_home.path().display());
         let permission_profile = PermissionProfile::workspace_write();
+        let console_fixture = TempDir::new_in(&cwd).expect("create native console probe fixture");
+        let assert_no_console =
+            legacy_capture_fixture::powershell_no_console_probe(console_fixture.path());
         let spawned = spawn_windows_sandbox_session_legacy(
             &permission_profile,
             workspace_roots_for(cwd.as_path()).as_slice(),
@@ -480,10 +484,10 @@ fn legacy_non_tty_powershell_interrupt_terminates_process() {
                 pwsh.display().to_string(),
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
-                format!("{ASSERT_NO_CONSOLE} Write-Output LEGACY-NONTTY-DIRECT; [System.Threading.ManualResetEvent]::new($false).WaitOne()"),
+                format!("{assert_no_console} Write-Output LEGACY-NONTTY-DIRECT; while ($true) {{ Start-Sleep -Seconds 60 }}"),
             ],
             cwd.as_path(),
-            HashMap::new(),
+            legacy_capture_fixture::console_probe_env(),
             /*timeout_ms*/ None,
             &[],
             &[],
@@ -497,7 +501,7 @@ fn legacy_non_tty_powershell_interrupt_terminates_process() {
             session,
             mut stdout_rx,
             stderr_rx: _stderr_rx,
-            exit_rx,
+            mut exit_rx,
         } = spawned;
         timeout(Duration::from_secs(5), async {
             let mut stdout = Vec::new();
@@ -520,6 +524,18 @@ fn legacy_non_tty_powershell_interrupt_terminates_process() {
             )
         });
 
+        // Reject an already-reported exit instead of accepting its code as the
+        // result of Interrupt. Empty does not prove OS-level process liveness.
+        match exit_rx.try_recv() {
+            Err(oneshot::error::TryRecvError::Empty) => {}
+            Ok(exit_code) => panic!(
+                "PowerShell exited before interrupt with code {exit_code}\n{}",
+                sandbox_log(codex_home.path())
+            ),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                panic!("PowerShell exit channel closed before interrupt")
+            }
+        }
         session
             .signal(ProcessSignal::Interrupt)
             .expect("interrupt should terminate the restricted-token process job");
@@ -680,79 +696,7 @@ fn runner_resizer_sends_resize_frame() {
 
 #[test]
 fn legacy_capture_emits_output_and_preserves_descendant_after_normal_exit() {
-    let Some(pwsh) = pwsh_path() else {
-        return;
-    };
-    let _guard = legacy_process_test_guard();
-    let cwd = sandbox_cwd();
-    // Descendant files belong in the writable workspace, not sandbox control state.
-    let fixture = TempDir::new_in(&cwd).expect("create descendant lifecycle fixture");
-    let codex_home = sandbox_home("legacy-capture-pwsh");
-    println!("capture pwsh codex_home={}", codex_home.path().display());
-    let ready_marker = fixture.path().join("descendant-started");
-    let release_marker = fixture.path().join("release-descendant");
-    let survival_marker = fixture.path().join("descendant-survived");
-    let descendant_command = format!(
-        "$deadline=(Get-Date).AddSeconds(30); Set-Content -LiteralPath '{}' -Value $PID; while (-not (Test-Path -LiteralPath '{}')) {{ if ((Get-Date) -ge $deadline) {{ exit 3 }}; Start-Sleep -Milliseconds 25 }}; Set-Content -LiteralPath '{}' -Value survived",
-        powershell_literal(&ready_marker),
-        powershell_literal(&release_marker),
-        powershell_literal(&survival_marker),
-    );
-    let parent_tail = format!(
-        "while (-not (Test-Path -LiteralPath '{}')) {{ Start-Sleep -Milliseconds 25 }}",
-        powershell_literal(&ready_marker),
-    );
-    let parent_command = format!(
-        "{ASSERT_NO_CONSOLE} Write-Output LEGACY-CAPTURE-DIRECT; {}",
-        start_powershell_child(&pwsh, fixture.path(), &descendant_command, &parent_tail,),
-    );
-    let permission_profile = PermissionProfile::workspace_write();
-    let result = run_windows_sandbox_capture(
-        &permission_profile,
-        workspace_roots_for(cwd.as_path()).as_slice(),
-        codex_home.path(),
-        vec![
-            pwsh.display().to_string(),
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            parent_command,
-        ],
-        cwd.as_path(),
-        HashMap::new(),
-        Some(10_000),
-        /*cancellation*/ None,
-    )
-    .expect("run legacy capture powershell");
-    let descendant_pid = fs::read_to_string(&ready_marker)
-        .unwrap_or_else(|err| {
-            panic!(
-                "read descendant pid: {err}; {}",
-                capture_result_diagnostics(&result)
-            )
-        })
-        .trim()
-        .parse()
-        .expect("parse descendant pid");
-    let descendant_process = open_process_for_wait(descendant_pid);
-    fs::write(&release_marker, "release").expect("release descendant after root exit");
-    let descendant_process = descendant_process.expect("open descendant after normal capture exit");
-
-    println!("capture pwsh exit_code={}", result.exit_code);
-    println!("capture pwsh timed_out={}", result.timed_out);
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    println!("capture pwsh stderr={stderr:?}");
-    assert_eq!(result.exit_code, 0, "stdout={stdout:?} stderr={stderr:?}");
-    assert!(
-        stdout.contains("LEGACY-CAPTURE-DIRECT"),
-        "stdout={stdout:?}"
-    );
-    assert!(
-        wait_for_path(&survival_marker, Duration::from_secs(10)),
-        "sandbox descendant did not survive normal capture exit"
-    );
-    wait_for_process_exit(&descendant_process, Duration::from_secs(10))
-        .expect("sandbox descendant did not exit after release");
+    legacy_capture_fixture::assert_capture_preserves_descendant();
 }
 
 #[test]

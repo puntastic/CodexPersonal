@@ -53,6 +53,7 @@ async fn heartbeat_repetitions_keep_later_human_authorization() -> anyhow::Resul
         .with_model("gpt-5.5")
         .with_config(move |config| {
             super::configure_scenario_catalog(config);
+            super::configure_independent_guardian_context(config);
             config.model_provider.base_url = Some(base_url);
             config
                 .features

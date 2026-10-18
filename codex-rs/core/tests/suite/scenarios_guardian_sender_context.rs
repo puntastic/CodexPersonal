@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use codex_core::TurnInputRequest;
+use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
@@ -29,6 +30,11 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
+fn configure_independent_guardian(config: &mut Config) {
+    super::configure_scenario_catalog(config);
+    super::configure_independent_guardian_context(config);
+}
+
 #[test_case::test_case(ThreadHistoryMode::Legacy; "legacy")]
 #[test_case::test_case(ThreadHistoryMode::Paginated; "paginated")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -40,7 +46,7 @@ async fn cross_host_sender_context(history_mode: ThreadHistoryMode) -> Result<()
         .with_thread_store(store.clone())
         .with_history_mode(history_mode)
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(super::configure_scenario_catalog)
+        .with_config(configure_independent_guardian)
         .build_with_auto_env(&server)
         .await?;
     // Separate managers share durable storage, as cloud workers do. Neither loads the other.
@@ -48,7 +54,7 @@ async fn cross_host_sender_context(history_mode: ThreadHistoryMode) -> Result<()
         .with_thread_store(store)
         .with_history_mode(history_mode)
         .with_config(|config| {
-            super::configure_scenario_catalog(config);
+            configure_independent_guardian(config);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
         })

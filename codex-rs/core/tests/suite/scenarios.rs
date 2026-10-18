@@ -289,6 +289,27 @@ fn configure_scenario_catalog(config: &mut Config) {
     config.cloud_skill_enabled = false;
 }
 
+fn configure_independent_guardian_context(config: &mut Config) {
+    // Opt in only for scenarios whose reviewer snapshots require retained context;
+    // neither storage history modes nor AutoReview select this policy.
+    config
+        .features
+        .enable(Feature::GuardianThreadContext)
+        .expect("enable Guardian retained thread context for this scenario");
+    config
+        .features
+        .disable(Feature::GuardianReuseParentCompaction)
+        .expect("disable parent compaction reuse for independent Guardian context");
+    assert_eq!(
+        (
+            config.features.enabled(Feature::GuardianThreadContext),
+            config.features.enabled(Feature::GuardianReuseParentCompaction),
+        ),
+        (true, false),
+        "scenario requires Independent Guardian context"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn realtime_attachment_replacement_preserves_handoff_context() -> Result<()> {
     let requests = super::realtime_attachment::attachment_replacement_scenario().await?;
@@ -2351,10 +2372,11 @@ async fn astra_async_compaction_keeps_work_added_after_its_snapshot(
     let next_input = if matches!(suffix, LiveSuffix::User) {
         TurnInputRequest::user_input(vec![text("Check who can finish the notes.")])
     } else {
+        // Exercise generic client output; admitted delegation has its own retention policy.
         let item = serde_json::from_value(json!({
             "type": "function_call_output",
-            "name": "send_message_to_thread",
-            "namespace": "codex_app",
+            "name": "task_update",
+            "namespace": "example",
             "output": retained_output,
         }))?;
         TurnInputRequest::new(
