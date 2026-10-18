@@ -571,6 +571,9 @@ mod windows_impl {
     use codex_utils_absolute_path::AbsolutePathBuf;
     use std::collections::HashMap;
     use std::io;
+    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::FromRawHandle;
+    use std::os::windows::io::OwnedHandle;
     use std::path::Path;
     use std::ptr;
     use std::sync::Arc;
@@ -587,18 +590,6 @@ mod windows_impl {
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
     type PipeHandles = ((HANDLE, HANDLE), (HANDLE, HANDLE), (HANDLE, HANDLE));
-
-    struct NonOwningPipeHandle(HANDLE);
-
-    // SAFETY: Pipe handles are opaque process-wide tokens that may be used from
-    // any thread. This wrapper does not own the handle or extend its lifetime.
-    unsafe impl Send for NonOwningPipeHandle {}
-
-    impl NonOwningPipeHandle {
-        fn raw(&self) -> HANDLE {
-            self.0
-        }
-    }
 
     enum WaitOutcome {
         Exited,
@@ -824,8 +815,15 @@ mod windows_impl {
 
         let (tx_out, rx_out) = std::sync::mpsc::channel::<Vec<u8>>();
         let (tx_err, rx_err) = std::sync::mpsc::channel::<Vec<u8>>();
-        let out_r = NonOwningPipeHandle(out_r);
-        let err_r = NonOwningPipeHandle(err_r);
+        // SAFETY: setup_stdio_pipes returned valid, uniquely owned read handles.
+        // The spawn failure path has already returned; each handle now moves to
+        // exactly one reader and is not closed elsewhere on this success path.
+        let (out_r, err_r) = unsafe {
+            (
+                OwnedHandle::from_raw_handle(out_r),
+                OwnedHandle::from_raw_handle(err_r),
+            )
+        };
         let t_out = std::thread::spawn(move || {
             let mut buf = Vec::new();
             let mut tmp = [0u8; 8192];
@@ -833,7 +831,7 @@ mod windows_impl {
                 let mut read_bytes: u32 = 0;
                 let ok = unsafe {
                     windows_sys::Win32::Storage::FileSystem::ReadFile(
-                        out_r.raw(),
+                        out_r.as_raw_handle(),
                         tmp.as_mut_ptr(),
                         tmp.len() as u32,
                         &mut read_bytes,
@@ -854,7 +852,7 @@ mod windows_impl {
                 let mut read_bytes: u32 = 0;
                 let ok = unsafe {
                     windows_sys::Win32::Storage::FileSystem::ReadFile(
-                        err_r.raw(),
+                        err_r.as_raw_handle(),
                         tmp.as_mut_ptr(),
                         tmp.len() as u32,
                         &mut read_bytes,
