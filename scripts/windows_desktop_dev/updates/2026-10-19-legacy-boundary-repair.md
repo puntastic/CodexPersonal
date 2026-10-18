@@ -6,7 +6,26 @@ and protected-directory deletion in a disposable Windows fixture. Source starts
 at `4fb9f05bca840c2f28f658cfc7cb83ebc96bad1e`. Ath2368r5 retains the current
 evidence and exact original custody.
 
-## Goal and boundaries
+## Owner decision - retain unchanged with known limitation
+
+On 19 October (Australia/Brisbane), after the findings and routing explanation,
+Kestrel chose to leave the legacy backend as it is and record the problem.
+The additional permissiveness is an accepted risk for the current operating
+posture, which already allows comparable or broader access. Do not implement
+the proposed refusal guard or pursue a replacement as part of this pass.
+
+This closes the pending guard-versus-redesign choice, not the technical defect.
+The observed deletion boundary failure, original failing regression, matrix
+and source limits remain intact. Retention is not proof of isolation and does
+not authorize any additional access or action. Reassess if a future task or
+less-trusted worker depends on this mode reliably enforcing restricted access.
+
+The legacy issue alone is no longer a blocker to further update work under
+the accepted current posture. Other failing tests, missing qualification,
+package/recovery checks and the installation decision remain separate; this
+decision neither waives those checks nor installs a runtime.
+
+## Original repair goal and boundaries
 
 Restore the legacy backend's promised write boundary without making ordinary
 read/execute access or permitted workspace work silently unusable. Preserve the
@@ -182,11 +201,13 @@ changed. The original deletion regression remains failing and unchanged.
 The proposed additional filesystem-operation cases were not run because no
 capability-preserving production candidate earned that qualification step.
 
-Recommended next owner choice: authorize a narrowly scoped **fail-closed
+Earlier recommendation, not adopted: authorize a narrowly scoped **fail-closed
 refusal for this unsafe legacy backend**, with clear recovery information and
 no silent privilege/backend escalation, while any replacement architecture is
 designed separately. Such a guard is loss of that legacy capability, not a
 functional sandbox repair; it therefore remains a proposal. Unrestricted
 execution and other backend routes would need explicit non-regression checks.
-Alternatively, authorize a larger replacement/read-contract design. Do not
-silently choose either merely to make the original update installable.
+Alternatively, authorize a larger replacement/read-contract design. The later
+owner decision above selects neither: preserve current behavior with the known
+limitation. Do not revive this choice without materially changed needs or a
+new owner request.

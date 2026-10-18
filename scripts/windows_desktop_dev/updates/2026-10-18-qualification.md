@@ -7,6 +7,12 @@ package qualification does not cover later source changes.
 
 ## Current footing
 
+- Later owner disposition, 19 October: retain the legacy backend unchanged
+  with its confirmed limitation accepted for the current operating posture.
+  See the [decision beside the repair findings](2026-10-19-legacy-boundary-repair.md#owner-decision---retain-unchanged-with-known-limitation).
+  No guard or redesign is requested for this pass. This does not turn a failed
+  isolation test green, widen authority, waive other qualification failures,
+  or authorize installation.
 - Latest Rust checkpoint: `3e46aa36e64a41cbb3949c839a1d773137a2e9cf`, pushed
   to `personal/codex/shared-runtime-20261016`. Its ordinary-user fixture baseline
   exposes a real legacy deletion-enforcement failure. Non-forcing package-smoke
