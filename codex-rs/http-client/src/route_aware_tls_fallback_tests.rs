@@ -413,11 +413,11 @@ fn native_tls_pool() -> RouteAwareClientPool {
         ClientRouteClass::Other,
     )
     .with_tls_backend_fallback();
-    // Custom-CA environment settings can select rustls in ordinary construction.
-    // Bind this test's first client explicitly without mutating the process environment.
+    // The workspace keeps reqwest's default-tls backend (without http3). Construct
+    // it directly, bypassing the factory's custom-CA rustls selection. The pinned
+    // reqwest exposes use_native_tls only under its separate native-tls feature.
     let client = TransportClient::new(
         reqwest::Client::builder()
-            .use_native_tls()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
