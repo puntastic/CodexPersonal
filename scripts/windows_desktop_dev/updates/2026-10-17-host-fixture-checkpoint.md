@@ -1,5 +1,9 @@
 # Host qualification checkpoint — not release approval
 
+Continued on October 18 in
+[the qualification and isolation correction](2026-10-18-qualification.md).
+The material below remains the historical checkpoint, not the latest status.
+
 This follows `2026-10-17-qualification-followup.md`. The shared Desktop
 runtime remains unchanged. No package installation, restart, peer grant or
 persistent helper activation occurred. This checkpoint preserves unfinished

@@ -9,6 +9,11 @@ and only then select it for the next Desktop restart.
 
 ## Current update and last qualification
 
+The October 18 shared-runtime candidate is still undergoing qualification;
+see [its current isolation and repair checkpoint](updates/2026-10-18-qualification.md).
+The installed runtime remains the 0.161.0 lineage described below. Do not treat
+later source checkpoints as an installed or fully qualified replacement.
+
 The October 8 update completed source/package qualification and next-restart
 selection on October 9. It integrates stable `rust-v0.161.0`
 (`979011409de0a60b52f179721948e65531d26144`), the pending tool-interface work,
