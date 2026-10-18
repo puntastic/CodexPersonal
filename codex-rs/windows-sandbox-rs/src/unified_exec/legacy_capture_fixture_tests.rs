@@ -13,6 +13,8 @@ use super::workspace_roots_for;
 use crate::run_windows_sandbox_capture;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use codex_protocol::exec_output::IO_DRAIN_TIMEOUT_MS;
+use codex_protocol::exec_output::OutputCaptureEnd;
 use codex_protocol::models::PermissionProfile;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
@@ -100,7 +102,11 @@ fn powershell_parent_has_no_console_window() {
         .expect("PowerShell console probe parent PID")
         .parse()
         .expect("parse PowerShell console probe parent PID");
-    assert_ne!(parent_pid, std::process::id(), "probe must inspect its parent");
+    assert_ne!(
+        parent_pid,
+        std::process::id(),
+        "probe must inspect its parent"
+    );
     // PowerShell gives this helper its own hidden console. Detach only the
     // helper and inspect the explicitly identified parent's console window.
     // CREATE_NO_WINDOW can still have an attachable console with a null HWND:
@@ -111,7 +117,10 @@ fn powershell_parent_has_no_console_window() {
         let error = unsafe { GetLastError() };
         // ERROR_INVALID_HANDLE establishes no parent console. Access errors or
         // a missing parent are not evidence of a windowless process.
-        assert_eq!(error, ERROR_INVALID_HANDLE, "probe parent {parent_pid} console");
+        assert_eq!(
+            error, ERROR_INVALID_HANDLE,
+            "probe parent {parent_pid} console"
+        );
     }
     let window = unsafe { GetConsoleWindow() };
     assert!(
@@ -263,13 +272,18 @@ pub(super) fn assert_capture_preserves_descendant() {
         (result, capture_elapsed, observation)
     });
     let deadline_expired = expiry_marker.exists();
-    let state_before_release = descendant_observation.as_ref().map(|(process, observed_at)| {
-        let wait = unsafe {
-            WaitForSingleObject(process.as_raw_handle(), /*dwMilliseconds*/ 0)
-        };
-        let exit_code = (wait == WAIT_OBJECT_0).then(|| process_exit_code(process));
-        (observed_at, wait, exit_code)
-    });
+    let state_before_release = descendant_observation
+        .as_ref()
+        .map(|(process, observed_at)| {
+            let wait = unsafe {
+                WaitForSingleObject(process.as_raw_handle(), /*dwMilliseconds*/ 0)
+            };
+            let exit_code = (wait == WAIT_OBJECT_0).then(|| process_exit_code(process));
+            (observed_at, wait, exit_code)
+        });
+    let alive_before_release = state_before_release
+        .as_ref()
+        .is_ok_and(|(_, wait, _)| *wait == WAIT_TIMEOUT);
     // Release before any assertions, including failures in the observations.
     fs::write(&release_marker, "release").expect("release descendant after root exit");
     let descendant_stderr = fs::read(fixture.path().join("descendant.stderr")).unwrap_or_default();
@@ -286,20 +300,48 @@ pub(super) fn assert_capture_preserves_descendant() {
         capture_result_diagnostics(&result)
     );
     println!("{diagnostics}");
-    let (descendant_process, _) = descendant_observation
+    let (descendant_process, observed_at) = descendant_observation
         .unwrap_or_else(|err| panic!("observe descendant while alive: {err}; {diagnostics}"));
     assert_eq!(result.exit_code, 0, "{diagnostics}");
     assert!(!result.timed_out, "{diagnostics}");
-    assert!(
-        String::from_utf8_lossy(&result.stdout).contains("LEGACY-CAPTURE-DIRECT"),
+    assert_eq!(
+        result.stdout.as_slice(),
+        b"LEGACY-CAPTURE-DIRECT\r\n",
         "{diagnostics}"
+    );
+    assert!(result.stderr.is_empty(), "{diagnostics}");
+    assert!(
+        !deadline_expired,
+        "descendant expired before capture returned; {diagnostics}"
+    );
+    assert!(
+        alive_before_release,
+        "descendant was not alive at capture return; {diagnostics}"
+    );
+    assert!(
+        capture_elapsed.saturating_sub(observed_at)
+            < Duration::from_millis(IO_DRAIN_TIMEOUT_MS) + Duration::from_secs(/*secs*/ 5),
+        "capture must not wait for the descendant's lifetime; {diagnostics}"
+    );
+    let ends = [result.stdout_end, result.stderr_end];
+    assert!(
+        ends.iter().all(|end| matches!(
+            end,
+            Some(OutputCaptureEnd::Eof | OutputCaptureEnd::DrainDeadline)
+        )),
+        "normal capture must report each reader's observed end; {diagnostics}"
+    );
+    assert!(
+        ends.contains(&Some(OutputCaptureEnd::DrainDeadline)),
+        "fixture must continue exercising descendant-held capture writers; {diagnostics}"
     );
     assert!(
         wait_for_path(&survival_marker, Duration::from_secs(10)),
         "sandbox descendant did not survive normal capture exit; {diagnostics}"
     );
-    wait_for_process_exit(&descendant_process, Duration::from_secs(10))
-        .unwrap_or_else(|err| panic!("descendant did not exit after release: {err}; {diagnostics}"));
+    wait_for_process_exit(&descendant_process, Duration::from_secs(10)).unwrap_or_else(|err| {
+        panic!("descendant did not exit after release: {err}; {diagnostics}")
+    });
     let final_exit_code = process_exit_code(&descendant_process)
         .unwrap_or_else(|err| panic!("query final descendant exit: {err}; {diagnostics}"));
     println!("descendant_after_release(exit_code)={final_exit_code}");

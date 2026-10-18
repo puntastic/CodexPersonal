@@ -126,6 +126,8 @@ async fn command_exec_without_process_id_keeps_buffered_compatibility() -> Resul
     assert_eq!(
         response,
         CommandExecResponse {
+            stdout_capture_end: None,
+            stderr_capture_end: None,
             exit_code: 0,
             stdout: "legacy-out".to_string(),
             stderr: "legacy-err".to_string(),
@@ -190,6 +192,8 @@ async fn command_exec_env_overrides_merge_with_server_environment_and_support_un
     assert_eq!(
         response,
         CommandExecResponse {
+            stdout_capture_end: None,
+            stderr_capture_end: None,
             exit_code: 0,
             stdout: format!("request|added|unset|{}||", codex_home.path().display()),
             stderr: String::new(),
@@ -243,6 +247,8 @@ async fn command_exec_apply_patch_preserves_line_endings_by_default() -> Result<
     assert_eq!(
         response,
         CommandExecResponse {
+            stdout_capture_end: None,
+            stderr_capture_end: None,
             exit_code: 0,
             stdout: "Success. Updated the following files:\nM crlf.txt\n".to_string(),
             stderr: String::new(),
@@ -290,6 +296,8 @@ async fn command_exec_accepts_permission_profile() -> Result<()> {
     assert_eq!(
         response,
         CommandExecResponse {
+            stdout_capture_end: None,
+            stderr_capture_end: None,
             exit_code: 0,
             stdout: "profile".to_string(),
             stderr: String::new(),
@@ -371,6 +379,8 @@ async fn command_exec_enforces_managed_deny_read_requirements() -> Result<()> {
     assert_eq!(
         response,
         CommandExecResponse {
+            stdout_capture_end: None,
+            stderr_capture_end: None,
             exit_code: 0,
             stdout: "user secret".to_string(),
             stderr: String::new(),
@@ -454,6 +464,8 @@ async fn command_exec_permission_profile_starts_selected_network_proxy() -> Resu
     assert_eq!(
         response,
         CommandExecResponse {
+            stdout_capture_end: None,
+            stderr_capture_end: None,
             exit_code: 0,
             stdout: "1".to_string(),
             stderr: String::new(),
@@ -502,6 +514,8 @@ async fn command_exec_permission_profile_does_not_reuse_default_network_proxy() 
     assert_eq!(
         response,
         CommandExecResponse {
+            stdout_capture_end: None,
+            stderr_capture_end: None,
             exit_code: 0,
             stdout: "unset".to_string(),
             stderr: String::new(),
@@ -855,6 +869,8 @@ async fn command_exec_non_streaming_respects_output_cap() -> Result<()> {
     assert_eq!(
         response,
         CommandExecResponse {
+            stdout_capture_end: None,
+            stderr_capture_end: None,
             exit_code: 0,
             stdout: "abcde".to_string(),
             stderr: "uvwxy".to_string(),
@@ -995,6 +1011,8 @@ async fn command_exec_pipe_streams_output_and_accepts_write() -> Result<()> {
     assert_eq!(
         response,
         CommandExecResponse {
+            stdout_capture_end: None,
+            stderr_capture_end: None,
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),

@@ -34,6 +34,209 @@ fn make_exec_output(
     }
 }
 
+fn make_raw_capture_output(
+    exit_code: i32,
+    capture_ends: [Option<OutputCaptureEnd>; 2],
+) -> RawExecToolCallOutput {
+    let stdout = StreamOutput {
+        text: b"private stdout: caf\xE9".to_vec(), // codespell:ignore caf
+        truncated_after_lines: None,
+        capture_end: capture_ends[0],
+    };
+    let stderr = StreamOutput {
+        text: b"private stderr".to_vec(),
+        truncated_after_lines: None,
+        capture_end: capture_ends[1],
+    };
+    let aggregated_output = aggregate_output(&stdout, &stderr, /*max_bytes*/ None);
+    RawExecToolCallOutput {
+        exit_status: synthetic_exit_status_for_code(exit_code),
+        stdout,
+        stderr,
+        aggregated_output,
+        timed_out: false,
+    }
+}
+
+#[test_case(ExecCapturePolicy::ShellTool, false; "shell_retains_partial_output")]
+#[test_case(ExecCapturePolicy::FullBuffer, false; "full_buffer_retains_partial_output")]
+#[test_case(ExecCapturePolicy::FullBufferWithExpiration, true; "strict_rejects_partial_output")]
+#[test_case(ExecCapturePolicy::SensitiveFullBuffer, true; "sensitive_rejects_partial_output")]
+fn finalize_capture_end_policy(capture_policy: ExecCapturePolicy, rejects_incomplete: bool) {
+    for capture_end in [
+        None,
+        Some(OutputCaptureEnd::Eof),
+        Some(OutputCaptureEnd::DrainDeadline),
+        Some(OutputCaptureEnd::Cancelled),
+        Some(OutputCaptureEnd::ReadError { os_error: Some(5) }),
+        Some(OutputCaptureEnd::ReadError { os_error: None }),
+    ] {
+        for stream in 0..2 {
+            let mut capture_ends = [Some(OutputCaptureEnd::Eof); 2];
+            capture_ends[stream] = capture_end;
+            let result = finalize_exec_result(
+                Ok(make_raw_capture_output(/*exit_code*/ 0, capture_ends)),
+                SandboxType::None,
+                Duration::from_millis(3),
+                capture_policy,
+            );
+            if rejects_incomplete && !matches!(capture_end, None | Some(OutputCaptureEnd::Eof)) {
+                let CodexErr::Io(err) = result.expect_err("known incomplete capture must fail")
+                else {
+                    panic!("incomplete capture should use the I/O error path");
+                };
+                // Exact diagnostics also ensure neither strict policy exposes captured content.
+                assert_eq!(
+                    (err.kind(), err.to_string()),
+                    (
+                        io::ErrorKind::Other,
+                        "capture output pipes did not reach EOF before collection ended"
+                            .to_string(),
+                    ),
+                );
+            } else {
+                let output = result.expect("capture policy should preserve this result");
+                assert_eq!(
+                    (
+                        output.exit_code,
+                        output.timed_out,
+                        output.duration,
+                        output.stdout.text,
+                        output.stderr.text,
+                        output.stdout.capture_end,
+                        output.stderr.capture_end,
+                        output.aggregated_output.capture_end,
+                    ),
+                    (
+                        0,
+                        false,
+                        Duration::from_millis(3),
+                        "private stdout: café".to_string(),
+                        "private stderr".to_string(),
+                        capture_ends[0],
+                        capture_ends[1],
+                        None,
+                    ),
+                );
+            }
+        }
+    }
+}
+
+#[test_case(ExecCapturePolicy::FullBufferWithExpiration; "strict")]
+#[test_case(ExecCapturePolicy::SensitiveFullBuffer; "sensitive")]
+fn finalize_incomplete_capture_preserves_root_failure_and_timeout_precedence(
+    capture_policy: ExecCapturePolicy,
+) {
+    let capture_ends = [
+        Some(OutputCaptureEnd::ReadError { os_error: Some(5) }),
+        Some(OutputCaptureEnd::DrainDeadline),
+    ];
+    let output = finalize_exec_result(
+        Ok(make_raw_capture_output(/*exit_code*/ 23, capture_ends)),
+        SandboxType::None,
+        Duration::ZERO,
+        capture_policy,
+    )
+    .expect("root failure must not be replaced by capture failure");
+    assert_eq!(
+        (
+            output.exit_code,
+            output.stdout.capture_end,
+            output.stderr.capture_end
+        ),
+        (23, capture_ends[0], capture_ends[1]),
+    );
+
+    let mut raw_output = make_raw_capture_output(/*exit_code*/ 0, capture_ends);
+    raw_output.timed_out = true;
+    let error = finalize_exec_result(
+        Ok(raw_output),
+        SandboxType::None,
+        Duration::ZERO,
+        capture_policy,
+    )
+    .expect_err("root timeout must remain a timeout");
+    let CodexErr::Sandbox(SandboxErr::Timeout { output }) = error else {
+        panic!("root timeout was replaced by a different error");
+    };
+    assert_eq!(
+        (
+            output.exit_code,
+            output.timed_out,
+            output.stdout.text,
+            output.stdout.capture_end,
+            output.stderr.capture_end,
+        ),
+        (
+            EXEC_TIMEOUT_EXIT_CODE,
+            true,
+            "private stdout: café".to_string(),
+            capture_ends[0],
+            capture_ends[1],
+        ),
+    );
+}
+
+#[test]
+fn finalize_incomplete_sensitive_capture_preserves_sandbox_denial() {
+    let mut raw_output = make_raw_capture_output(
+        /*exit_code*/ 1,
+        [Some(OutputCaptureEnd::DrainDeadline); 2],
+    );
+    raw_output.stderr.text = b"Operation not permitted".to_vec();
+    let error = finalize_exec_result(
+        Ok(raw_output),
+        SandboxType::WindowsRestrictedToken,
+        Duration::ZERO,
+        ExecCapturePolicy::SensitiveFullBuffer,
+    )
+    .expect_err("sandbox denial must retain precedence");
+    assert!(matches!(
+        error,
+        CodexErr::Sandbox(SandboxErr::Denied { .. })
+    ));
+}
+
+#[test]
+fn finalize_capture_preserves_spawn_error() {
+    let error = finalize_exec_result(
+        Err(CodexErr::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "root executable unavailable",
+        ))),
+        SandboxType::None,
+        Duration::ZERO,
+        ExecCapturePolicy::SensitiveFullBuffer,
+    )
+    .expect_err("spawn failure must retain precedence");
+    let CodexErr::Io(error) = error else {
+        panic!("spawn failure was replaced by a different error");
+    };
+    assert_eq!(
+        (error.kind(), error.to_string()),
+        (
+            io::ErrorKind::NotFound,
+            "root executable unavailable".to_string()
+        ),
+    );
+}
+
+#[test]
+fn aggregate_capture_does_not_infer_pipe_completion_from_eof_or_output_caps() {
+    for capture_end in [OutputCaptureEnd::Eof, OutputCaptureEnd::DrainDeadline] {
+        let raw_output = make_raw_capture_output(/*exit_code*/ 0, [Some(capture_end); 2]);
+        let total_len = raw_output.stdout.text.len() + raw_output.stderr.text.len();
+        for max_bytes in [None, Some(4), Some(128)] {
+            let output = aggregate_output(&raw_output.stdout, &raw_output.stderr, max_bytes);
+            assert_eq!(
+                (output.text.len(), output.capture_end),
+                (max_bytes.unwrap_or(total_len).min(total_len), None),
+            );
+        }
+    }
+}
+
 #[test]
 fn sandbox_detection_requires_keywords() {
     let output = make_exec_output(/*exit_code*/ 1, "", "", "");
@@ -128,10 +331,12 @@ fn aggregate_output_prefers_stderr_on_contention() {
     let stdout = StreamOutput {
         text: vec![b'a'; EXEC_OUTPUT_MAX_BYTES],
         truncated_after_lines: None,
+        capture_end: None,
     };
     let stderr = StreamOutput {
         text: vec![b'b'; EXEC_OUTPUT_MAX_BYTES],
         truncated_after_lines: None,
+        capture_end: None,
     };
 
     let aggregated = aggregate_output(&stdout, &stderr, Some(EXEC_OUTPUT_MAX_BYTES));
@@ -149,10 +354,12 @@ fn aggregate_output_fills_remaining_capacity_with_stderr() {
     let stdout = StreamOutput {
         text: vec![b'a'; stdout_len],
         truncated_after_lines: None,
+        capture_end: None,
     };
     let stderr = StreamOutput {
         text: vec![b'b'; EXEC_OUTPUT_MAX_BYTES],
         truncated_after_lines: None,
+        capture_end: None,
     };
 
     let aggregated = aggregate_output(&stdout, &stderr, Some(EXEC_OUTPUT_MAX_BYTES));
@@ -168,10 +375,12 @@ fn aggregate_output_rebalances_when_stderr_is_small() {
     let stdout = StreamOutput {
         text: vec![b'a'; EXEC_OUTPUT_MAX_BYTES],
         truncated_after_lines: None,
+        capture_end: None,
     };
     let stderr = StreamOutput {
         text: vec![b'b'; 1],
         truncated_after_lines: None,
+        capture_end: None,
     };
 
     let aggregated = aggregate_output(&stdout, &stderr, Some(EXEC_OUTPUT_MAX_BYTES));
@@ -187,10 +396,12 @@ fn aggregate_output_keeps_stdout_then_stderr_when_under_cap() {
     let stdout = StreamOutput {
         text: vec![b'a'; 4],
         truncated_after_lines: None,
+        capture_end: None,
     };
     let stderr = StreamOutput {
         text: vec![b'b'; 3],
         truncated_after_lines: None,
+        capture_end: None,
     };
 
     let aggregated = aggregate_output(&stdout, &stderr, Some(EXEC_OUTPUT_MAX_BYTES));
@@ -226,10 +437,12 @@ fn aggregate_output_keeps_all_bytes_when_uncapped() {
     let stdout = StreamOutput {
         text: vec![b'a'; EXEC_OUTPUT_MAX_BYTES],
         truncated_after_lines: None,
+        capture_end: None,
     };
     let stderr = StreamOutput {
         text: vec![b'b'; EXEC_OUTPUT_MAX_BYTES],
         truncated_after_lines: None,
+        capture_end: None,
     };
 
     let aggregated = aggregate_output(&stdout, &stderr, /*max_bytes*/ None);

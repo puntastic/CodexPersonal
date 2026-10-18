@@ -102,6 +102,8 @@ fn capture_result_diagnostics(result: &crate::CaptureResult) -> String {
     const OUTPUT_LIMIT: usize = 8 * 1024;
     let exit_code = result.exit_code;
     let timed_out = result.timed_out;
+    let stdout_end = result.stdout_end;
+    let stderr_end = result.stderr_end;
     let stdout_len = result.stdout.len();
     let stderr_len = result.stderr.len();
     let stdout_preview_len = stdout_len.min(OUTPUT_LIMIT);
@@ -109,7 +111,7 @@ fn capture_result_diagnostics(result: &crate::CaptureResult) -> String {
     let stdout = String::from_utf8_lossy(&result.stdout[..stdout_preview_len]);
     let stderr = String::from_utf8_lossy(&result.stderr[..stderr_preview_len]);
     format!(
-        "exit_code={exit_code} timed_out={timed_out} stdout(first {stdout_preview_len}/{stdout_len} bytes)={stdout:?} stderr(first {stderr_preview_len}/{stderr_len} bytes)={stderr:?}"
+        "exit_code={exit_code} timed_out={timed_out} stdout_end={stdout_end:?} stderr_end={stderr_end:?} stdout(first {stdout_preview_len}/{stdout_len} bytes)={stdout:?} stderr(first {stderr_preview_len}/{stderr_len} bytes)={stderr:?}"
     )
 }
 

@@ -12,10 +12,26 @@ use encoding_rs::IBM866;
 use encoding_rs::WINDOWS_1252;
 use std::time::Duration;
 
+/// Timeout used by exec backends to drain output pipes after root exit.
+pub const IO_DRAIN_TIMEOUT_MS: u64 = 2_000;
+
+/// The observed reason collection of an output pipe ended.
+///
+/// EOF describes the pipe, not whether retained output was truncated by a cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputCaptureEnd {
+    Eof,
+    DrainDeadline,
+    Cancelled,
+    ReadError { os_error: Option<i32> },
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamOutput<T: Clone> {
     pub text: T,
     pub truncated_after_lines: Option<u32>,
+    /// `None` means this capture path did not report how pipe collection ended.
+    pub capture_end: Option<OutputCaptureEnd>,
 }
 
 impl StreamOutput<String> {
@@ -23,6 +39,7 @@ impl StreamOutput<String> {
         Self {
             text,
             truncated_after_lines: None,
+            capture_end: None,
         }
     }
 }
@@ -32,6 +49,7 @@ impl StreamOutput<Vec<u8>> {
         StreamOutput {
             text: bytes_to_string_smart(&self.text),
             truncated_after_lines: self.truncated_after_lines,
+            capture_end: self.capture_end,
         }
     }
 }
