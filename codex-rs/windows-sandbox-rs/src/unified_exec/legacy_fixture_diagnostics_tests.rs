@@ -7,6 +7,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use codex_utils_pty::JobObject;
 use codex_utils_pty::ProcessHandle;
 use codex_utils_pty::SpawnedProcess;
+use std::ffi::c_void;
 use std::fs::File;
 use std::io;
 use std::io::Read;
@@ -18,6 +19,17 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use tokio::time::sleep_until;
+use windows_sys::Win32::Foundation::HLOCAL;
+use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Win32::Security::ACL_SIZE_INFORMATION;
+use windows_sys::Win32::Security::AclSizeInformation;
+use windows_sys::Win32::Security::GetAclInformation;
+use windows_sys::Win32::Security::GetSecurityDescriptorControl;
+use windows_sys::Win32::Security::SE_DACL_AUTO_INHERIT_REQ;
+use windows_sys::Win32::Security::SE_DACL_AUTO_INHERITED;
+use windows_sys::Win32::Security::SE_DACL_DEFAULTED;
+use windows_sys::Win32::Security::SE_DACL_PRESENT;
+use windows_sys::Win32::Security::SE_DACL_PROTECTED;
 use windows_sys::Win32::System::Threading::OpenProcess;
 use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
 use windows_sys::Win32::System::Threading::PROCESS_TERMINATE;
@@ -27,6 +39,176 @@ const FILE_LIMIT: u64 = 2 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const FAILURE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const FAILURE_RELEASE_GRACE: Duration = Duration::from_secs(1);
+const DACL_BYTES_PER_PATH: usize = 512;
+const DACL_BYTES_PER_SNAPSHOT: usize = 4 * 1024;
+
+struct OwnedDaclDescriptor(*mut c_void);
+
+impl Drop for OwnedDaclDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: fetch_dacl_handle transfers this LocalFree-owned descriptor.
+        unsafe { LocalFree(self.0 as HLOCAL) };
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DaclObservation {
+    Unavailable {
+        operation: &'static str,
+        kind: Option<io::ErrorKind>,
+        os_error: Option<i32>,
+    },
+    Absent(u16),
+    Null(u16),
+    Acl {
+        control: u16,
+        ace_count: u32,
+        total_bytes: usize,
+        bytes: Vec<u8>,
+    },
+}
+
+impl DaclObservation {
+    fn retain_acl(control: u16, ace_count: u32, bytes: &[u8], remaining: &mut usize) -> Self {
+        let retained = bytes.len().min(DACL_BYTES_PER_PATH).min(*remaining);
+        *remaining -= retained;
+        Self::Acl {
+            control,
+            ace_count,
+            total_bytes: bytes.len(),
+            bytes: bytes[..retained].to_vec(),
+        }
+    }
+
+    fn read(path: &Path, remaining: &mut usize) -> Self {
+        // This helper opens only READ_CONTROL and requests only DACL information.
+        // A missing path is an observation, including files deleted by the child.
+        // SAFETY: its fallible file open returns missing-path errors before any
+        // native read; on success the returned descriptor is immediately owned.
+        let (acl, descriptor) = match unsafe { crate::acl::fetch_dacl_handle(path) } {
+            Ok(value) => value,
+            Err(error) => {
+                let error = error.downcast_ref::<io::Error>();
+                // Do not print anyhow's path-bearing context or resolve SID names.
+                return Self::Unavailable {
+                    operation: "fetch_dacl_handle",
+                    kind: error.map(io::Error::kind),
+                    os_error: error.and_then(io::Error::raw_os_error),
+                };
+            }
+        };
+        let descriptor = OwnedDaclDescriptor(descriptor);
+        let mut control = 0;
+        let mut revision = 0;
+        // SAFETY: the descriptor remains owned and live through all native reads.
+        if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0 {
+            let error = io::Error::last_os_error();
+            return Self::Unavailable {
+                operation: "GetSecurityDescriptorControl",
+                kind: Some(error.kind()),
+                os_error: error.raw_os_error(),
+            };
+        }
+        let control = control
+            & (SE_DACL_PRESENT
+                | SE_DACL_DEFAULTED
+                | SE_DACL_AUTO_INHERIT_REQ
+                | SE_DACL_AUTO_INHERITED
+                | SE_DACL_PROTECTED);
+        if control & SE_DACL_PRESENT == 0 {
+            return Self::Absent(control);
+        }
+        if acl.is_null() {
+            return Self::Null(control);
+        }
+        let mut info = ACL_SIZE_INFORMATION::default();
+        // SAFETY: GetSecurityInfo returned this non-null ACL in the live descriptor;
+        // info is a writable buffer of the declared size and information class.
+        if unsafe {
+            GetAclInformation(
+                acl,
+                (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            return Self::Unavailable {
+                operation: "GetAclInformation",
+                kind: Some(error.kind()),
+                os_error: error.raw_os_error(),
+            };
+        }
+        // SAFETY: GetAclInformation reports the bytes in use in this ACL. Copy
+        // only a bounded prefix before the descriptor is released by its owner.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(acl.cast::<u8>(), info.AclBytesInUse as usize) };
+        Self::retain_acl(control, info.AceCount, bytes, remaining)
+    }
+
+    fn diagnostics(&self) -> String {
+        match self {
+            Self::Unavailable {
+                operation,
+                kind,
+                os_error,
+            } => {
+                let state = if *kind == Some(io::ErrorKind::NotFound) {
+                    "missing"
+                } else {
+                    "unavailable"
+                };
+                format!("dacl={state} operation={operation} io_kind={kind:?} os_error={os_error:?}")
+            }
+            Self::Absent(control) => format!("dacl=absent dacl_control=0x{control:04x}"),
+            Self::Null(control) => format!("dacl=null dacl_control=0x{control:04x}"),
+            Self::Acl {
+                control,
+                ace_count,
+                total_bytes,
+                bytes,
+            } => {
+                let state = if *ace_count == 0 { "empty" } else { "present" };
+                let retained = bytes.len();
+                let truncated = retained < *total_bytes;
+                let hex = bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                format!(
+                    "dacl={state} dacl_control=0x{control:04x} ace_count={ace_count} acl_bytes_in_use={total_bytes} retained={retained} truncated={truncated} acl_hex={hex}"
+                )
+            }
+        }
+    }
+}
+
+pub(super) fn workspace_dacl_snapshot(fixture: &Path) -> String {
+    // Fixed fixture-relative paths only: no enumeration, owner/SACL query,
+    // account lookup, token inspection, or reads of sandbox state/secrets.
+    let mut remaining = DACL_BYTES_PER_SNAPSHOT;
+    let entries = [
+        "workspace",
+        "workspace/workspace-delete.txt",
+        "temp",
+        "temp/temp-delete.txt",
+        "tmp",
+        "tmp/tmp-delete.txt",
+        "outside",
+        "outside/outside-delete.txt",
+        "workspace/.git",
+    ]
+    .map(|label| {
+        let observation = DaclObservation::read(&fixture.join(label), &mut remaining);
+        format!("{label}: {}", observation.diagnostics())
+    });
+    let retained = DACL_BYTES_PER_SNAPSHOT - remaining;
+    format!(
+        "DACL-only snapshot: retained_acl_bytes={retained}/{DACL_BYTES_PER_SNAPSHOT}; per_path_limit={DACL_BYTES_PER_PATH}; hex is an exact prefix, not effective-token rights or setup return values\n{}",
+        entries.join("\n"),
+    )
+}
 
 #[derive(Default, Debug, PartialEq, Eq)]
 struct BoundedOutput {
@@ -330,5 +512,87 @@ fn bounded_output_accepts_empty_chunks() {
             bytes: b"diagnostic".to_vec(),
             observed: b"diagnostic".len(),
         },
+    );
+}
+
+#[test]
+fn dacl_diagnostics_distinguish_absent_null_empty_missing_and_unavailable() {
+    let observations = [
+        DaclObservation::Absent(0),
+        DaclObservation::Null(SE_DACL_PRESENT),
+        DaclObservation::Acl {
+            control: SE_DACL_PRESENT,
+            ace_count: 0,
+            total_bytes: 8,
+            bytes: vec![2, 0, 8, 0, 0, 0, 0, 0],
+        },
+        DaclObservation::Unavailable {
+            operation: "fetch_dacl_handle",
+            kind: Some(io::ErrorKind::NotFound),
+            os_error: Some(2),
+        },
+        DaclObservation::Unavailable {
+            operation: "fetch_dacl_handle",
+            kind: None,
+            os_error: None,
+        },
+    ];
+    pretty_assertions::assert_eq!(
+        observations.map(|observation| observation.diagnostics()),
+        [
+            "dacl=absent dacl_control=0x0000",
+            "dacl=null dacl_control=0x0004",
+            "dacl=empty dacl_control=0x0004 ace_count=0 acl_bytes_in_use=8 retained=8 truncated=false acl_hex=0200080000000000",
+            "dacl=missing operation=fetch_dacl_handle io_kind=Some(NotFound) os_error=Some(2)",
+            "dacl=unavailable operation=fetch_dacl_handle io_kind=None os_error=None",
+        ]
+        .map(str::to_string),
+    );
+}
+
+#[test]
+fn dacl_prefix_retention_obeys_path_and_snapshot_budgets() {
+    let source = vec![0xab; DACL_BYTES_PER_PATH + 10];
+    let mut remaining = DACL_BYTES_PER_PATH + 3;
+    let first = DaclObservation::retain_acl(4, 1, &source, &mut remaining);
+    let second = DaclObservation::retain_acl(4, 1, &source, &mut remaining);
+    let third = DaclObservation::retain_acl(4, 1, &source, &mut remaining);
+    pretty_assertions::assert_eq!(
+        (first, second, third, remaining),
+        (
+            DaclObservation::Acl {
+                control: 4,
+                ace_count: 1,
+                total_bytes: source.len(),
+                bytes: vec![0xab; DACL_BYTES_PER_PATH],
+            },
+            DaclObservation::Acl {
+                control: 4,
+                ace_count: 1,
+                total_bytes: source.len(),
+                bytes: vec![0xab; 3],
+            },
+            DaclObservation::Acl {
+                control: 4,
+                ace_count: 1,
+                total_bytes: source.len(),
+                bytes: Vec::new(),
+            },
+            0,
+        ),
+    );
+}
+
+#[test]
+fn dacl_diagnostics_mark_a_budget_exhausted_prefix_as_truncated_not_empty() {
+    let observation = DaclObservation::Acl {
+        control: SE_DACL_PRESENT,
+        ace_count: 1,
+        total_bytes: 28,
+        bytes: Vec::new(),
+    };
+    pretty_assertions::assert_eq!(
+        observation.diagnostics(),
+        "dacl=present dacl_control=0x0004 ace_count=1 acl_bytes_in_use=28 retained=0 truncated=true acl_hex=",
     );
 }

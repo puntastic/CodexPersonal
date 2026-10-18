@@ -751,6 +751,7 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             ),
         )
         .expect("write delete script");
+        let pre_spawn_dacl = legacy_fixture_diagnostics::workspace_dacl_snapshot(test_root.path());
 
         let env_map = HashMap::from([
             ("TEMP".to_string(), temp_root.to_string_lossy().into_owned()),
@@ -807,16 +808,16 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
         } else {
             String::new()
         };
-        let diagnostics = format!(
+        let mut diagnostics = format!(
             "{}\n{cleanup}\n{}",
             observed.diagnostics(),
             legacy_fixture_diagnostics::file_diagnostics(&crate::current_log_file_path(
                 &codex_home.path().join(".sandbox"),
             )),
         );
-        let exit_code = completion.unwrap_or_else(|error| panic!("{error}\n{diagnostics}"));
-
-        assert_eq!(
+        // Freeze the original filesystem oracle before any post-observation
+        // DACL reads. Completion errors still use the existing panic path.
+        let outcome = completion.map(|exit_code| {
             (
                 exit_code,
                 workspace_file.exists(),
@@ -824,10 +825,19 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
                 tmp_file.exists(),
                 fs::read_to_string(&outside_file).ok(),
                 protected_git_dir.is_dir(),
-            ),
-            (0, false, false, false, Some("outside".to_string()), true),
-            "{diagnostics}"
-        );
+            )
+        });
+        let expected = (0, false, false, false, Some("outside".to_string()), true);
+        if outcome.as_ref() != Ok(&expected) {
+            let cleanup_ran = completion.is_err();
+            let post_observation_dacl =
+                legacy_fixture_diagnostics::workspace_dacl_snapshot(test_root.path());
+            diagnostics.push_str(&format!(
+                "\nDACL phase=pre_spawn_after_fixture_creation cleanup_ran=false\n{pre_spawn_dacl}\nDACL phase=post_observation cleanup_ran={cleanup_ran}\n{post_observation_dacl}"
+            ));
+        }
+        let outcome = outcome.unwrap_or_else(|error| panic!("{error}\n{diagnostics}"));
+        assert_eq!(outcome, expected, "{diagnostics}");
     });
 }
 
