@@ -15,12 +15,43 @@ function Test-CodexDevSourceStateEqual {
         [string]$Before.GitVisibleSourceFingerprint -eq [string]$After.GitVisibleSourceFingerprint
 }
 
+function ConvertTo-CodexDevPointerTimestamp {
+    param([object]$Value)
+
+    if ($Value -is [DateTimeOffset]) {
+        return $Value.ToUniversalTime()
+    }
+    if ($Value -is [DateTime]) {
+        if ($Value.Kind -eq [DateTimeKind]::Unspecified) {
+            throw "Pointer timestamp has an unspecified DateTime kind; an explicit time zone is required."
+        }
+        if ($Value.Kind -eq [DateTimeKind]::Local -and
+            ([TimeZoneInfo]::Local.IsAmbiguousTime($Value) -or [TimeZoneInfo]::Local.IsInvalidTime($Value))) {
+            throw "Pointer timestamp is an ambiguous or invalid local time."
+        }
+        # ConvertFrom-Json can already have materialized the ISO value. Keep its
+        # declared kind and full tick precision instead of casting it to text.
+        return [DateTimeOffset]::new($Value).ToUniversalTime()
+    }
+    if ($Value -isnot [string] -or
+        $Value -cnotmatch '\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})\z') {
+        throw "Pointer timestamp must be an ISO timestamp with an explicit zone and at most seven fractional digits."
+    }
+    $parsed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($Value, [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+        throw "Pointer timestamp is not a valid ISO timestamp."
+    }
+    return $parsed.ToUniversalTime()
+}
+
 function Set-CodexDevLastPackagePointer {
     param(
         [string]$PointerPath,
         [object]$Pointer
     )
 
+    $incomingStartedAt = ConvertTo-CodexDevPointerTimestamp $Pointer.StartedAtUtc
     New-Item -ItemType Directory -Path (Split-Path -Parent $PointerPath) -Force | Out-Null
     $lockPath = "$PointerPath.lock"
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -43,9 +74,8 @@ function Set-CodexDevLastPackagePointer {
     try {
         if (Test-Path -LiteralPath $PointerPath -PathType Leaf) {
             $existing = Get-Content -LiteralPath $PointerPath -Raw | ConvertFrom-Json
-            if (-not [string]::IsNullOrWhiteSpace([string]$existing.StartedAtUtc) -and
-                [DateTime]::Parse([string]$existing.StartedAtUtc).ToUniversalTime() -gt
-                [DateTime]::Parse([string]$Pointer.StartedAtUtc).ToUniversalTime()) {
+            $existingStartedAt = ConvertTo-CodexDevPointerTimestamp $existing.StartedAtUtc
+            if ($existingStartedAt -gt $incomingStartedAt) {
                 return $false
             }
         }
