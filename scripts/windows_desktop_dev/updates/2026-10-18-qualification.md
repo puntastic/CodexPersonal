@@ -178,7 +178,7 @@ duplicate control and enum are retired; paired source `f05b6d4a0...` and the
 exact receipts remain recoverable. This is a fixture correction, not a claim
 that closed-input behavior was fixed or exhaustively diagnosed.
 
-All five deletion attempts reported access denied despite CMD errorlevels 0.
+All five deletion operations (four `del` and one `rmdir`) reported access denied despite CMD errorlevels 0.
 The three authorized files remained, so their failed positive controls do not
 establish the outside boundary. This differs from the earlier Windows19045
 permissive-rights diagnostic; do not call it replication or a security repair.
@@ -192,6 +192,83 @@ rather than reusing the historical local helper. Availability of that helper
 is not evidence that every selected test executed Code Mode. All three groups
 produced fresh exact receipts; none had a retry or error. The overall workflow
 correctly remains failed because the native group failed.
+
+## Full supported Windows campaign
+
+Run [39133843074](https://github.com/puntastic/CodexPersonal/actions/runs/39133843074)
+started on 18 October at 13:57:43 UTC, workflow
+`c92d4a63074b7a499041b3e6a5d3056a5df232b9`, code
+`988f24639c26960426cea0de51f90c81b407f47d`. It inventories the supported Windows
+workspace afresh, excludes only voice-host for its unavailable matching native
+SDK, retains ordinary ignored handling and requires the unresolved deletion
+case. The ordinary complement runs first with two threads; the eleven exact
+account-mutating cases follow in serial groups. Locked `dev-small`, two build
+jobs, incremental disabled, explicit V8 sandbox feature and zero retries apply.
+
+YAML, six PowerShell blocks, the historical eleven-case identity list,
+synthetic inventory partition controls and retained passing/failing JUnit
+replays were checked before dispatch. Missing cases and stale reports are
+rejected. Independent source review found no concrete blocker; it did not
+repeat the semantic account-mutator audit. A complete failed receipt remains
+valid evidence but does not pass qualification.
+
+The canonical candidate Build is attempted before tests. Any accepted artifact
+is labelled **NOT DEPLOYED / NOT APPROVED**; workspace test builds can change
+unified features, so same source does not establish packaged-byte execution.
+At the 14:07 UTC check, the candidate upload had been skipped and workspace
+build/inventory was running. No new package or full-suite result is claimed;
+the completed logs must establish why candidate preparation did not succeed.
+The final gate requires both candidate and qualification success.
+
+Read-only deletion-path audit found that `spawn_prep.rs` silently skips a
+writable root without a matching capability SID and discards the allow/deny
+ACL-update results. A successful spawn therefore does not establish that the
+intended grants were installed. The allow mask intentionally grants inherited
+child `DELETE`, not parent `FILE_DELETE_CHILD`. This is a source gap in the
+available evidence, not a diagnosed cause of the current failure. If the
+already-running campaign reproduces it, the smallest next discriminator is
+the exact post-preparation roots/SIDs, update results and root/child descriptor
+readback on a disposable VM; intact grants would then motivate checks with
+the actual launch token. No token-flag or permission change follows from this
+audit. The earlier local synthetic-descriptor result remains separate.
+
+Test-only diagnostic checkpoint `b103d6a7968cf462372f8fdcb0422f86e3624cef`
+is committed and pushed separately from that campaign's frozen source. It
+records nine fixed fixture-relative DACL snapshots before spawn and, on a
+failure, after the unchanged completion/cleanup sequence. The original
+filesystem tuple is frozen before post-observation reads; no oracle, command,
+timeout or permission setup is weakened. The existing read-only helper opens
+with `READ_CONTROL` and requests DACL information only. Returned descriptor
+allocations have RAII ownership. No account-name/owner/SACL/token inspection,
+PID reopening, path enumeration or extra sandbox-state read was added.
+
+Each path retains at most 512 exact ACL bytes and each snapshot at most 4 KiB,
+hex-encoded with length/truncation indicators and DACL-specific control flags.
+Absent, null, empty, missing, unavailable and truncated are distinct. A prefix
+can omit a relevant ACE. These snapshots are not immediate post-preparation
+observations, original setup return codes or effective-token access evidence.
+Microsoft's [restricted-token contract](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)
+requires both normal and restricting-SID access checks; a granting capability
+ACE alone cannot establish effective access.
+
+Independent source review found no confirmed defect. Full formatting and
+scoped `just fix` passed in 11.10 s. A source-traced local run executed only
+three pure DACL-format/budget tests and the two existing pure output-buffer
+tests: 5/5 passed, no errors/retries, 292 filtered, 0.092 s, Nextest
+`a4fefb4d-e89f-4f63-a06e-b5375eface4c`. JUnit SHA256
+`7f9ce12d8e3e93494e50d4f3d2f7cef0fb68c15e5ac45a92a0e47b2cf5e6fe80`.
+Prefixes `20261018-dacl-diagnostics-fix` and `20261018-dacl-pure-tests`
+retain local receipts. No local native ACL reader or sandbox launch ran in
+this check. The actual snapshot path is now assigned to disposable run
+[39137145645](https://github.com/puntastic/CodexPersonal/actions/runs/39137145645),
+workflow `bbe66632f26b5566124c6f653c90ea07c32dd29f`, exact code `b103d6a796`.
+Its eight selected cases are the five pure tests, ordinary non-TTY output,
+the unchanged deletion test and the corrected TTY lifecycle fixture. It uses
+a separate disposable VM/concurrency group, a 45-minute ceiling and no Core,
+V8, workspace or package build. Both fixed DACL phases/18 rows have a bounded
+projection retained separately from later log output. The original full
+campaign continues at its frozen source and workflow. Neither new run has a
+completed result at this checkpoint.
 
 ## Continuation and release boundary
 
