@@ -303,7 +303,9 @@ fn configure_independent_guardian_context(config: &mut Config) {
     assert_eq!(
         (
             config.features.enabled(Feature::GuardianThreadContext),
-            config.features.enabled(Feature::GuardianReuseParentCompaction),
+            config
+                .features
+                .enabled(Feature::GuardianReuseParentCompaction),
         ),
         (true, false),
         "scenario requires Independent Guardian context"
