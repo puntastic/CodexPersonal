@@ -98,3 +98,95 @@ workspace campaign is planned here.
 Sources: [CreateRestrictedToken](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken),
 [file rights](https://learn.microsoft.com/en-us/windows/win32/fileio/file-access-rights-constants),
 [upstream issue](https://github.com/openai/codex/issues/32915).
+
+## Completed same-VM discriminator
+
+Source `9a37d8ddb47178d4d75dd7acc84349e9bf962238`, workflow
+`922a5b1e1b9304fcb184508b6b5cd29c1b1a4ef2`, disposable
+[run 39154549279](https://github.com/puntastic/CodexPersonal/actions/runs/39154549279):
+Windows 10.0.26100, image `win25-vs2026/20261007.264.1`. The exact three native
+token tests passed in 0.051 seconds with no failures, errors, skips or retries.
+The matrix has 210 unique data rows plus one summary, no API failures or
+prediction mismatches, and no projection truncation. Its unrestricted base
+control succeeds across all descriptors/rights. The other two tests preserve
+existing proxy-SID membership and same-logon/other-logon object-access controls;
+they do not exercise a changed production token.
+
+Full formatting and scoped `just fix -p codex-windows-sandbox` compiled test
+code cleanly in 42.74 seconds locally. No native test executed on the user's
+machine. Primary and independent source review checked handles, SID/ACL/descriptor
+lifetimes, explicit mappings, prebound predictions and bounded output. A later
+independent result readback matched all 211 projection lines to the run tail,
+all exact JUnit identities, and both hashes below.
+
+| Same descriptor / requested right | WR + capability only | WR + broad SIDs | Full restriction + capability only | Full restriction + broad SIDs |
+| --- | --- | --- | --- | --- |
+| User-only / ordinary read | allowed | allowed | denied | denied |
+| User-only / parent delete-child | allowed | allowed | denied | denied |
+| Everyone-full / write-data | denied | allowed | denied | allowed |
+| Logon-full / write-data | denied | allowed | denied | allowed |
+
+The first two rows isolate a flag-dependent distinction on this host while the
+base token, other flags, descriptor and right are held fixed. Removing the
+broad restricting identities alone does not repair this parent-delete path.
+Removing WR closes that modeled path but also loses legitimate user-private
+reads. Retaining broad identities still authorizes modeled outside writes where
+the corresponding broad ACE exists. None of these four variants meets both
+modeled ordinary-read and write-isolation requirements on this host.
+
+**Green here means the predicted unsafe allowances and compatibility losses
+were observed. It does not mean remediation passed.** This is `AccessCheck`
+against synthetic in-memory descriptors, not a native file-operation or
+process-startup trial of a new policy. It strengthens the mechanism account
+beside the earlier actual deletion, without claiming all token designs or
+all Windows versions have been exhausted.
+
+Selected original artifacts have hash/size-bound Ath custody and checked
+artifact metadata:
+
+- Original projection, 38,524 bytes:
+  `ath-asset:sha256:e097ae5a443db50e1322ec8c32645daf5546469e13fd1dac61ce9a7eb97e8f0b`.
+- Original JUnit, 893 bytes:
+  `ath-asset:sha256:c33bb7904b0f0c78483d90da3ee7d10eba52b92c5d82c94ff19051529e40ffd4`.
+
+Local originals and exact source/tool/binary receipts remain under
+`codex-rs/target/desktop-dev/reports/20261019-token-matrix-39154549279`.
+Transfer URLs, accounts, credentials and test homes are not stored in this note.
+
+## Bounded alternative challenge and disposition
+
+A second source/documentation review looked for a sound smaller mechanism,
+not merely another arrangement of these two toggles:
+
+- [Mandatory integrity control](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control)
+  supplies an orthogonal no-write-up boundary, not a writable-root identity.
+  Equal/lower-integrity outside objects remain a countercase under the modeled
+  discretionary gap. Explicit no-read-up/no-execute-up labels also narrow reads.
+- [AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+  is a genuine boundary but needs package/capability access to user-private
+  resources. Its broad-filesystem capability is not a documented universal
+  read-only allowance for arbitrary native path opens.
+- A trusted read-only handle broker could preserve access for cooperating
+  clients. The existing process handle-list seam only supplies controlled
+  handles, not transparent filesystem mediation for arbitrary CMD/PowerShell
+  and native programs. This would be a different architecture/contract.
+
+These are source-reviewed options, not built or runtime-qualified candidates.
+No sound drop-in emerged under this task's constraints; this is not a proof
+that no Windows solution exists. API interception, command-text prediction or
+preflighting only current known roots cannot certify arbitrary future access.
+
+The arc has reached its explicit contract-choice boundary. No production token,
+ACL policy, backend default, live permission, package or installed runtime was
+changed. The original deletion regression remains failing and unchanged.
+The proposed additional filesystem-operation cases were not run because no
+capability-preserving production candidate earned that qualification step.
+
+Recommended next owner choice: authorize a narrowly scoped **fail-closed
+refusal for this unsafe legacy backend**, with clear recovery information and
+no silent privilege/backend escalation, while any replacement architecture is
+designed separately. Such a guard is loss of that legacy capability, not a
+functional sandbox repair; it therefore remains a proposal. Unrestricted
+execution and other backend routes would need explicit non-regression checks.
+Alternatively, authorize a larger replacement/read-contract design. Do not
+silently choose either merely to make the original update installable.
