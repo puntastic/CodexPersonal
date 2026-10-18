@@ -1,6 +1,7 @@
 ---
 source: core/tests/suite/scenarios_incremental_tools.rs
-expression: "context_snapshot::format_request_history_snapshot(\"Tool definitions enter history in one batch; a catalog change appends one developer notice before only the changed exec definition, without modifying namespace descriptions. The next unchanged turn appends only user input.\",\n&requests,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
+assertion_line: 91
+expression: "context_snapshot::format_request_history_snapshot(if use_responses_lite\n{\n    \"Tool definitions enter history in one batch; a catalog change appends one developer notice before only the changed exec definition, without modifying namespace descriptions. The next unchanged turn appends only user input.\"\n} else\n{\n    \"Regular Responses requests carry the full current tool catalog without an incremental notice; changed execution instructions replace the catalog on subsequent requests.\"\n}, &requests,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
 ---
 Scenario: Tool definitions enter history in one batch; a catalog change appends one developer notice before only the changed exec definition, without modifying namespace descriptions. The next unchanged turn appends only user input.
 
@@ -16,8 +17,8 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (2; hash=49f981f03ae5c5ce):
-        - namespace/functions; hash=cc6e8cf0e5405f3a
+00:additional_tools/developer (2; hash=468a355eb04f599a):
+        - namespace/functions; hash=577bc0a56aa18068
           - custom/exec
           - function/wait
           - function/exec_command
@@ -42,8 +43,8 @@ Settings:
 Settings: relative to window 1
   model: "updated-tools-model"
 -- request 3 (turn) --
-00:additional_tools/developer (2; hash=49f981f03ae5c5ce):
-        - namespace/functions; hash=cc6e8cf0e5405f3a
+00:additional_tools/developer (2; hash=468a355eb04f599a):
+        - namespace/functions; hash=577bc0a56aa18068
           - custom/exec
           - function/wait
           - function/exec_command

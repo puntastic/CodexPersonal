@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios_partial_answers.rs
+assertion_line: 332
 expression: "context_snapshot::format_request_history_snapshot(\"A forked worker receives both stable answer fragments, with their phases preserved and parent commentary filtered out.\",\n&child_requests, &ContextSnapshotOptions::default().rewrite_known_segments(),)"
 ---
 Scenario: A forked worker receives both stable answer fragments, with their phases preserved and parent commentary filtered out.
@@ -37,7 +38,7 @@ Scenario: A forked worker receives both stable answer fragments, with their phas
 
     There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
 
-    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...uctions; when doing so, set `fork_turns` to `"none"`. [hash=18ccf7e93ecabab9]
+    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
 08:message/developer:
     <MULTI_AGENT_MODE>
 09:agent_message
