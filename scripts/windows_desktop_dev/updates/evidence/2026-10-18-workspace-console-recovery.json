@@ -1,0 +1,479 @@
+{
+  "schema": "partial-ci-console-recovery-v1",
+  "run_id": "39133843074",
+  "source_sha": "988f24639c26960426cea0de51f90c81b407f47d",
+  "workflow_sha": "c92d4a63074b7a499041b3e6a5d3056a5df232b9",
+  "proof_boundary": "Complete ordinary-test terminal console records; incomplete overall campaign. No replacement JUnit, no receipt validation, no deployment qualification.",
+  "input_hashes": {
+    "20261018-workspace-39133843074.full-job.log": "499369f77adfd761c7be555185694b922534d2f54420f2af27be19e6099a238d",
+    "campaign.json": "ef4f2af3c33e2aef41dce7ccebc1a6e98381da469197a058506635aa7a857bb8",
+    "provenance.json": "33a7a1a885bbfd43f99164a931358fec736fcd8cd2fdd1e0ff37a6b32278f298",
+    "selected-tests.json": "c9ba95e3d111c9ef5b38fb674e13121d1ca38d07ce910240fd7d4ae733e060ae",
+    "complete-workspace-inventory.json": "1a2a6cc12671bdb0eb1b5909bf99c6a5cac4c2c60ffe01ef23109bc55ce02a44"
+  },
+  "raw_log_lines": 24328,
+  "plan_counts": [
+    {
+      "group": "ordinary-workspace",
+      "cases": 21360,
+      "threads": 2
+    },
+    {
+      "group": "core-windows-sandbox",
+      "cases": 7,
+      "threads": 1
+    },
+    {
+      "group": "exec-server-filesystem",
+      "cases": 2,
+      "threads": 1
+    },
+    {
+      "group": "exec-server-process",
+      "cases": 1,
+      "threads": 1
+    },
+    {
+      "group": "sandbox-library",
+      "cases": 1,
+      "threads": 1
+    }
+  ],
+  "population": {
+    "listed": 21510,
+    "ignored": 139,
+    "selected": 21371,
+    "ordinary": 21360,
+    "ordinary_observed": 21360,
+    "ordinary_missing": 0,
+    "later_selected_unobserved": 11
+  },
+  "exact_identity_checks": {
+    "ordinary_identity_set_equal": true,
+    "no_duplicate_terminal_identity": true,
+    "indices_exact_1_to_21360": true,
+    "failure_recap_equal": true,
+    "normalized_terminal_ledger_sha256": "217fe17946072112ff701e13d3ee0eb30295a99ab814d35c3287915339ecde1c"
+  },
+  "run_starts": [
+    {
+      "line": 2003,
+      "step": "Build helpers, inventory the supported workspace, and run all groups",
+      "utc": "2026-10-18T15:08:36.2681645Z",
+      "text": "    Starting 21360 tests across 299 binaries (150 tests skipped)"
+    }
+  ],
+  "run_ids": [
+    {
+      "line": 2002,
+      "step": "Build helpers, inventory the supported workspace, and run all groups",
+      "utc": "2026-10-18T15:08:36.2680967Z",
+      "text": " Nextest run ID 39e6ef02-ef93-4ec2-af11-a224969d8a5c with nextest profile: local"
+    }
+  ],
+  "summary": {
+    "line": 24114,
+    "step": "Build helpers, inventory the supported workspace, and run all groups",
+    "utc": "2026-10-18T16:09:23.4495056Z",
+    "text": "     Summary [3647.189s] 21360 tests run: 21344 passed (11 slow, 1 leaky), 16 failed, 150 skipped"
+  },
+  "terminal_counts": {
+    "PASS": 21343,
+    "FAIL": 16,
+    "LEAK": 1
+  },
+  "nextest_pass_count_including_leak": 21344,
+  "slow_notices": [
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-app-server::all",
+      "test": "suite::logging::sqlite_log_metrics_exports_do_not_create_log_cycles",
+      "line": 2798,
+      "utc": "2026-10-18T15:09:57.6368162Z"
+    },
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-app-server::all",
+      "test": "suite::v2::code_mode_host::app_server_blocks_goal_after_repeated_code_mode_host_failures",
+      "line": 2979,
+      "utc": "2026-10-18T15:11:32.6031838Z"
+    },
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-app-server::all",
+      "test": "suite::v2::workspace_routing::saved_workspace_is_discovered_once_and_not_the_default_account::slow_cloud_bundle_response",
+      "line": 4628,
+      "utc": "2026-10-18T15:25:15.5523768Z"
+    },
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-app-server-transport",
+      "test": "transport::remote_control::websocket::retry_tests::repeated_conflicts_without_cursor_stay_at_cap_and_recover",
+      "line": 4921,
+      "utc": "2026-10-18T15:26:53.7096190Z"
+    },
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-core",
+      "test": "image_preparation::tests::detail_policies_apply_the_expected_budgets",
+      "line": 7987,
+      "utc": "2026-10-18T15:31:55.8153644Z"
+    },
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-core::all",
+      "test": "suite::code_mode::code_mode_excludes_mcp_servers_using_their_configured_identity",
+      "line": 9487,
+      "utc": "2026-10-18T15:35:55.4040769Z"
+    },
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-core::all",
+      "test": "suite::code_mode::mcp_code_mode_exclusion_does_not_change_direct_mode_tool_exposure",
+      "line": 9545,
+      "utc": "2026-10-18T15:36:36.8677213Z"
+    },
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-exec-server",
+      "test": "client::tests::remote_websocket_client_resumes_session::health_check_timed_out",
+      "line": 11761,
+      "utc": "2026-10-18T15:50:08.1679290Z"
+    },
+    {
+      "threshold_seconds": 45.0,
+      "binary_id": "codex-exec-server",
+      "test": "client::tests::connect_stdio_command_initializes_json_rpc_client_on_windows",
+      "line": 11941,
+      "utc": "2026-10-18T15:50:22.2320736Z"
+    },
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-tui",
+      "test": "app::tests::background_task_defaults_tests::command_center_new_checkout_and_worktree_preserve_source_and_default_branch",
+      "line": 17977,
+      "utc": "2026-10-18T16:00:38.6026129Z"
+    },
+    {
+      "threshold_seconds": 30.0,
+      "binary_id": "codex-tui",
+      "test": "app::tests::session_lifecycle_requests::managed_worktree_transitions_bind_owner_and_preserve_only_fork_history",
+      "line": 18289,
+      "utc": "2026-10-18T16:03:01.2206636Z"
+    }
+  ],
+  "leaky": [
+    {
+      "status": "LEAK",
+      "seconds": 0.537,
+      "index": 2994,
+      "denominator": 21360,
+      "binary_id": "codex-cli::cloud_config",
+      "test": "login_and_logout_persist_only_cloud_managed_mcp_oauth_credentials",
+      "line": 5032,
+      "utc": "2026-10-18T15:27:08.8806509Z"
+    }
+  ],
+  "failures": [
+    {
+      "status": "FAIL",
+      "seconds": 0.348,
+      "index": 1128,
+      "denominator": 21360,
+      "binary_id": "codex-app-server::all",
+      "test": "suite::v2::external_agent_config::external_agent_config_secondary_source_imports_session_and_plugin_end_to_end",
+      "line": 3133,
+      "utc": "2026-10-18T15:12:41.4289331Z",
+      "following_terminal_line": 3165,
+      "recap_line": 24115
+    },
+    {
+      "status": "FAIL",
+      "seconds": 1.763,
+      "index": 10121,
+      "denominator": 21360,
+      "binary_id": "codex-exec-server::file_system_windows",
+      "test": "file_system_operations_can_reject_junctions_in_any_path_component::local",
+      "line": 12164,
+      "utc": "2026-10-18T15:50:51.7340528Z",
+      "following_terminal_line": 12180,
+      "recap_line": 24116
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.314,
+      "index": 10122,
+      "denominator": 21360,
+      "binary_id": "codex-exec-server::file_system_windows",
+      "test": "file_system_operations_can_reject_junctions_in_any_path_component::remote",
+      "line": 12180,
+      "utc": "2026-10-18T15:50:52.0481639Z",
+      "following_terminal_line": 12196,
+      "recap_line": 24117
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.115,
+      "index": 10123,
+      "denominator": 21360,
+      "binary_id": "codex-exec-server::file_system_windows",
+      "test": "file_system_private_desktop_survives_helper_exits_and_separates_permissions",
+      "line": 12196,
+      "utc": "2026-10-18T15:50:52.1628861Z",
+      "following_terminal_line": 12212,
+      "recap_line": 24118
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.119,
+      "index": 10156,
+      "denominator": 21360,
+      "binary_id": "codex-exec-server::file_system_windows",
+      "test": "shared::file_system_remove_no_follow_removes_file_and_empty_directory::local_sandboxed",
+      "line": 12244,
+      "utc": "2026-10-18T15:50:54.6519545Z",
+      "following_terminal_line": 12263,
+      "recap_line": 24119
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.312,
+      "index": 10158,
+      "denominator": 21360,
+      "binary_id": "codex-exec-server::file_system_windows",
+      "test": "shared::file_system_remove_no_follow_removes_file_and_empty_directory::remote_sandboxed",
+      "line": 12264,
+      "utc": "2026-10-18T15:50:55.0253643Z",
+      "following_terminal_line": 12283,
+      "recap_line": 24120
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.251,
+      "index": 10177,
+      "denominator": 21360,
+      "binary_id": "codex-exec-server::file_system_windows",
+      "test": "shared::file_system_write_file_writes_bytes::local_sandboxed_no_follow",
+      "line": 12301,
+      "utc": "2026-10-18T15:50:55.7136120Z",
+      "following_terminal_line": 12320,
+      "recap_line": 24121
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.466,
+      "index": 10180,
+      "denominator": 21360,
+      "binary_id": "codex-exec-server::file_system_windows",
+      "test": "shared::file_system_write_file_writes_bytes::remote_sandboxed_no_follow",
+      "line": 12322,
+      "utc": "2026-10-18T15:50:56.0644599Z",
+      "following_terminal_line": 12341,
+      "recap_line": 24122
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.069,
+      "index": 10306,
+      "denominator": 21360,
+      "binary_id": "codex-external-agent-migration",
+      "test": "detect::sessions::cur::tests::detects_cur_sessions_in_batches_and_redetects_modified_imports",
+      "line": 12466,
+      "utc": "2026-10-18T15:51:12.7945232Z",
+      "following_terminal_line": 12842,
+      "recap_line": 24123
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.025,
+      "index": 10308,
+      "denominator": 21360,
+      "binary_id": "codex-external-agent-migration",
+      "test": "detect::sessions::cur::tests::detects_cur_transcript_with_project_cwd",
+      "line": 12843,
+      "utc": "2026-10-18T15:51:12.8985016Z",
+      "following_terminal_line": 12876,
+      "recap_line": 24124
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.018,
+      "index": 10316,
+      "denominator": 21360,
+      "binary_id": "codex-external-agent-migration",
+      "test": "detect::sessions::cur::tests::resolves_cur_project_names_with_common_separators",
+      "line": 12883,
+      "utc": "2026-10-18T15:51:13.0043477Z",
+      "following_terminal_line": 12910,
+      "recap_line": 24125
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.02,
+      "index": 10318,
+      "denominator": 21360,
+      "binary_id": "codex-external-agent-migration",
+      "test": "detect::sessions::cur::tests::skips_cur_subagent_transcripts",
+      "line": 12911,
+      "utc": "2026-10-18T15:51:13.0419520Z",
+      "following_terminal_line": 12944,
+      "recap_line": 24126
+    },
+    {
+      "status": "FAIL",
+      "seconds": 1.116,
+      "index": 19032,
+      "denominator": 21360,
+      "binary_id": "codex-tui",
+      "test": "markdown_render::inline_directives::tests::file_citation_after_local_link_soft_break_starts_a_new_line_snapshot",
+      "line": 21659,
+      "utc": "2026-10-18T16:07:05.5470098Z",
+      "following_terminal_line": 21692,
+      "recap_line": 24127
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.028,
+      "index": 19436,
+      "denominator": 21360,
+      "binary_id": "codex-tui",
+      "test": "pets::tests::kitty_local_file_pet_image_uses_file_reference_without_inline_payload",
+      "line": 22095,
+      "utc": "2026-10-18T16:07:22.1596115Z",
+      "following_terminal_line": 22114,
+      "recap_line": 24128
+    },
+    {
+      "status": "FAIL",
+      "seconds": 17.656,
+      "index": 21189,
+      "denominator": 21360,
+      "binary_id": "codex-windows-sandbox",
+      "test": "unified_exec::tests::legacy_capture_cancellation_terminates_descendants_without_timeout",
+      "line": 23866,
+      "utc": "2026-10-18T16:08:57.1206025Z",
+      "following_terminal_line": 23885,
+      "recap_line": 24129
+    },
+    {
+      "status": "FAIL",
+      "seconds": 0.157,
+      "index": 21266,
+      "denominator": 21360,
+      "binary_id": "codex-windows-sandbox",
+      "test": "unified_exec::tests::legacy_workspace_write_delete_is_limited_to_writable_roots",
+      "line": 23961,
+      "utc": "2026-10-18T16:09:07.9218551Z",
+      "following_terminal_line": 24019,
+      "recap_line": 24130
+    }
+  ],
+  "later_selected_unobserved": [
+    {
+      "group": "core-windows-sandbox",
+      "binary_id": "codex-core::windows_sandbox",
+      "test": "windows_elevated_approved_git_pull_preserves_deny_read"
+    },
+    {
+      "group": "core-windows-sandbox",
+      "binary_id": "codex-core::windows_sandbox",
+      "test": "windows_elevated_does_not_create_missing_workspace_metadata"
+    },
+    {
+      "group": "core-windows-sandbox",
+      "binary_id": "codex-core::windows_sandbox",
+      "test": "windows_elevated_enforces_deny_read_and_protects_setup_marker"
+    },
+    {
+      "group": "core-windows-sandbox",
+      "binary_id": "codex-core::windows_sandbox",
+      "test": "windows_elevated_powershell_preserves_relative_paths"
+    },
+    {
+      "group": "core-windows-sandbox",
+      "binary_id": "codex-core::windows_sandbox",
+      "test": "windows_elevated_temp_only_core_and_direct_spawn_enforce_carveouts"
+    },
+    {
+      "group": "core-windows-sandbox",
+      "binary_id": "codex-core::windows_sandbox",
+      "test": "windows_elevated_unified_exec_enforces_large_recursive_deny_reads"
+    },
+    {
+      "group": "core-windows-sandbox",
+      "binary_id": "codex-core::windows_sandbox",
+      "test": "windows_sandbox_cli_preserves_managed_deny_reads_across_launches"
+    },
+    {
+      "group": "exec-server-filesystem",
+      "binary_id": "codex-exec-server::file_system_windows",
+      "test": "file_system_elevated_relative_read_denial_uses_policy_cwd::local"
+    },
+    {
+      "group": "exec-server-filesystem",
+      "binary_id": "codex-exec-server::file_system_windows",
+      "test": "file_system_elevated_relative_read_denial_uses_policy_cwd::remote"
+    },
+    {
+      "group": "exec-server-process",
+      "binary_id": "codex-exec-server::exec_process",
+      "test": "windows_sandbox::tmpdir_uses_command_environment_over_rpc::elevated"
+    },
+    {
+      "group": "sandbox-library",
+      "binary_id": "codex-windows-sandbox",
+      "test": "unified_exec::tests::elevated_non_tty_cmd_forwards_env_output_and_exit"
+    }
+  ],
+  "retries": {
+    "configured": 0,
+    "visible_retry_or_timeout_status_count": 0,
+    "limit": "No JUnit; retry/status claim is limited to visible console and the configured invocation."
+  },
+  "first_terminal": {
+    "status": "PASS",
+    "seconds": 0.04,
+    "index": 1,
+    "denominator": 21360,
+    "binary_id": "app_test_support",
+    "test": "config::tests::mock_responses_config_composes_model_provider_features_and_extra_tables",
+    "line": 2004,
+    "utc": "2026-10-18T15:08:36.5233753Z"
+  },
+  "last_terminal": {
+    "status": "PASS",
+    "seconds": 0.023,
+    "index": 21360,
+    "denominator": 21360,
+    "binary_id": "core_test_support",
+    "test": "test_environment::tests::treats_the_legacy_remote_value_as_a_docker_container",
+    "line": 24112,
+    "utc": "2026-10-18T16:09:23.4458531Z"
+  },
+  "last_visible_test_phase_output": {
+    "line": 24132,
+    "step": "Build helpers, inventory the supported workspace, and run all groups",
+    "utc": "2026-10-18T16:09:23.9281579Z",
+    "text": "error: recipe `test` failed on line 98 with exit code 1"
+  },
+  "cancellation": {
+    "line": 24133,
+    "step": "Build helpers, inventory the supported workspace, and run all groups",
+    "utc": "2026-10-18T16:57:58.2436495Z",
+    "text": "##[error]The operation was canceled."
+  },
+  "no_output_gap_seconds": 2914.315,
+  "missing_artifacts": [
+    "results.json",
+    "ordinary-workspace.xml",
+    "ordinary-workspace-run-tail.txt"
+  ],
+  "interpretive_limits": [
+    "PASS includes tests that may contain platform/prerequisite early returns; per-test paths were not audited.",
+    "The retained population and invocation explain 150 skipped as 139 ignored cases plus 11 later-group filters. No per-case SKIP rows were printed; this mapping uses the exact set difference and configured filter, not individual skip events.",
+    "No individual START rows were printed. Run start and completed terminal records are retained; terminal records establish execution but are not per-test start timestamps.",
+    "A LEAK terminal result is a nextest per-test observation, not proof of the later wrapper stall's cause.",
+    "The script printed by Actions is source evidence, not a runtime trace of each statement.",
+    "The 48-minute silence does not identify which wrapper statement was active or establish that nextest itself hung."
+  ]
+}

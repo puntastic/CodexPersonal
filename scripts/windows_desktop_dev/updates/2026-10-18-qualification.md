@@ -27,9 +27,17 @@ package qualification does not cover later source changes.
   deletions work, but the outside file and protected empty `.git` also disappear.
   The unchanged failing oracle is retained. No production permission repair or
   live adoption follows; decisions depending on legacy isolation remain held.
-  The full campaign is executing 21,360 ordinary cases, with eleven exact
-  account-sensitive cases planned afterward. This is live progress, not an
-  aggregate pass or completed campaign.
+  The full campaign reached its three-hour job ceiling. Its retained console
+  proves the ordinary Nextest group finished: 21,344 passed (11 slow, 1 leaky),
+  16 failed, 150 skipped. It does not supply a complete campaign receipt or
+  establish execution of the eleven later account-sensitive cases.
+- A clean, stable-source local package was built at
+  `5a29619d7fd356373743dbbeeceb0935f1d8f2dc`, reporting `codex-cli 0.163.0`.
+  All six packaged files match the retained hashes/sizes. It is **unapproved**
+  and has not been installed, selected by default, or used with the real home.
+- Package-pointer timestamp handling is repaired at
+  `6d8c4b9fb9fcba4f39be5c5589579272e463d3b9`. This later script change is not
+  retrospectively part of the compiled package's source identity.
 
 The workflow replacement exists only on
 `codex/windows-isolated-tests-20261017`. **Do not merge that replacement into
@@ -227,13 +235,95 @@ rejected. Independent source review found no concrete blocker; it did not
 repeat the semantic account-mutator audit. A complete failed receipt remains
 valid evidence but does not pass qualification.
 
-The canonical candidate Build is attempted before tests. Any accepted artifact
+The canonical candidate Build was attempted before tests. Any accepted artifact
 is labelled **NOT DEPLOYED / NOT APPROVED**; workspace test builds can change
 unified features, so same source does not establish packaged-byte execution.
-At the 14:07 UTC check, the candidate upload had been skipped and workspace
-build/inventory was running. No new package or full-suite result is claimed;
-the completed logs must establish why candidate preparation did not succeed.
-The final gate requires both candidate and qualification success.
+The candidate step failed in four seconds with a null-valued method invocation;
+its upload was skipped. Its `continue-on-error` UI conclusion is not successful
+preparation. The detailed stack was absent from that run. A separate bounded
+preparation-only diagnostic retained the historical source/setup/order and
+reproduced the failure with a stack; it ran no tests and cannot qualify or
+deploy a runtime. The final campaign
+gate requires both candidate and qualification success and did not pass.
+
+### Recovered ordinary-group outcome and incomplete campaign
+
+The retained full job log, SHA256
+`499369f77adfd761c7be555185694b922534d2f54420f2af27be19e6099a238d`,
+contains a completed Nextest summary at line 24114 / 16:09:23 UTC:
+21,360 tests run, 21,344 passed (11 slow, 1 leaky), 16 failed, 150 skipped,
+3,647.189 seconds. Nextest and `just test` then explicitly report failure.
+The next test-step output is cancellation at 16:57:58 UTC. That silent interval
+does not identify its blocking process or prove another test group ran.
+
+GitHub's annotation identifies the three-hour job ceiling. The retained
+artifact contains the complete inventory/partition, source/tool provenance and
+resource observations, but no `results.json`, JUnit or ordinary-run-tail.
+Console outcomes are evidence, not a fabricated replacement JUnit. Exact
+identity reconciliation found 21,360 unique terminal rows matching the frozen
+ordinary set, each progress index present once: 21,343 `PASS`, one `LEAK` and
+16 `FAIL`. The failure recap repeats those same sixteen, not another attempt.
+Only one Nextest run/start is visible. The 150 skipped entries comprise 139
+ignored cases and the eleven filtered account-sensitive cases reserved for
+later. None of those later eleven has an observed execution outcome.
+
+The frozen workflow waits on `just ... 2>&1 | Tee-Object` before reading,
+validating and copying JUnit and writing `results.json`. There are no markers
+between those operations. The 2,914.315-second silence after the explicit
+`just` failure therefore does not distinguish a pipe/descendant-lifetime wait
+from stalled report finalization. Do not call Nextest itself hung. The earlier
+`cloud_config::login_and_logout_persist_only_cloud_managed_mcp_oauth_credentials`
+test's `LEAK` status is retained as a clue, not proof of the finalization cause.
+
+The [compact recovered account](evidence/2026-10-18-workspace-console-recovery.json)
+preserves all sixteen failure identities and eleven later unobserved identities,
+exact source/input hashes and log anchors. Independent PowerShell counting
+agreed with the read-only Python recovery. It does not audit test early returns
+or replace the missing JUnit. Retained failure messages group as follows:
+
+- Five external-agent import/migration mismatches (empty or missing detected
+  sessions/project paths; common cause not established).
+- Seven Windows filesystem cases reporting OS error 5; setup, operation and
+  cleanup causes remain undiscriminated.
+- Two TUI cases: an absolute-path snapshot difference and a Kitty output
+  substring assertion; neither is silently accepted as a snapshot update.
+- One legacy cancellation timeliness failure (17.656 s), distinct from deletion.
+- The older pre-baseline deletion-positive-control failure, not the later
+  confirmed enforcement counterexample.
+
+Before another full campaign, instrument and bound wrapper completion/report
+retention with a small wrapper-only fixture. Preserve native exit, pipe-ending,
+JUnit read/validation and copy phases independently. This next check is not run;
+it is a more informative step than repeating hours of tests with the same
+missing-receipt seam.
+
+The CI null-method failure is not established as the local timestamp problem:
+the fresh CI had no previous task package pointer. Preparation diagnostic
+[39149134451](https://github.com/puntastic/CodexPersonal/actions/runs/39149134451)
+uses workflow `e6d836de9292e6e4e2b1987481f66f856444ebf8`, unchanged source
+`988f24639c26960426cea0de51f90c81b407f47d`, a 15-minute disposable Windows job
+and a two-minute canonical Build ceiling. Only bounded allowlisted diagnostics
+are retained for one day; an unreproduced failure would not be qualification
+success. The actual diagnostic completed in about one minute; Build again
+failed in four seconds with the exact same null-method message. Its untruncated
+stack locates `Get-CodexDevGitState`, `common.ps1:156`, at the detached-branch
+name read, then `Invoke-CodexDevBuild` / canonical entrypoint. Exact exception
+JSON SHA256:
+`c246d63db3c9500e11760fd842e35ca3bf693895c5e990beb81cb89de73f6eb2`.
+Eight allowlisted evidence files total 8,766 bytes before the manifest.
+Post-attempt tool observations confirm actual Rust/Cargo 1.95.0 and Nextest
+0.9.143 despite the ignored toolchain-input warning. This isolates a specific
+preparation seam; it does not yet qualify a corrected detached Build.
+
+The narrow repair at `dddfba8becf0619775a1365e911aa2e66ba7fdde` normalizes only
+the legitimate zero-row branch result before trimming. On PowerShell 7.6.6,
+the original cast of an empty pipeline reproduces `InvokeMethodOnNull`, unlike
+a literal `$null` cast; joining produces an actual empty string. Mocked Git
+checks passed for detached/named branches, exact HEAD fields, dirty rows,
+unchanged source fingerprint, command/fingerprint error propagation, missing
+HEAD failure and the changing-HEAD guard. Primary source review and whitespace
+checks passed. No corrected full Build or new Rust/native test ran afterward;
+the local package remains bound to its earlier `5a29619d7...` source.
 
 Read-only deletion-path audit found that `spawn_prep.rs` silently skips a
 writable root without a matching capability SID and discards the allow/deny
@@ -406,14 +496,47 @@ unchanged. Mocked filesystem/native checks and independent re-review passed;
 no actual deletion or binary execution occurred in those checks. This is not
 an identified cause or repair of the CI candidate-preparation failure.
 
+## Local package and culture-independent pointer repair
+
+The local locked `dev-small` build completed in 9m40s, with two build jobs and
+incremental compilation disabled. Before/after source was clean and unchanged
+at `5a29619d7fd356373743dbbeeceb0935f1d8f2dc`, fingerprint
+`6efa3ade61df06e253adc343bc527aace49758eb219b12e3ad6295aa295b9ab3`.
+Package `5a29619d7fd3-dev-small-20261018-unapproved-local` has fingerprint
+`bec8a0c12049d33592d9d84797b5541b1f2b0d8817e438d83cc9f103f383f3e0`;
+its version smoke returned `codex-cli 0.163.0`. A separate readback verified
+all six packaged files against the receipt's hashes and sizes.
+
+The original Build result remains `built_pointer_failed`: the artifact and
+stable-source receipt exist, but `ConvertFrom-Json` materialized a UTC
+`DateTime`; casting it to text produced `10/16/2026 14:13:06`, which failed
+the current en-AU parser. The source ISO timestamp was valid. This is a concrete
+local bookkeeping defect, not evidence that the binaries failed to build.
+
+The repair retains typed `DateTime`/`DateTimeOffset` values and full tick
+precision, accepts explicit-zone ISO strings with invariant parsing, and
+rejects unspecified/ambiguous/malformed values without overwriting a pointer.
+The existing lock, newer-wins/tie semantics and source-stability guard remain.
+Tests reproduced the old Australian-culture failure and passed under en-AU,
+en-US and fr-FR, including one-tick ordering, invalid-existing/input handling,
+and lock release. The existing mocked non-forcing smoke cleanup checks also
+passed. PowerShell 7.6.6 was executed; 7.2 compatibility was reviewed, not run.
+
+The task's real latest-package pointer remains unchanged deliberately. Keeping
+this unapproved artifact out of the default selection is preferable while
+qualification and the legacy isolation decision remain unresolved. The
+original failed Build result/receipt is preserved, not rewritten as success.
+No Rust rebuild is necessary merely to repair later bookkeeping source.
+
 ## Continuation and release boundary
 
 1. Recover the exact current CI group receipts, source/workflow identities and
    failed output. A failed group must not erase another group's result.
 2. Resolve source-backed defects; retain distinct fixture/environment failures
    and the inherited deletion concern without weakening their oracles.
-3. Finish source qualification and build a new immutable package. If current
-   storage cannot support it, preserve the source and hold the large local step.
+3. Retain the existing unapproved immutable package. Complete or explicitly
+   bound qualification before an adoption decision; do not rebuild for a
+   bookkeeping-only source change or reinterpret the security counterexample.
 4. Rehearse necessary compatibility on isolated copies. Selector rollback is
    not data rollback. Keep the earlier package and private recovery copies.
 5. Installation/restart, a persistent local colleague and directed grants are
