@@ -100,7 +100,11 @@ fn powershell_parent_has_no_console_window() {
         .expect("PowerShell console probe parent PID")
         .parse()
         .expect("parse PowerShell console probe parent PID");
-    assert_ne!(parent_pid, std::process::id(), "probe must inspect its parent");
+    assert_ne!(
+        parent_pid,
+        std::process::id(),
+        "probe must inspect its parent"
+    );
     // PowerShell gives this helper its own hidden console. Detach only the
     // helper and inspect the explicitly identified parent's console window.
     // CREATE_NO_WINDOW can still have an attachable console with a null HWND:
@@ -111,7 +115,10 @@ fn powershell_parent_has_no_console_window() {
         let error = unsafe { GetLastError() };
         // ERROR_INVALID_HANDLE establishes no parent console. Access errors or
         // a missing parent are not evidence of a windowless process.
-        assert_eq!(error, ERROR_INVALID_HANDLE, "probe parent {parent_pid} console");
+        assert_eq!(
+            error, ERROR_INVALID_HANDLE,
+            "probe parent {parent_pid} console"
+        );
     }
     let window = unsafe { GetConsoleWindow() };
     assert!(
