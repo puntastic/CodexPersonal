@@ -430,7 +430,7 @@
               "$ref": "#/definitions/CircuitBreakAction"
             }
           ],
-          "description": "Controls whether circuit-breaker interruptions include a structured error. Strict mode writes structured errors that older clients may not recognize when reading shared history. Defaults to `default`."
+          "description": "Accepted for compatibility; neither value changes the current denial-limit behavior. Repeated denials close the automatic approval lane without interrupting the turn. Further approval requests in that turn are rejected without review; other work may continue. Defaults to `default`."
         },
         "conversation_history_max_output_tokens": {
           "description": "Maximum estimated tokens per Guardian history-tool response, before the standard serialization allowance. Defaults to 4,000; stricter parent tool limits still apply.",
@@ -564,14 +564,14 @@
     "CircuitBreakAction": {
       "oneOf": [
         {
-          "description": "Emit the warning and interrupt without structured error details.",
+          "description": "Compatibility default; denial limits close the approval lane, not the turn.",
           "enum": [
             "default"
           ],
           "type": "string"
         },
         {
-          "description": "Emit the same warning and interruption, with structured error details.",
+          "description": "Compatibility value; currently has the same noninterrupting behavior as `default`.",
           "enum": [
             "strict"
           ],
