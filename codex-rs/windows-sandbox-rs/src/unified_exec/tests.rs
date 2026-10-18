@@ -979,7 +979,8 @@ async fn assert_legacy_tty_descendant_lifecycle(
         /*tty*/ true,
         // Match production TTY launches. Immediate ConPTY input EOF can end
         // PowerShell before this job-lifetime fixture reaches its assertions.
-        /*stdin_open*/ true,
+        /*stdin_open*/
+        true,
     )
     .await
     .expect("spawn legacy sandbox ConPTY lifecycle test");
