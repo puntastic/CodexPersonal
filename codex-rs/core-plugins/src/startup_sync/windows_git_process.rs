@@ -1,6 +1,7 @@
 //! Strict tree ownership for automatic curated-plugin Git work on Windows.
-//! The process-scoped startup worker remains asynchronous; its Git descendants
-//! cannot outlive their owning job, including when the host process exits.
+//! The process-scoped startup worker remains asynchronous. Successfully assigned
+//! Git descendants remain owned through host exit. Host death between suspended
+//! process creation and job assignment is outside that guarantee.
 
 use codex_utils_pty::JobObject;
 use std::io;

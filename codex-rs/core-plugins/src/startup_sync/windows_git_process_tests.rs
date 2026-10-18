@@ -73,7 +73,7 @@ fn fixture_command(phase: &str, fixture: &Path) -> Command {
         std::env::current_exe().expect("native fixture executable"),
     );
     command
-        .args(["--exact", HELPER_TEST, "--nocapture"])
+        .args(["--exact", HELPER_TEST, "--ignored", "--nocapture"])
         .env(PHASE_ENV, phase)
         .env(FIXTURE_ENV, fixture);
     command
@@ -104,6 +104,7 @@ fn capture_tree_processes(fixture: &Path) -> [FixtureProcess; 2] {
 }
 
 #[test]
+#[ignore = "native subprocess fixture; launched explicitly by behavioral tests"]
 fn native_process_fixture() {
     let Ok(phase) = std::env::var(PHASE_ENV) else {
         return;
