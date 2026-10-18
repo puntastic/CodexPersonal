@@ -1,7 +1,7 @@
-# THROWAWAY PURPOSE-BRANCH DIAGNOSTIC ONLY. Do not merge into main.
-# Reproduce only the pre-Cargo Build failure from run 39133843074.
-# Historical setup: c92d4a63074b7a499041b3e6a5d3056a5df232b9; source remains unchanged.
-name: Windows canonical Build preparation diagnostic
+# THROWAWAY PURPOSE-BRANCH PILOT ONLY. Do not merge this replacement into main.
+# Reuses the existing workflow ID/path for dispatch with ref=codex/windows-isolated-tests-20261017.
+# Production code is checked out at SOURCE_SHA; the workflow revision is recorded separately.
+name: Windows three-case token access matrix
 
 on:
   workflow_dispatch:
@@ -10,23 +10,23 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-canonical-build-preparation-988f246-39133843074
+  group: windows-token-access-matrix-three
   cancel-in-progress: false
 
 jobs:
-  diagnose-canonical-build-preparation:
+  qualify-token-access-matrix:
     if: >-
       github.repository == 'puntastic/CodexPersonal' &&
       github.ref == 'refs/heads/codex/windows-isolated-tests-20261017' &&
       github.event_name == 'workflow_dispatch'
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 35
     defaults:
       run:
         shell: pwsh
     env:
-      # Preserve the historical source and job environment, not the later repair.
-      SOURCE_SHA: 988f24639c26960426cea0de51f90c81b407f47d
+      # Exact reviewed, compiled test-only source; production policy is unchanged.
+      SOURCE_SHA: 9a37d8ddb47178d4d75dd7acc84349e9bf962238
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: never
@@ -35,22 +35,7 @@ jobs:
       NEXTEST_PROFILE: local
 
     steps:
-      - name: Open bounded diagnostic phase receipts
-        timeout-minutes: 1
-        run: |
-          $diagnostic = Join-Path $env:RUNNER_TEMP "cwbuilddiag-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          if (Test-Path -LiteralPath $diagnostic) { throw 'Diagnostic root must be new.' }
-          New-Item -ItemType Directory -Path $diagnostic | Out-Null
-          @{
-            phase = 'checkout'; state = 'before'; utc = [DateTime]::UtcNow.ToString('o')
-            source_sha = $env:SOURCE_SHA; workflow_sha = $env:GITHUB_SHA
-            historical_workflow_sha = 'c92d4a63074b7a499041b3e6a5d3056a5df232b9'
-            historical_run_id = '39133843074'
-            boundary = 'Diagnostic only: no tests, account/ACL mutation, deployment, cache, full qualification or personal-home retention.'
-          } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $diagnostic 'phases.jsonl') -Encoding utf8
-
       - name: Check out only the qualified source
-        id: checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ env.SOURCE_SHA }}
@@ -58,12 +43,8 @@ jobs:
           persist-credentials: false
 
       - name: Verify disposable host and establish private run directories
-        id: host
         run: |
           $ErrorActionPreference = 'Stop'
-          $diagnostic = Join-Path $env:RUNNER_TEMP "cwbuilddiag-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          @{ phase = 'host-preparation'; state = 'before'; utc = [DateTime]::UtcNow.ToString('o') } |
-            ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $diagnostic 'phases.jsonl')
           if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
             throw 'This pilot must run only on a disposable GitHub-hosted Windows VM.'
           }
@@ -71,7 +52,6 @@ jobs:
           if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
             throw 'The isolated sandbox tests require an elevated unattended runner.'
           }
-          # Preserve historical read-only absence checks; do not provision accounts.
           foreach ($name in @('CodexSandboxOffline', 'CodexSandboxOnline')) {
             if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) {
               throw "Unexpected pre-existing sandbox account: $name"
@@ -80,30 +60,28 @@ jobs:
           if (Get-LocalGroup -Name 'CodexSandboxUsers' -ErrorAction SilentlyContinue) {
             throw 'Unexpected pre-existing sandbox group.'
           }
-          $powerShell = Join-Path $env:ProgramFiles 'PowerShell/7/pwsh.exe'
-          if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
-            throw 'The exact PowerShell 7 path used by the native legacy fixtures is required.'
-          }
           $head = (& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch.' }
-          # Keep the historical names and environment values; diagnostics are separate.
-          $root = Join-Path $env:RUNNER_TEMP "cwspace-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwtokenmatrix3-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $root) { throw 'Pilot output root must be new.' }
           foreach ($child in @('target', 'test-tmp', 'evidence')) {
             New-Item -ItemType Directory -Path (Join-Path $root $child) | Out-Null
           }
           $evidence = Join-Path $root 'evidence'
           @{
-            source_sha = $head; workflow_sha = $env:GITHUB_SHA; workflow_ref = $env:GITHUB_WORKFLOW_REF
-            run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT
-            image_os = $env:ImageOS; image_version = $env:ImageVersion; runner_arch = $env:RUNNER_ARCH
+            source_sha = $head
+            workflow_sha = $env:GITHUB_SHA
+            workflow_ref = $env:GITHUB_WORKFLOW_REF
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            image_os = $env:ImageOS
+            image_version = $env:ImageVersion
+            runner_arch = $env:RUNNER_ARCH
             host_os_version = [Environment]::OSVersion.VersionString
-            powershell_fixture_path = $powerShell
-            powershell_fixture_sha256 = (Get-FileHash -LiteralPath $powerShell -Algorithm SHA256).Hash
             sandbox_accounts_initially_absent = $true
-            proof_boundary = 'Historical Build-preparation reproduction only. No native tests, policy repair, deployment or package approval.'
+            cleanup_boundary = 'Token handles and in-memory security descriptors are test-local on this disposable VM. No file-ACL mutation, child workload process, sandbox account setup or global uninstall is selected; the VM is discarded.'
+            proof_boundary = 'Exactly three native token/AccessCheck library cases: one synthetic descriptor/flags/SID-set matrix and two existing token regressions. These are not file-operation, child-launch, live-policy, desktop or sandbox-remediation results. No production WRSID policy change, canonical package, Core, V8, workspace campaign, installation, credentials or settings changes.'
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'provenance.json') -Encoding utf8
-          Copy-Item -LiteralPath (Join-Path $evidence 'provenance.json') -Destination (Join-Path $diagnostic 'provenance.json')
           @{
             PILOT_ROOT = $root
             PILOT_EVIDENCE = $evidence
@@ -113,282 +91,300 @@ jobs:
             TEMP = (Join-Path $root 'test-tmp')
             TMP = (Join-Path $root 'test-tmp')
           }.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" >> $env:GITHUB_ENV }
-          Get-PSDrive -PSProvider FileSystem | Select-Object Name, Free, Used |
+          # Do not invoke setup-ci: its Dev Drive/VHD provisioning is outside this small pilot.
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, Free, Used |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'initial-disks.json') -Encoding utf8
-          Copy-Item -LiteralPath (Join-Path $evidence 'initial-disks.json') -Destination (Join-Path $diagnostic 'initial-disks.json')
-          @{ phase = 'host-preparation'; state = 'after'; utc = [DateTime]::UtcNow.ToString('o') } |
-            ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $diagnostic 'phases.jsonl')
-          @{ phase = 'historical-tool-installation'; state = 'before'; utc = [DateTime]::UtcNow.ToString('o') } |
-            ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $diagnostic 'phases.jsonl')
 
-      # Preserve this pin AND the ignored toolchain input. Do not silently repair
-      # the historical "Unexpected input(s) 'toolchain'" warning in this reproduction.
-      - id: rust
-        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # historical pin
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           toolchain: "1.95.0"
           targets: x86_64-pc-windows-msvc
 
       - name: Select Python for the existing build adapters
-        id: python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
           architecture: x64
 
       - name: Expose the existing MSVC x64 SDK
-        id: msvc
         uses: ./.github/actions/setup-msvc-env
         with:
           target: x86_64-pc-windows-msvc
 
-      - name: Configure checksum-verified V8 inputs from the pinned source
-        id: rusty_v8
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: x86_64-pc-windows-msvc
-
       - name: Install pinned just
-        id: just
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: just@1.51.0
 
       - name: Install pinned nextest
-        id: nextest
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: nextest@0.9.143
 
-      - name: Install pinned ripgrep for the canonical package
-        id: ripgrep
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
-        with:
-          tool: ripgrep@14.1.1
-
-      - name: Install existing workspace DotSlash prerequisite
-        id: dotslash
-        uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
-
-      - name: Expose DotSlash at the Windows fixture lookup path
-        id: tools_ready
-        run: |
-          $directory = Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps'
-          New-Item -ItemType Directory -Path $directory -Force | Out-Null
-          Copy-Item -LiteralPath (Get-Command dotslash).Source -Destination (Join-Path $directory 'dotslash.exe')
-          $diagnostic = Join-Path $env:RUNNER_TEMP "cwbuilddiag-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          $tools = foreach ($name in @('cargo', 'rustup', 'rustc', 'python', 'rg', 'just', 'dotslash', 'cl', 'link', 'git')) {
-            $command = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
-            [string]$path = if ($null -ne $command) { $command.Source } else { '' }
-            [string]$version = if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
-              [string](Get-Item -LiteralPath $path).VersionInfo.FileVersion
-            } else { '' }
-            @{
-              name = $name; resolved = ($null -ne $command)
-              path = $path.Substring(0, [Math]::Min(2048, $path.Length))
-              file_version = $version.Substring(0, [Math]::Min(256, $version.Length))
-            }
-          }
-          @{
-            source_sha = $env:SOURCE_SHA; powershell = $PSVersionTable.PSVersion.ToString()
-            powershell_edition = $PSVersionTable.PSEdition; is_64_bit_process = [Environment]::Is64BitProcess
-            culture = [Globalization.CultureInfo]::CurrentCulture.Name
-            ui_culture = [Globalization.CultureInfo]::CurrentUICulture.Name
-            tools = @($tools)
-            v8_archive_exists = (-not [string]::IsNullOrWhiteSpace($env:RUSTY_V8_ARCHIVE) -and (Test-Path -LiteralPath $env:RUSTY_V8_ARCHIVE -PathType Leaf))
-            v8_binding_exists = (-not [string]::IsNullOrWhiteSpace($env:RUSTY_V8_SRC_BINDING_PATH) -and (Test-Path -LiteralPath $env:RUSTY_V8_SRC_BINDING_PATH -PathType Leaf))
-            rust_action_note = 'Historical toolchain input is ignored by the pinned action; actual CLI versions are collected after the attempt.'
-          } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $diagnostic 'preconditions.json') -Encoding utf8
-          @{ phase = 'historical-tool-installation'; state = 'after'; utc = [DateTime]::UtcNow.ToString('o') } |
-            ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $diagnostic 'phases.jsonl')
-
-      - name: Attempt the unchanged canonical Build with bounded exception evidence
-        id: candidate
-        timeout-minutes: 2
+      - name: Build, verify the exact selection, then qualify serially
+        working-directory: codex-rs
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-          $ciBuildDiagnosticRoot = Join-Path $env:RUNNER_TEMP "cwbuilddiag-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          function Limit-CiBuildText([object]$Value, [int]$Limit) {
-            $text = [string]$Value
-            return $text.Substring(0, [Math]::Min($Limit, $text.Length))
+          $PSNativeCommandUseErrorActionPreference = $false
+          foreach ($name in @('RUNFILES_MANIFEST_ONLY', 'CODEX_WINDOWS_REGISTERED_CORE')) {
+            # A null method argument can leave an empty-but-present marker in pwsh.
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            if ([Environment]::GetEnvironmentVariables('Process').Contains($name)) {
+              throw "Inherited environment marker is still present: $name"
+            }
           }
-          $ciBuildPhase = 'argument-preparation'
-          @{ phase = $ciBuildPhase; state = 'before'; utc = [DateTime]::UtcNow.ToString('o') } |
-            ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $ciBuildDiagnosticRoot 'phases.jsonl')
-          try {
-            # These assignments, precondition and arguments match the historical Build step.
-            $env:CODEX_THREAD_ID = "windows-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-            $candidate = Join-Path $env:PILOT_ROOT 'candidate-package'
-            $cargo = (Get-Command cargo).Source
-            $cargoHome = Split-Path -Parent (Split-Path -Parent $cargo)
-            $rustupHome = (& rustup show home).Trim()
-            if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve the CI Rustup home.' }
+          function Save-DiskObservation([string]$Phase) {
             $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($env:CARGO_TARGET_DIR))
-            if ($drive.AvailableFreeSpace -lt 10GB) { throw 'Less than 10 GiB free before canonical package build.' }
-            $buildArguments = @{
-              Action = 'Build'; CargoProfile = 'dev-small'; PackageDirectory = $candidate
-              CargoPath = $cargo; CargoHome = $cargoHome; RustupHome = $rustupHome
-              PythonPath = (Get-Command python).Source; RipgrepPath = (Get-Command rg).Source; Json = $true
+            @{
+              phase = $Phase
+              utc = [DateTime]::UtcNow.ToString('o')
+              available_bytes = $drive.AvailableFreeSpace
+              total_bytes = $drive.TotalSize
+            } | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'disk-observations.jsonl')
+            if ($drive.AvailableFreeSpace -lt 2GB) { throw "Less than 2 GiB free before $Phase; resource pilot stopped." }
+          }
+          # Retain bounded run context; matrix rows also have an independent 64 KiB projection.
+          # 512 lines, at most 32 Ki characters per line; no fixture directories.
+          function Save-DiagnosticTail([string]$Source, [string]$Name) {
+            if (Test-Path -LiteralPath $Source) {
+              Get-Content -LiteralPath $Source -Tail 512 |
+                ForEach-Object { if ($_.Length -gt 32768) { $_.Substring(0, 32768) } else { $_ } } |
+                Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE "$Name.txt") -Encoding utf8
             }
-            @{
-              phase = $ciBuildPhase; state = 'after'; utc = [DateTime]::UtcNow.ToString('o')
-              # This fixed argument allowlist contains tool/package paths, not credentials.
-              build_arguments = $buildArguments; available_bytes = $drive.AvailableFreeSpace
-            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ciBuildDiagnosticRoot 'build-before.json') -Encoding utf8
-            $ciBuildPhase = 'canonical-entrypoint'
-            @{ phase = $ciBuildPhase; state = 'before'; utc = [DateTime]::UtcNow.ToString('o') } |
-              ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $ciBuildDiagnosticRoot 'phases.jsonl')
-            # Exact original call. No Deploy, tests, source patch, cache, or subsequent qualification.
-            $resultText = & ./codex-dev.ps1 @buildArguments
-            @{
-              phase = $ciBuildPhase; state = 'returned-without-exception'; utc = [DateTime]::UtcNow.ToString('o')
-              classification = 'historical-failure-not-reproduced'; result_item_count = @($resultText).Count
-            } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ciBuildDiagnosticRoot 'build-returned.json') -Encoding utf8
-          } catch {
-            $record = $_
-            $inner = @()
-            $exception = $record.Exception.InnerException
-            for ($depth = 0; $null -ne $exception -and $depth -lt 4; $depth++) {
-              $inner += @{
-                type = Limit-CiBuildText $exception.GetType().FullName 512
-                message = Limit-CiBuildText $exception.Message 2048
-                message_chars = ([string]$exception.Message).Length
-                message_truncated = (([string]$exception.Message).Length -gt 2048)
+          }
+          function Save-MatrixReadback([string]$Source) {
+            $limit = 64KB
+            $text = [Text.StringBuilder]::new()
+            $retained = 0
+            $bytes = 0
+            $truncated = $false
+            if (Test-Path -LiteralPath $Source) {
+              # Worker emits one fixed-prefix line for each synthetic matrix row.
+              $rows = @(Select-String -LiteralPath $Source -Pattern '^\s*TOKEN-MATRIX\b' | Select-Object -First 257)
+              foreach ($row in $rows) {
+                $line = $row.Line + [Environment]::NewLine
+                $lineBytes = [Text.Encoding]::UTF8.GetByteCount($line)
+                if ($retained -eq 256 -or $bytes + $lineBytes -gt $limit - 128) {
+                  $truncated = $true
+                  break
+                }
+                [void]$text.Append($line)
+                $bytes += $lineBytes
+                $retained++
               }
-              $exception = $exception.InnerException
             }
-            $invocation = $record.InvocationInfo
-            $stack = [string]$record.ScriptStackTrace
-            $message = [string]$record.Exception.Message
+            if ($truncated) { [void]$text.AppendLine('TOKEN-MATRIX-RETENTION truncated=true') }
+            $text.ToString() | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'matrix-readback-tail.txt') -Encoding utf8
+            return @{ rows_retained = $retained; truncated = $truncated; byte_limit = $limit; row_limit = 256 }
+          }
+          function Get-SelectedCases([hashtable]$Inventory, [hashtable]$Plan) {
+            if (-not $Inventory.ContainsKey('rust-suites')) { throw 'Unsupported nextest inventory.' }
+            $actual = @()
+            foreach ($suite in $Inventory['rust-suites'].Values) {
+              if ($suite['status'] -ne 'listed') { continue }
+              foreach ($case in $suite['testcases'].GetEnumerator()) {
+                if ($case.Value['filter-match']['status'] -ne 'matches') { continue }
+                if ($suite['package-name'] -ne $Plan.package -or $suite['binary-name'] -ne $Plan.binary -or
+                    $suite['binary-id'] -isnot [string] -or [string]::IsNullOrWhiteSpace($suite['binary-id']) -or
+                    $case.Value['ignored'] -isnot [bool] -or $case.Value['ignored']) {
+                  throw 'Unexpected package/binary, unsupported inventory or ignored case selected.'
+                }
+                $actual += @{ package = $suite['package-name']; binary = $suite['binary-name']; binary_id = $suite['binary-id']; test = $case.Key; binary_path = $suite['binary-path'] }
+              }
+            }
+            if ($actual.Count -ne $Plan.names.Count -or
+                @(Compare-Object ($Plan.names | Sort-Object) ($actual.test | Sort-Object)).Count -ne 0) {
+              throw "Selected test names differ from the exact allowlist for $($Plan.label); no tests executed."
+            }
+            return $actual
+          }
+          function Get-CaseKey($Case) {
+            ConvertTo-Json -InputObject @($Case.binary_id, $Case.test) -Compress
+          }
+          function Assert-SameCases($Expected, $Actual) {
+            $left = @($Expected | ForEach-Object { Get-CaseKey $_ } | Sort-Object)
+            $right = @($Actual | ForEach-Object { Get-CaseKey $_ } | Sort-Object)
+            if ($left.Count -ne $right.Count -or $right.Count -ne @($right | Select-Object -Unique).Count -or
+                @(Compare-Object $left $right).Count -ne 0) { throw 'Case identity sets differ or contain duplicates.' }
+          }
+          function Read-JUnitReport([string]$Path, $Expected, [DateTime]$StartedUtc) {
+            $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+            if ($file.PSIsContainer -or $file.Length -eq 0 -or $file.Length -gt 32MB -or $file.LastWriteTimeUtc -lt $StartedUtc) {
+              throw 'JUnit is empty, oversized or older than this invocation.'
+            }
+            $settings = [Xml.XmlReaderSettings]::new()
+            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+            $settings.XmlResolver = $null
+            $document = [Xml.XmlDocument]::new()
+            $document.XmlResolver = $null
+            $reader = [Xml.XmlReader]::Create($file.FullName, $settings)
+            try { $document.Load($reader) } finally { $reader.Dispose() }
+            $cases = @($document.SelectNodes('/testsuites/testsuite/testcase'))
+            if ($document.DocumentElement.get_Name() -ne 'testsuites' -or
+                $document.SelectNodes('//testcase').Count -ne $cases.Count) { throw 'Unexpected JUnit structure.' }
+            $actual = @($cases | ForEach-Object { @{ binary_id = $_.GetAttribute('classname'); test = $_.GetAttribute('name') } })
+            Assert-SameCases $Expected $actual
+            foreach ($node in $document.SelectNodes('/testsuites | /testsuites/testsuite')) {
+              foreach ($counter in @('tests', 'failures', 'errors')) {
+                if (-not $node.HasAttribute($counter) -or $node.GetAttribute($counter) -notmatch '^\d+$') {
+                  throw 'JUnit required counters missing or invalid.'
+                }
+              }
+              foreach ($entry in @{ tests = './/testcase'; failures = './/testcase[failure]'; errors = './/testcase[error]'; skipped = './/testcase[skipped]' }.GetEnumerator()) {
+                if ($node.HasAttribute($entry.Key)) {
+                  if ($node.GetAttribute($entry.Key) -notmatch '^\d+$' -or
+                      [long]$node.GetAttribute($entry.Key) -ne $node.SelectNodes($entry.Value).Count) {
+                    throw "JUnit $($entry.Key) counter disagrees with actual cases."
+                  }
+                } elseif ($node.SelectNodes($entry.Value).Count -ne 0) { throw 'JUnit omitted a nonzero counter.' }
+              }
+            }
+            $failures = $document.SelectNodes('//testcase[failure]').Count
+            $errors = $document.SelectNodes('//testcase[error]').Count
+            $skipped = $document.SelectNodes('//testcase[skipped]').Count
+            $retries = $document.SelectNodes('//flakyFailure | //flakyError | //rerunFailure | //rerunError').Count
+            # Failed tests are valid observations, not malformed receipts.
+            return @{
+              tests = $cases.Count; failures = $failures; errors = $errors; skipped = $skipped; retries = $retries
+              passing = ($failures + $errors + $skipped + $retries -eq 0)
+              sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+            }
+          }
+          $plans = @(
             @{
-              phase = $ciBuildPhase; state = 'exception'; utc = [DateTime]::UtcNow.ToString('o')
-              exception_type = Limit-CiBuildText $record.Exception.GetType().FullName 512
-              message = Limit-CiBuildText $message 4096
-              message_chars = $message.Length; message_truncated = ($message.Length -gt 4096)
-              inner_exceptions = $inner; inner_exceptions_truncated = ($null -ne $exception)
-              script_stack_trace = Limit-CiBuildText $stack 16384
-              script_stack_trace_chars = $stack.Length; script_stack_trace_truncated = ($stack.Length -gt 16384)
-              invocation_script = if ($null -ne $invocation) { Limit-CiBuildText $invocation.ScriptName 2048 } else { $null }
-              invocation_line = if ($null -ne $invocation) { $invocation.ScriptLineNumber } else { $null }
-              invocation_offset = if ($null -ne $invocation) { $invocation.OffsetInLine } else { $null }
-              historical_message_match = ($message -eq 'You cannot call a method on a null-valued expression.')
-              proof_boundary = 'An observed exception, not a cause diagnosis or a repaired Build.'
-            } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $ciBuildDiagnosticRoot 'build-exception.json') -Encoding utf8
-            # Do not serialize ErrorRecord, TargetObject, environment or credentials.
-            throw
+              label = 'token-access-matrix'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
+              names = @(
+                'token::tests::legacy_restriction_flags_and_sid_sets_access_matrix',
+                'token::tests::elevated_token_includes_network_proxy_restricting_sid',
+                'token::tests::default_objects_deny_other_logons_even_with_the_same_owner'
+              )
+            }
+          )
+          $plans | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'expected-tests.json') -Encoding utf8
+          $nextestVersion = @(& cargo nextest --version)
+          if ($LASTEXITCODE -ne 0 -or $nextestVersion.Count -eq 0 -or $nextestVersion[0] -notmatch '^cargo-nextest 0\.9\.143(?:\s|$)') {
+            throw 'This pilot requires exactly cargo-nextest 0.9.143.'
           }
-          # A surprisingly completed Build is not successful reproduction/qualification.
-          throw 'Historical pre-Cargo failure was not reproduced; no qualification or deployment was attempted.'
-
-      - name: Record outcome and bounded post-attempt tool versions
-        if: always()
-        timeout-minutes: 2
-        env:
-          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
-          HOST_OUTCOME: ${{ steps.host.outcome }}
-          RUST_OUTCOME: ${{ steps.rust.outcome }}
-          PYTHON_OUTCOME: ${{ steps.python.outcome }}
-          MSVC_OUTCOME: ${{ steps.msvc.outcome }}
-          V8_OUTCOME: ${{ steps.rusty_v8.outcome }}
-          JUST_OUTCOME: ${{ steps.just.outcome }}
-          NEXTEST_OUTCOME: ${{ steps.nextest.outcome }}
-          RIPGREP_OUTCOME: ${{ steps.ripgrep.outcome }}
-          DOTSLASH_OUTCOME: ${{ steps.dotslash.outcome }}
-          TOOLS_OUTCOME: ${{ steps.tools_ready.outcome }}
-          BUILD_OUTCOME: ${{ steps.candidate.outcome }}
-        run: |
-          $diagnostic = Join-Path $env:RUNNER_TEMP "cwbuilddiag-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          New-Item -ItemType Directory -Path $diagnostic -Force | Out-Null
-          $before = Test-Path -LiteralPath (Join-Path $diagnostic 'build-before.json')
-          $exception = Test-Path -LiteralPath (Join-Path $diagnostic 'build-exception.json')
-          $returned = Test-Path -LiteralPath (Join-Path $diagnostic 'build-returned.json')
-          $classification = if ($exception) { 'exception-recorded-inspect-message-and-stack' }
-            elseif ($returned) { 'historical-failure-not-reproduced' }
-            elseif ($before) { 'incomplete-timeout-or-aborted-no-after-receipt' }
-            else { 'entrypoint-not-reached' }
+          # Custom profiles do not inherit junit.path. Supply an explicit CI-only
+          # report path without modifying the source checkout's nextest config.
+          $junit = Join-Path $env:PILOT_ROOT 'junit.xml'
+          $nextestConfig = Join-Path $env:PILOT_ROOT 'nextest-ci.toml'
+          @(
+            '[profile.local.junit]'
+            ('path = ' + (ConvertTo-Json -InputObject $junit -Compress))
+            'report-skipped = "none"'
+            'store-success-output = false'
+            'store-failure-output = false'
+          ) | Set-Content -LiteralPath $nextestConfig -Encoding utf8
+          $nextestConfigArg = "codex-windows-isolated:$nextestConfig"
           @{
-            utc = [DateTime]::UtcNow.ToString('o'); classification = $classification
-            before_receipt = $before; exception_receipt = $exception; returned_receipt = $returned
-            outcomes = @{
-              checkout = $env:CHECKOUT_OUTCOME; host = $env:HOST_OUTCOME; rust = $env:RUST_OUTCOME
-              python = $env:PYTHON_OUTCOME; msvc = $env:MSVC_OUTCOME; v8 = $env:V8_OUTCOME
-              just = $env:JUST_OUTCOME; nextest = $env:NEXTEST_OUTCOME; ripgrep = $env:RIPGREP_OUTCOME
-              dotslash = $env:DOTSLASH_OUTCOME; tools_ready = $env:TOOLS_OUTCOME; build = $env:BUILD_OUTCOME
+            cargo = (& cargo --version)
+            rustc = (& rustc -Vv) -join "`n"
+            nextest = $nextestVersion
+            nextest_tool_config_sha256 = (Get-FileHash -LiteralPath $nextestConfig -Algorithm SHA256).Hash
+            junit_path = $junit
+            just = (& just --version)
+            python = (& python --version)
+            active_toolchain = (& rustup show active-toolchain)
+            toolchain_config_sha256 = (Get-FileHash -LiteralPath 'rust-toolchain.toml' -Algorithm SHA256).Hash
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'tool-versions.json') -Encoding utf8
+          # Only this library's token/AccessCheck tests are selected. No helper
+          # binaries, file ACL changes, child workloads or account setup are needed.
+          $selected = @()
+          foreach ($plan in $plans) {
+            Save-DiskObservation "list-$($plan.label)"
+            $filter = ($plan.names | ForEach-Object { "test(=$_)"} ) -join ' | '
+            $plan.arguments = @('--tool-config-file', $nextestConfigArg, '--profile', 'local', '--locked', '--cargo-profile', 'dev-small', '--run-ignored', 'default', '--ignore-default-filter', '-p', $plan.package) + $plan.target + @('-E', $filter)
+            $inventoryPath = Join-Path $env:PILOT_ROOT "$($plan.label)-inventory.json"
+            $listLog = Join-Path $env:PILOT_ROOT "$($plan.label)-list.log"
+            $inventoryStartedUtc = [DateTime]::UtcNow
+            & cargo nextest list @($plan.arguments) --message-format json 1> $inventoryPath 2> $listLog
+            $listExit = $LASTEXITCODE
+            Save-DiagnosticTail $listLog "$($plan.label)-compile-tail"
+            if ($listExit -ne 0) { throw "Listing/build failed for $($plan.label); no tests executed." }
+            $inventoryFile = Get-Item -LiteralPath $inventoryPath
+            if ($inventoryFile.Length -eq 0 -or $inventoryFile.Length -gt 16MB -or $inventoryFile.LastWriteTimeUtc -lt $inventoryStartedUtc) {
+              throw 'Inventory is empty, oversized or older than this invocation.'
             }
-            qualification_passed = $false; deployed = $false
-          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $diagnostic 'outcome.json') -Encoding utf8
-          @{ phase = 'post-attempt-versions'; state = 'before'; utc = [DateTime]::UtcNow.ToString('o') } |
-            ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $diagnostic 'phases.jsonl')
-          # Run version commands only after the reproduction attempt; never warm
-          # Rustup before the historical Build call. No environment dump is retained.
-          foreach ($spec in @(
-            @{ name = 'cargo'; args = @('--version') },
-            @{ name = 'rustc'; args = @('-Vv') },
-            @{ name = 'rustup'; args = @('show', 'active-toolchain') },
-            @{ name = 'python'; args = @('--version') },
-            @{ name = 'just'; args = @('--version') },
-            @{ name = 'cargo-nextest'; command = 'cargo'; args = @('nextest', '--version') },
-            @{ name = 'rg'; args = @('--version') },
-            @{ name = 'dotslash'; args = @('--version') }
-          )) {
-            $entry = @{ name = $spec.name; timing = 'after-build-attempt'; path = $null; output = @(); problem = $null }
+            $inventory = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json -AsHashtable
+            $cases = @(Get-SelectedCases $inventory $plan)
+            $plan.cases = $cases
+            $plan.inventory_sha256 = (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash
+            Copy-Item -LiteralPath $inventoryPath -Destination (Join-Path $env:PILOT_EVIDENCE "$($plan.label)-inventory.json")
+            $selected += $cases
+          }
+          if ($selected.Count -ne 3) { throw 'Expected exactly three selected, nonignored tests.' }
+          @{ source_sha = $env:SOURCE_SHA; plans = $plans; selected_tests = $selected } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'selected-tests.json') -Encoding utf8
+          $binaryHashes = @{}
+          foreach ($path in ($selected.binary_path | Sort-Object -Unique)) {
+            $targetRoot = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR).TrimEnd('\') + '\'
+            if (-not ([IO.Path]::GetFullPath($path)).StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
+              throw 'Test executable escaped this pilot target directory.'
+            }
+            $binaryHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+          }
+          $binaryHashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'test-binary-hashes.json') -Encoding utf8
+          $results = @()
+          # just test carries --no-fail-fast; all three cases run serially.
+          foreach ($plan in $plans) {
+            $result = @{
+              group = $plan.label; selected_tests = $plan.cases.Count; exit_code = $null
+              receipt_valid = $false; outcome_passed = $false; report = $null; problem = $null; matrix = $null
+            }
+            $log = Join-Path $env:PILOT_ROOT "$($plan.label)-run.log"
+            $startedUtc = $null
             try {
-              $name = if ($spec.ContainsKey('command')) { $spec.command } else { $spec.name }
-              $command = Get-Command $name -ErrorAction Stop
-              $entry.path = $command.Source
-              $entry.output = @(& $command.Source @($spec.args) 2>&1 | Select-Object -First 16 | ForEach-Object {
-                $line = [string]$_
-                $line.Substring(0, [Math]::Min(512, $line.Length))
-              })
-              $entry.exit_code = $LASTEXITCODE
+              if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
+              Save-DiskObservation "run-$($plan.label)"
+              $startedUtc = [DateTime]::UtcNow
+              & just test @($plan.arguments) --test-threads 1 --retries 0 --failure-output final --success-output immediate 1> $log 2>&1
+              $result.exit_code = $LASTEXITCODE
+              $result.report = Read-JUnitReport $junit $plan.cases $startedUtc
+              $result.receipt_valid = $true
+              $result.outcome_passed = ($result.exit_code -eq 0 -and $result.report.passing)
             } catch {
-              $message = [string]$_.Exception.Message
-              $entry.problem = $message.Substring(0, [Math]::Min(1024, $message.Length))
+              $result.problem = $_.Exception.Message.Substring(0, [Math]::Min(500, $_.Exception.Message.Length))
+            } finally {
+              Save-DiagnosticTail $log "$($plan.label)-run-tail"
+              $result.matrix = Save-MatrixReadback $log
+              if ($null -ne $startedUtc -and (Test-Path -LiteralPath $junit -PathType Leaf)) {
+                $reportFile = Get-Item -LiteralPath $junit
+                if ($reportFile.Length -le 32MB -and $reportFile.LastWriteTimeUtc -ge $startedUtc) {
+                  Copy-Item -LiteralPath $junit -Destination (Join-Path $env:PILOT_EVIDENCE "$($plan.label).xml") -Force
+                }
+              }
+              $results += $result
+              $results | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'results.json') -Encoding utf8
             }
-            $entry | ConvertTo-Json -Depth 4 -Compress |
-              Add-Content -LiteralPath (Join-Path $diagnostic 'tool-versions.jsonl') -Encoding utf8
           }
-          @{ phase = 'post-attempt-versions'; state = 'after'; utc = [DateTime]::UtcNow.ToString('o') } |
-            ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $diagnostic 'phases.jsonl')
+          Save-DiskObservation 'after-tests'
+          if (@($results | Where-Object { -not $_.receipt_valid -or -not $_.outcome_passed -or $_.matrix.rows_retained -eq 0 -or $_.matrix.truncated }).Count) {
+            throw 'A token test failed, its receipt was incomplete, or the bounded matrix output was missing/truncated. Available evidence was retained.'
+          }
 
-      - name: Enforce small evidence allowlist
+      - name: Final resource observation
         if: always()
-        timeout-minutes: 1
         run: |
-          $diagnostic = Join-Path $env:RUNNER_TEMP "cwbuilddiag-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          $names = @('phases.jsonl', 'provenance.json', 'initial-disks.json', 'preconditions.json',
-            'build-before.json', 'build-exception.json', 'build-returned.json', 'outcome.json', 'tool-versions.jsonl')
-          $retained = Join-Path $diagnostic 'retained'
-          New-Item -ItemType Directory -Path $retained -Force | Out-Null
-          $files = @()
-          $bytes = 0L
-          foreach ($name in $names) {
-            $path = Join-Path $diagnostic $name
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
-            $file = Get-Item -LiteralPath $path
-            # Reserve 4 KiB of the total bound for the evidence manifest itself.
-            $accepted = ($file.Length -le 64KB -and $bytes + $file.Length -le 252KB)
-            $files += @{ name = $name; bytes = $file.Length; retained = $accepted }
-            if ($accepted) {
-              Copy-Item -LiteralPath $path -Destination (Join-Path $retained $name)
-              $bytes += $file.Length
-            }
+          $root = Join-Path $env:RUNNER_TEMP "cwtokenmatrix3-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $evidence = Join-Path $root 'evidence'
+          if (Test-Path -LiteralPath $evidence) {
+            Get-PSDrive -PSProvider FileSystem | Select-Object Name, Free, Used |
+              ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'final-disks.json') -Encoding utf8
           }
-          $manifest = @{ files = $files; retained_payload_bytes = $bytes; per_file_limit = 65536; payload_limit = 258048; total_limit = 262144 } |
-            ConvertTo-Json -Depth 4
-          if ([Text.Encoding]::UTF8.GetByteCount($manifest) -gt 4092) {
-            throw 'Evidence manifest exceeded its reserved size; diagnostic evidence is incomplete.'
-          }
-          $manifest | Set-Content -LiteralPath (Join-Path $retained 'evidence-manifest.json') -Encoding utf8
-          # No profiles, configuration, build packages, test homes, caches, full
-          # logs, raw ErrorRecords, account data or credentials are uploaded.
+          # No global uninstall or broad host cleanup: the GitHub VM is discarded.
+          # No test homes, .sandbox-secrets, profiles, config or credentials are retained.
 
-      - name: Retain only bounded preparation diagnostic evidence
+      - name: Retain only qualification evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: windows-build-preparation-988f246-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/cwbuilddiag-${{ github.run_id }}-${{ github.run_attempt }}/retained/
+          name: windows-isolated-token-matrix-three-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cwtokenmatrix3-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
+            ${{ runner.temp }}/cwtokenmatrix3-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
+            ${{ runner.temp }}/cwtokenmatrix3-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
+            ${{ runner.temp }}/cwtokenmatrix3-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
           retention-days: 1
           if-no-files-found: warn
