@@ -857,8 +857,18 @@ mod tests {
         session_source: SessionSource,
         channel_capacity: usize,
     ) -> InProcessClientHandle {
+        start_test_client_with_custom_config(session_source, channel_capacity, |_| {}).await
+    }
+
+    async fn start_test_client_with_custom_config(
+        session_source: SessionSource,
+        channel_capacity: usize,
+        customize: impl FnOnce(&mut Config),
+    ) -> InProcessClientHandle {
         let codex_home = TempDir::new().expect("temp dir");
-        let config = Arc::new(build_test_config(codex_home.path()).await);
+        let mut config = build_test_config(codex_home.path()).await;
+        customize(&mut config);
+        let config = Arc::new(config);
         let state_db = codex_rollout::state_db::try_init(config.as_ref())
             .await
             .expect("state db should initialize for in-process test");
@@ -950,6 +960,46 @@ mod tests {
     async fn in_process_start_clamps_zero_channel_capacity() {
         let client =
             start_test_client_with_capacity(SessionSource::Cli, /*channel_capacity*/ 0).await;
+        let response = loop {
+            match client
+                .request(ClientRequest::ConfigRequirementsRead {
+                    request_id: RequestId::Integer(4),
+                    params: None,
+                })
+                .await
+            {
+                Ok(response) => break response.expect("request should succeed"),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::task::yield_now().await;
+                }
+                Err(err) => panic!("request transport should work: {err}"),
+            }
+        };
+        let _parsed: ConfigRequirementsReadResponse =
+            serde_json::from_value(response).expect("response should match v2 schema");
+        client
+            .shutdown()
+            .await
+            .expect("in-process runtime should shutdown cleanly");
+    }
+
+    #[tokio::test]
+    async fn in_process_start_clamps_zero_channel_capacity_without_plugin_startup() {
+        let client = start_test_client_with_custom_config(
+            SessionSource::Cli,
+            /*channel_capacity*/ 0,
+            |config| {
+                config
+                    .features
+                    .disable(codex_features::Feature::Plugins)
+                    .expect("plugins should be disabled for the startup discriminator");
+                assert!(
+                    !config.features.enabled(codex_features::Feature::Plugins),
+                    "plugins must actually be disabled for the startup discriminator"
+                );
+            },
+        )
+        .await;
         let response = loop {
             match client
                 .request(ClientRequest::ConfigRequirementsRead {
