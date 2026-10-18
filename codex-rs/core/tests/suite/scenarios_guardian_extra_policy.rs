@@ -76,6 +76,7 @@ guardian_extra_policy = "Draft reminders without sending them."
         )
         .with_config(|config| {
             super::configure_scenario_catalog(config);
+            super::configure_independent_guardian_context(config);
             config.guardian_policy_template = Some(
                 ResolvedModelMessages::bundled()
                     .auto_review()

@@ -6,7 +6,6 @@ use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
-use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -33,25 +32,7 @@ use serde_json::json;
 
 fn configure_independent_guardian(config: &mut Config) {
     super::configure_scenario_catalog(config);
-    // Storage history modes do not select Guardian's independent retained context.
-    config
-        .features
-        .enable(Feature::GuardianThreadContext)
-        .expect("enable Guardian retained thread context for sender evidence");
-    config
-        .features
-        .disable(Feature::GuardianReuseParentCompaction)
-        .expect("disable parent compaction reuse for independent Guardian context");
-    assert_eq!(
-        (
-            config.features.enabled(Feature::GuardianThreadContext),
-            config
-                .features
-                .enabled(Feature::GuardianReuseParentCompaction),
-        ),
-        (true, false),
-        "sender evidence fixture requires Independent Guardian context"
-    );
+    super::configure_independent_guardian_context(config);
 }
 
 #[test_case::test_case(ThreadHistoryMode::Legacy; "legacy")]

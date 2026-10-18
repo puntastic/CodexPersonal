@@ -99,6 +99,7 @@ async fn host_owned_orchestrator_connector_reaches_guardian_context() -> Result<
             .expect("write Guardian configuration");
         })
         .with_config(|config| {
+            super::configure_independent_guardian_context(config);
             config.model_provider.supports_websockets = false;
             config
                 .features

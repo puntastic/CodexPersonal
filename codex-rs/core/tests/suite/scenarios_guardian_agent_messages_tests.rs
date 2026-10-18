@@ -65,6 +65,7 @@ async fn encrypted_parent_reply_survives_incremental_guardian_reviews() -> anyho
         .with_model("gpt-5.5")
         .with_config(|config| {
             super::configure_scenario_catalog(config);
+            super::configure_independent_guardian_context(config);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config
