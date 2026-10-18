@@ -2372,10 +2372,11 @@ async fn astra_async_compaction_keeps_work_added_after_its_snapshot(
     let next_input = if matches!(suffix, LiveSuffix::User) {
         TurnInputRequest::user_input(vec![text("Check who can finish the notes.")])
     } else {
+        // Exercise generic client output; admitted delegation has its own retention policy.
         let item = serde_json::from_value(json!({
             "type": "function_call_output",
-            "name": "send_message_to_thread",
-            "namespace": "codex_app",
+            "name": "task_update",
+            "namespace": "example",
             "output": retained_output,
         }))?;
         TurnInputRequest::new(
