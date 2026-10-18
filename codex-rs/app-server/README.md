@@ -68,14 +68,18 @@ Revisions are equality tokens, not clocks: never compare or merge them across
 threads or hosts. When concurrent responses disagree, refresh with `thread/read`.
 Offscreen threads converge on page refresh.
 
-# Guardian circuit-breaker errors
+# Guardian automatic approval lane closure
 
-Set `auto_review.circuit_break_action = "strict"` to include `TooManyDenials` in
-`TurnAborted.error` when Guardian reaches its denial limit. App-server exposes it
-as `turn.error.codexErrorInfo = "tooManyDenials"` in notifications and history.
+When Guardian reaches its denial limit, it warns and closes the automatic approval
+lane for the remainder of that turn. Further approval requests are rejected without
+another review; the denied action is not executed. The turn remains active so the
+assistant can report what happened and continue work that does not need that approval.
 
-The default, `"default"`, leaves this error unset. Both modes preserve the warning,
-denial limit, and interrupted status; neither emits a separate `Error` event.
+`auto_review.circuit_break_action` still accepts `"default"` (the default) and
+`"strict"` for configuration compatibility. Neither value changes this behavior.
+Lane closure itself does not emit `TurnAborted` or `TooManyDenials`, and does not
+mark a normally completed live or saved turn as interrupted or errored. This does
+not prevent interruption or failure for another reason.
 
 # Model catalog provider requirements
 
