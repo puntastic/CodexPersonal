@@ -1,7 +1,7 @@
 # THROWAWAY PURPOSE-BRANCH PILOT ONLY. Do not merge this replacement into main.
 # Reuses the existing workflow ID/path for dispatch with ref=codex/windows-isolated-tests-20261017.
 # Production code is checked out at SOURCE_SHA; the workflow revision is recorded separately.
-name: Windows bounded DACL diagnostic
+name: Windows bounded selected-token diagnostic
 
 on:
   workflow_dispatch:
@@ -10,11 +10,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-dacl-diagnostic-b103d6a7968c
+  group: windows-selected-token-diagnostic-8dd65c2e81e8
   cancel-in-progress: false
 
 jobs:
-  diagnose-legacy-dacl:
+  diagnose-legacy-selected-token:
     if: >-
       github.repository == 'puntastic/CodexPersonal' &&
       github.ref == 'refs/heads/codex/windows-isolated-tests-20261017' &&
@@ -25,7 +25,7 @@ jobs:
       run:
         shell: pwsh
     env:
-      SOURCE_SHA: b103d6a7968cf462372f8fdcb0422f86e3624cef
+      SOURCE_SHA: 8dd65c2e81e8544ccf4e5e4b3819482900d35c67
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: never
@@ -66,7 +66,7 @@ jobs:
           }
           $head = (& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch.' }
-          $root = Join-Path $env:RUNNER_TEMP "cwdacl8-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwtoken12-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $root) { throw 'Pilot output root must be new.' }
           foreach ($child in @('target', 'test-tmp', 'evidence')) {
             New-Item -ItemType Directory -Path (Join-Path $root $child) | Out-Null
@@ -86,7 +86,7 @@ jobs:
             powershell_fixture_sha256 = (Get-FileHash -LiteralPath $powerShell -Algorithm SHA256).Hash
             sandbox_accounts_initially_absent = $true
             cleanup_boundary = 'Task data and test-path ACL/desktop effects stay on this disposable VM. No extra account provisioning or global uninstall is run; the VM is discarded.'
-            proof_boundary = 'Exactly eight sandbox-library cases: five pure bounded diagnostics and three native legacy cases on a disposable Windows 2025 x64 VM. DACL readback is test-only observation, not effective-token rights or proof of a production fix. No candidate package, Core, V8, workspace suite, deployment, credentials or broad cleanup. The deletion-boundary assertion remains unchanged and any failure still fails this job.'
+            proof_boundary = 'Exactly twelve sandbox-library cases: nine pure bounded diagnostics and three native legacy cases on a disposable Windows 2025 x64 VM. DACL and selected-primary-token readbacks are test-only observations, not a running-child token query, an operation oracle, or proof of a production fix. AccessCheck uses a temporary impersonation duplicate and fixed owner/group/DACL descriptors. No candidate package, Core, V8, workspace suite, deployment, credentials or broad cleanup. The deletion-boundary assertion remains unchanged and any failure still fails this job.'
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'provenance.json') -Encoding utf8
           @{
             PILOT_ROOT = $root
@@ -151,7 +151,7 @@ jobs:
             } | ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'disk-observations.jsonl')
             if ($drive.AvailableFreeSpace -lt 2GB) { throw "Less than 2 GiB free before $Phase; resource pilot stopped." }
           }
-          # Preserve the complete ~20 KiB / 18-row DACL failure block at the end.
+          # Preserve the bounded token report (32 KiB) plus both DACL snapshots.
           # 512 lines, at most 32 Ki characters per line; no fixture directories.
           function Save-DiagnosticTail([string]$Source, [string]$Name) {
             if (Test-Path -LiteralPath $Source) {
@@ -168,6 +168,16 @@ jobs:
               Select-String -LiteralPath $Source -Pattern $pattern | Select-Object -First 22 |
                 ForEach-Object { $line = $_.Line; if ($line.Length -gt 32768) { $line.Substring(0, 32768) } else { $line } } |
                 Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'dacl-readback-tail.txt') -Encoding utf8
+            }
+          }
+          function Save-TokenReadback([string]$Source) {
+            if (Test-Path -LiteralPath $Source) {
+              # Source caps the report at 32 KiB, 64 rows per SID list and 16
+              # roots. Preserve its <=256 structured lines even after later failures.
+              $pattern = '^\s*(?:TOKEN phase=|TokenUser(?: |=)|TokenGroups(?: |=)|TokenRestrictedSids(?: |=)|restricting SIDs |sid=|enabled=|existing_write_roots |existing_write_root=|report_truncated=|observation=unavailable reason=observer_not_reached|(?:workspace(?:/workspace-delete\.txt|/\.git)?|temp(?:/temp-delete\.txt)?|tmp(?:/tmp-delete\.txt)?|outside(?:/outside-delete\.txt)?) right=)'
+              Select-String -LiteralPath $Source -Pattern $pattern | Select-Object -First 256 |
+                ForEach-Object { $line = $_.Line; if ($line.Length -gt 32768) { $line.Substring(0, 32768) } else { $line } } |
+                Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'token-readback-tail.txt') -Encoding utf8
             }
           }
           function Get-SelectedCases([hashtable]$Inventory, [hashtable]$Plan) {
@@ -245,7 +255,7 @@ jobs:
           }
           $plans = @(
             @{
-              label = 'legacy-dacl-diagnostic'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
+              label = 'legacy-selected-token-diagnostic'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
               names = @(
                 'unified_exec::tests::legacy_fixture_diagnostics::dacl_diagnostics_distinguish_absent_null_empty_missing_and_unavailable',
                 'unified_exec::tests::legacy_fixture_diagnostics::dacl_prefix_retention_obeys_path_and_snapshot_budgets',
@@ -254,7 +264,11 @@ jobs:
                 'unified_exec::tests::legacy_fixture_diagnostics::bounded_output_accepts_empty_chunks',
                 'unified_exec::tests::legacy_non_tty_cmd_emits_output',
                 'unified_exec::tests::legacy_workspace_write_delete_is_limited_to_writable_roots',
-                'unified_exec::tests::legacy_tty_job_terminates_and_preserves_descendants'
+                'unified_exec::tests::legacy_tty_job_terminates_and_preserves_descendants',
+                'unified_exec::legacy_token_diagnostics::observer_matches_exact_cwd_and_consumes_once',
+                'unified_exec::legacy_token_diagnostics::dropping_observer_clears_only_its_own_registration',
+                'unified_exec::legacy_token_diagnostics::numeric_sid_format_preserves_authority_and_subauthorities',
+                'unified_exec::legacy_token_diagnostics::reports_keep_api_failure_distinct_from_access_denial_and_bound_text'
               )
             }
           )
@@ -309,7 +323,7 @@ jobs:
             Copy-Item -LiteralPath $inventoryPath -Destination (Join-Path $env:PILOT_EVIDENCE "$($plan.label)-inventory.json")
             $selected += $cases
           }
-          if ($selected.Count -ne 8) { throw 'Expected exactly eight selected, nonignored tests.' }
+          if ($selected.Count -ne 12) { throw 'Expected exactly twelve selected, nonignored tests.' }
           @{ source_sha = $env:SOURCE_SHA; plans = $plans; selected_tests = $selected } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'selected-tests.json') -Encoding utf8
           $binaryHashes = @{}
           foreach ($path in ($selected.binary_path | Sort-Object -Unique)) {
@@ -321,7 +335,7 @@ jobs:
           }
           $binaryHashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'test-binary-hashes.json') -Encoding utf8
           $results = @()
-          # just test carries --no-fail-fast; all eight cases run serially.
+          # just test carries --no-fail-fast; all twelve cases run serially.
           foreach ($plan in $plans) {
             $result = @{
               group = $plan.label; selected_tests = $plan.cases.Count; exit_code = $null
@@ -343,6 +357,7 @@ jobs:
             } finally {
               Save-DiagnosticTail $log "$($plan.label)-run-tail"
               Save-DaclReadback $log
+              Save-TokenReadback $log
               if ($null -ne $startedUtc -and (Test-Path -LiteralPath $junit -PathType Leaf)) {
                 $reportFile = Get-Item -LiteralPath $junit
                 if ($reportFile.Length -le 32MB -and $reportFile.LastWriteTimeUtc -ge $startedUtc) {
@@ -361,7 +376,7 @@ jobs:
       - name: Final resource observation
         if: always()
         run: |
-          $root = Join-Path $env:RUNNER_TEMP "cwdacl8-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwtoken12-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $evidence = Join-Path $root 'evidence'
           if (Test-Path -LiteralPath $evidence) {
             Get-PSDrive -PSProvider FileSystem | Select-Object Name, Free, Used |
@@ -374,11 +389,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: windows-isolated-dacl-eight-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-isolated-selected-token-twelve-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/cwdacl8-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
-            ${{ runner.temp }}/cwdacl8-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
-            ${{ runner.temp }}/cwdacl8-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
-            ${{ runner.temp }}/cwdacl8-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
+            ${{ runner.temp }}/cwtoken12-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
+            ${{ runner.temp }}/cwtoken12-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
+            ${{ runner.temp }}/cwtoken12-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
+            ${{ runner.temp }}/cwtoken12-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
           retention-days: 1
           if-no-files-found: warn
