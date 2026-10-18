@@ -1,7 +1,7 @@
 # THROWAWAY PURPOSE-BRANCH PILOT ONLY. Do not merge this replacement into main.
 # Reuses the existing workflow ID/path for dispatch with ref=codex/windows-isolated-tests-20261017.
 # Production code is checked out at SOURCE_SHA; the workflow revision is recorded separately.
-name: Windows isolated sandbox qualification pilot
+name: Windows isolated legacy sandbox qualification pilot
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  qualify-eleven:
+  qualify-legacy-six:
     if: >-
       github.repository == 'puntastic/CodexPersonal' &&
       github.ref == 'refs/heads/codex/windows-isolated-tests-20261017' &&
@@ -25,7 +25,7 @@ jobs:
       run:
         shell: pwsh
     env:
-      SOURCE_SHA: a836ce4fcdee8b42e6616a9099eae26ea02969c4
+      SOURCE_SHA: ae1b7e8e8ecff867f4cc2236abac1aed4c7b2fb6
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: never
@@ -37,7 +37,7 @@ jobs:
       - name: Check out only the qualified source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: a836ce4fcdee8b42e6616a9099eae26ea02969c4
+          ref: ae1b7e8e8ecff867f4cc2236abac1aed4c7b2fb6
           fetch-depth: 1
           persist-credentials: false
 
@@ -59,9 +59,14 @@ jobs:
           if (Get-LocalGroup -Name 'CodexSandboxUsers' -ErrorAction SilentlyContinue) {
             throw 'Unexpected pre-existing sandbox group.'
           }
+          # The selected PowerShell fixtures otherwise return early and look passed.
+          $powerShell = Join-Path $env:ProgramFiles 'PowerShell/7/pwsh.exe'
+          if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
+            throw 'The exact PowerShell 7 path used by the six legacy fixtures is required.'
+          }
           $head = (& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch.' }
-          $root = Join-Path $env:RUNNER_TEMP "cw11-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwlegacy6-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $root) { throw 'Pilot output root must be new.' }
           foreach ($child in @('target', 'test-tmp', 'evidence')) {
             New-Item -ItemType Directory -Path (Join-Path $root $child) | Out-Null
@@ -76,9 +81,12 @@ jobs:
             image_os = $env:ImageOS
             image_version = $env:ImageVersion
             runner_arch = $env:RUNNER_ARCH
+            host_os_version = [Environment]::OSVersion.VersionString
+            powershell_fixture_path = $powerShell
+            powershell_fixture_sha256 = (Get-FileHash -LiteralPath $powerShell -Algorithm SHA256).Hash
             sandbox_accounts_initially_absent = $true
-            cleanup_boundary = 'Task data stays on this disposable VM; VM destruction removes shared account/firewall/ACL effects. No global uninstall is run.'
-            proof_boundary = 'Exactly eleven Windows shared-account cases only; no voice-host, ignored tests, full workspace, deployment or personal credentials.'
+            cleanup_boundary = 'Task data and test-path ACL/desktop effects stay on this disposable VM. No extra account provisioning or global uninstall is run; the VM is discarded.'
+            proof_boundary = 'Exactly six nonignored legacy capture/lifecycle/delete-boundary cases on Windows 2025, not local Windows 10 build 19045. No public RPC, elevated-account suite, voice-host, full workspace, deployment or personal credentials. A deletion-boundary failure remains a failure to investigate.'
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'provenance.json') -Encoding utf8
           @{
             PILOT_ROOT = $root
@@ -107,11 +115,6 @@ jobs:
 
       - name: Expose the existing MSVC x64 SDK
         uses: ./.github/actions/setup-msvc-env
-        with:
-          target: x86_64-pc-windows-msvc
-
-      - name: Configure checksum-verified V8 inputs
-        uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-pc-windows-msvc
 
@@ -222,28 +225,15 @@ jobs:
           }
           $plans = @(
             @{
-              label = 'core-windows-sandbox'; package = 'codex-core'; binary = 'windows_sandbox'; target = @('--test', 'windows_sandbox')
+              label = 'legacy-sandbox-library'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
               names = @(
-                'windows_sandbox_cli_preserves_managed_deny_reads_across_launches',
-                'windows_elevated_temp_only_core_and_direct_spawn_enforce_carveouts',
-                'windows_elevated_does_not_create_missing_workspace_metadata',
-                'windows_elevated_enforces_deny_read_and_protects_setup_marker',
-                'windows_elevated_powershell_preserves_relative_paths',
-                'windows_elevated_unified_exec_enforces_large_recursive_deny_reads',
-                'windows_elevated_approved_git_pull_preserves_deny_read'
+                'unified_exec::tests::legacy_capture_emits_output_and_preserves_descendant_after_normal_exit',
+                'unified_exec::tests::legacy_capture_cancellation_terminates_descendants_without_timeout',
+                'unified_exec::tests::legacy_tty_job_terminates_and_preserves_descendants',
+                'unified_exec::tests::legacy_non_tty_powershell_interrupt_terminates_process',
+                'unified_exec::tests::legacy_capture_fixture::console_window_probe_rejects_hidden_console_window',
+                'unified_exec::tests::legacy_workspace_write_delete_is_limited_to_writable_roots'
               )
-            },
-            @{
-              label = 'exec-server-filesystem'; package = 'codex-exec-server'; binary = 'file_system_windows'; target = @('--test', 'file_system_windows')
-              names = @('file_system_elevated_relative_read_denial_uses_policy_cwd::local', 'file_system_elevated_relative_read_denial_uses_policy_cwd::remote')
-            },
-            @{
-              label = 'exec-server-process'; package = 'codex-exec-server'; binary = 'exec_process'; target = @('--test', 'exec_process')
-              names = @('windows_sandbox::tmpdir_uses_command_environment_over_rpc::elevated')
-            },
-            @{
-              label = 'sandbox-library'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
-              names = @('unified_exec::tests::elevated_non_tty_cmd_forwards_env_output_and_exit')
             }
           )
           $plans | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'expected-tests.json') -Encoding utf8
@@ -272,26 +262,13 @@ jobs:
             just = (& just --version)
             python = (& python --version)
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'tool-versions.json') -Encoding utf8
-          Save-DiskObservation 'helper-build'
-          $buildLog = Join-Path $env:PILOT_ROOT 'helper-build.log'
-          & cargo build --locked --profile dev-small -p codex-cli --bin codex -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner --bin codex-windows-managed-deny-probe 2>&1 | Tee-Object -FilePath $buildLog
-          $buildExit = $LASTEXITCODE
-          Save-DiagnosticTail $buildLog 'helper-build-tail'
-          if ($buildExit -ne 0) { throw "Helper build failed with exit $buildExit; no tests executed." }
-          $helpers = @{}
-          foreach ($name in @('codex', 'codex-windows-sandbox-setup', 'codex-command-runner', 'codex-windows-managed-deny-probe')) {
-            $path = (Resolve-Path -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "dev-small/$name.exe")).Path
-            [Environment]::SetEnvironmentVariable("CARGO_BIN_EXE_$name", $path, 'Process')
-            [Environment]::SetEnvironmentVariable("CARGO_BIN_EXE_$($name.Replace('-', '_'))", $path, 'Process')
-            $helpers[$name] = @{ path = $path; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
-          }
-          $helpers | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'helper-hashes.json') -Encoding utf8
+          # This package's locked dependency closure has no V8. The selected legacy
+          # paths use native launch/current libtest re-exec, not elevated helper binaries.
           $selected = @()
-          $testDirectories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
           foreach ($plan in $plans) {
             Save-DiskObservation "list-$($plan.label)"
             $filter = ($plan.names | ForEach-Object { "test(=$_)"} ) -join ' | '
-            $plan.arguments = @('--tool-config-file', $nextestConfigArg, '--profile', 'local', '--locked', '--cargo-profile', 'dev-small', '-p', $plan.package) + $plan.target + @('-E', $filter)
+            $plan.arguments = @('--tool-config-file', $nextestConfigArg, '--profile', 'local', '--locked', '--cargo-profile', 'dev-small', '--run-ignored', 'default', '-p', $plan.package) + $plan.target + @('-E', $filter)
             $inventoryPath = Join-Path $env:PILOT_ROOT "$($plan.label)-inventory.json"
             $listLog = Join-Path $env:PILOT_ROOT "$($plan.label)-list.log"
             & cargo nextest list @($plan.arguments) --message-format json 1> $inventoryPath 2> $listLog
@@ -302,24 +279,18 @@ jobs:
             $cases = @(Get-SelectedCases $inventory $plan)
             $plan.caseIdentities = @($cases | ForEach-Object { @{ classname = $_.binary_id; name = $_.test } })
             $selected += $cases
-            foreach ($case in $cases) {
-              $testDirectories.Add((Split-Path -Parent $case.binary_path)) | Out-Null
-            }
           }
-          if ($selected.Count -ne 11) { throw 'Expected exactly eleven selected, nonignored tests.' }
+          if ($selected.Count -ne 6) { throw 'Expected exactly six selected, nonignored tests.' }
           $selected | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'selected-tests.json') -Encoding utf8
-          # The sandbox library test uses production sibling lookup, not Cargo overrides.
-          foreach ($directory in $testDirectories) {
+          $binaryHashes = @{}
+          foreach ($path in ($selected.binary_path | Sort-Object -Unique)) {
             $targetRoot = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR).TrimEnd('\') + '\'
-            if (-not ([IO.Path]::GetFullPath($directory)).StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            if (-not ([IO.Path]::GetFullPath($path)).StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
               throw 'Test executable escaped this pilot target directory.'
             }
-            $resources = Join-Path $directory 'codex-resources'
-            New-Item -ItemType Directory -Path $resources -Force | Out-Null
-            foreach ($name in @('codex-windows-sandbox-setup', 'codex-command-runner')) {
-              Copy-Item -LiteralPath $helpers[$name].path -Destination (Join-Path $resources "$name.exe") -Force
-            }
+            $binaryHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
           }
+          $binaryHashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'test-binary-hashes.json') -Encoding utf8
           $results = @()
           # The CI-only config binds every invocation to this exact report path.
           foreach ($plan in $plans) {
@@ -354,7 +325,7 @@ jobs:
       - name: Final resource observation
         if: always()
         run: |
-          $root = Join-Path $env:RUNNER_TEMP "cw11-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwlegacy6-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $evidence = Join-Path $root 'evidence'
           if (Test-Path -LiteralPath $evidence) {
             Get-PSDrive -PSProvider FileSystem | Select-Object Name, Free, Used |
@@ -367,11 +338,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: windows-isolated-eleven-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-isolated-legacy-six-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/cw11-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
-            ${{ runner.temp }}/cw11-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
-            ${{ runner.temp }}/cw11-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
-            ${{ runner.temp }}/cw11-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
+            ${{ runner.temp }}/cwlegacy6-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
+            ${{ runner.temp }}/cwlegacy6-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
+            ${{ runner.temp }}/cwlegacy6-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
+            ${{ runner.temp }}/cwlegacy6-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
           retention-days: 1
           if-no-files-found: warn
