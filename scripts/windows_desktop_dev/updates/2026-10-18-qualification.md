@@ -7,11 +7,12 @@ package qualification does not cover later source changes.
 
 ## Current footing
 
-- Latest code checkpoint: `8dd65c2e81e8544ccf4e5e4b3819482900d35c67`, pushed
-  to `personal/codex/shared-runtime-20261016`. Its test-only selected-token
-  observer has scoped lint and four pure-test passes, not native qualification.
-  The full campaign remains frozen at `988f24639c...`; latest completed native
-  qualification tested DACL-diagnostic source `b103d6a796...`.
+- Latest Rust checkpoint: `3e46aa36e64a41cbb3949c839a1d773137a2e9cf`, pushed
+  to `personal/codex/shared-runtime-20261016`. Its ordinary-user fixture baseline
+  exposes a real legacy deletion-enforcement failure. Non-forcing package-smoke
+  cleanup follows at `d7ed320d32f54e1491d813fc26bde854fe5854f3`.
+  The full campaign remains frozen at `988f24639c...`; do not treat its older
+  positive-control failure as equivalent to this qualified counterexample.
 - `personal` is `puntastic/CodexPersonal`; `origin` remains read-only upstream.
   No main integration or installation occurred.
 - The active Desktop CLI remains 0.161.0 at
@@ -20,10 +21,12 @@ package qualification does not cover later source changes.
 - No live peer policy, persistent delegate, directed grant, configuration
   change, restart or model-driven native-message trial was created.
 - Latest completed qualification:
-  [run 39137145645](https://github.com/puntastic/CodexPersonal/actions/runs/39137145645),
-  workflow `bbe66632f26b5566124c6f653c90ea07c32dd29f`, source `b103d6a796...`:
-  7/8 passed, including the corrected original TTY fixture. Deletion remains
-  failed, but intended file grants/inheritance are now directly observed.
+  [run 39143321895](https://github.com/puntastic/CodexPersonal/actions/runs/39143321895),
+  workflow `acf31dae3542dcb6abb01da5600a817cc3da8ab8`, source `3e46aa36e6...`:
+  11/12 passed. With ordinary-user full access established, all intended
+  deletions work, but the outside file and protected empty `.git` also disappear.
+  The unchanged failing oracle is retained. No production permission repair or
+  live adoption follows; decisions depending on legacy isolation remain held.
   The full campaign is executing 21,360 ordinary cases, with eleven exact
   account-sensitive cases planned afterward. This is live progress, not an
   aggregate pass or completed campaign.
@@ -76,6 +79,8 @@ populations and must not be added into a unique test total.
 | `9b9018e1-e9fb-4c88-8f42-e0b39b91b94c`, `d2e83ecdb` | 6 Core integration cases passed in 10.791 s | Five child/parent feedback variants plus retention, including both enabled/disabled arms. |
 | `4967a78b-b7c4-44b6-b24b-9b8536e8740b`, `d2e83ecdb` | 9 native/buffer cases: 7 passed, 2 failed | The open-input lifecycle control passed in 2.758 s. Closed-input readiness and deletion positive controls still failed. |
 | `f379145b-f8cd-4574-ad40-7b257162ba54`, `b103d6a796` | 8 native/pure cases: 7 passed, 1 failed, 3.587 s | Corrected original TTY passed in 2.768 s. Deletion still failed; complete pre/post DACLs distinguish grant installation from effective access. |
+| `ac3bfa71-bba3-4780-9577-92f3946718d8`, `8dd65c2e81` | 12 cases: 11 passed, 1 failed, 3.190 s | Actual root capabilities present; ordinary group grants inadequate for seeded-file deletion. All 21 access-check API calls succeeded, separately from their allow/deny results. |
+| `c362fdb9-50aa-4bfe-af0f-ab5b8d15ec70`, `3e46aa36e6` | 12 cases: 11 passed, 1 failed, 4.135 s | Full ordinary-user baseline restores intended deletions and exposes outside/protected deletion. Native counterexample, not another failed positive control. |
 
 Exact JUnit SHA256 values, in table order:
 
@@ -86,6 +91,8 @@ Exact JUnit SHA256 values, in table order:
 - `c76140b8776d639b56a63bcc39e70b378bb3a4072d26fb86446e0c86668cc074`
 - `6f348b2a36921100e06da4ac0d9b521ce699d81e374ca0005fa449b6af399d26`
 - `9b8aafeea9c04ac4f575db8444bbbdaac3a42d3e321a0708757c61ae82de05d1`
+- `d707abdabeeaf01a894cfa97fff08cef3e9f48c39b84bf90f7af08d794e76cef`
+- `844f3d07e106c05760f02e30cdeb1d5f5dff3a3c910ab6a3935249bf8583035a`
 
 The local failures comprised one expected enabled-retention snapshot and two
 Guardian closure-message assertions. The retention case reached both modes
@@ -331,12 +338,73 @@ four pure TLS/format tests passed in 0.073 s, Nextest
 `477632c6-fa34-4d26-a6d0-469c270c0439`, 297 filtered, no errors/retries; JUnit
 `6daa8786b6f6cf3548f5a5623dab0cd176c506c87be839c9d41c0c32cae3266b`.
 These do not invoke native token/descriptor queries or `AccessCheck`. Native
-qualification is running as disposable slice
+qualification completed as disposable slice
 [39140858454](https://github.com/puntastic/CodexPersonal/actions/runs/39140858454),
 workflow `b413fcb5e7205e696cb8865afbc0011c3ed64100`, code
 `8dd65c2e81e8544ccf4e5e4b3819482900d35c67`. The earlier eight cases plus these
-four pure tests make an exact twelve-case selection. The original full campaign
-continues separately; no new native result is claimed yet.
+four pure tests make an exact twelve-case selection. Its result and subsequent
+baseline correction are below; the original full campaign continues separately.
+
+## Settled native counterexample, not an automatic policy repair
+
+The selected-token run found all three current root capabilities, but its actual
+user had no seeded-file delete grant and Administrators was deny-only. Positive
+files allowed reads but denied `DELETE`/`FILE_WRITE_ATTRIBUTES`; positive parents
+allowed file creation but denied `FILE_DELETE_CHILD`. This strongly supported
+a missing ordinary-user precondition, not absent sandbox capabilities.
+
+The bounded correction establishes actual caller-user `FILE_ALL_ACCESS`, with
+OI|CI inheritance, on the fresh owned fixture root before creating children.
+All eleven root/child paths are read back before sandbox setup. Null, deny-bearing,
+unsupported and oversized baselines fail explicitly; no deny is stripped or
+descriptor replaced. The helper uses `GRANT_ACCESS` and deliberately retains
+parent `FILE_DELETE_CHILD`, rather than weakening the baseline to make green.
+Only `cfg(test)` helpers/setup changed. Full formatting and scoped lint passed
+in 15.61 s; independent source review found no concrete issue.
+
+Run `39143321895` then removed all three intended files **and** the outside file
+and protected empty `.git`. Post-readback reports `NotFound`, OS error 2, for
+all five; their parent directories remain. Completion was normal, stderr empty,
+and failure cleanup did not run. The outside path is a sibling of the three
+explicit workspace/TEMP/TMP roots, not an allowed root. All three corresponding
+capabilities were present. This is an actual deletion failure on owned disposable
+test data, not an operation on Kestrel's desktop.
+
+The exact selected-token checks deny direct outside-file/`.git` `DELETE`, yet
+permit the outside/workspace parents' `FILE_DELETE_CHILD`. This is consistent
+with the parent-delete alternative and the earlier Windows19045 synthetic
+finding, not a same-VM flag contrast isolating `WRITE_RESTRICTED`. Production
+flags/policy were unchanged by the fixture repair. Independent receiving review
+confirmed the source delta, same-run baseline, outside-root relation and absence
+of cleanup as a competing cause.
+
+Stop this investigation at the qualified counterexample. Preserve the failed
+regression; no ignore, expected-failure annotation, narrower grant, backend
+disable or automatic permission-policy choice is adopted. Hold live adoption
+or claims that depend on this legacy workspace-write boundary. A repair/redesign,
+backend choice or further causal experiment needs separate ownership; unrelated
+CI or packaging success cannot turn the boundary failure into a pass.
+
+Ath2368 retains exact small original evidence with checked hash/size custody:
+
+- Baseline JUnit, 18,776 bytes:
+  `ath-asset:sha256:844f3d07e106c05760f02e30cdeb1d5f5dff3a3c910ab6a3935249bf8583035a`.
+- Selected-token projection, 5,150 bytes:
+  `ath-asset:sha256:1ff89411ccdebef204bfa4085bee34cb317472023dfb084e2a9229972f570cbe`.
+- DACL projection, 9,730 bytes:
+  `ath-asset:sha256:67be57d0365f872ff471dfd43ebc012e16ec5360896566f60155a15a48f3170e`.
+
+## Non-forcing package smoke cleanup
+
+The older package-info smoke cleanup used recursive `-Force`. The narrow repair
+at `d7ed320d32...` accepts only an exact direct GUID child under the expected
+smoke base, rejects base/sibling/reparse escapes, and uses ordinary literal-path
+recursive removal. Refusal/failure warns, retains remaining files and cannot
+mask the original smoke error, even with a stopping warning preference.
+Version execution, environment restoration and package return fields remain
+unchanged. Mocked filesystem/native checks and independent re-review passed;
+no actual deletion or binary execution occurred in those checks. This is not
+an identified cause or repair of the CI candidate-preparation failure.
 
 ## Continuation and release boundary
 
