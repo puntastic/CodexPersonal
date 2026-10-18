@@ -1,7 +1,7 @@
 # THROWAWAY PURPOSE-BRANCH PILOT ONLY. Do not merge this replacement into main.
 # Reuses the existing workflow ID/path for dispatch with ref=codex/windows-isolated-tests-20261017.
 # Production code is checked out at SOURCE_SHA; the workflow revision is recorded separately.
-name: Windows isolated closure and legacy qualification pilot
+name: Windows supported workspace qualification candidate
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  qualify-closure-and-legacy:
+  qualify-supported-workspace:
     if: >-
       github.repository == 'puntastic/CodexPersonal' &&
       github.ref == 'refs/heads/codex/windows-isolated-tests-20261017' &&
@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
     env:
       # Exact source checkpoint after full formatting and scoped Core/Guardian/Windows lint.
-      SOURCE_SHA: d2e83ecdb4a5ed9e66a5cd96d147f93a13f2330b
+      SOURCE_SHA: 988f24639c26960426cea0de51f90c81b407f47d
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: never
@@ -63,11 +63,11 @@ jobs:
           # The selected PowerShell fixtures otherwise return early and look passed.
           $powerShell = Join-Path $env:ProgramFiles 'PowerShell/7/pwsh.exe'
           if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
-            throw 'The exact PowerShell 7 path used by the seven legacy fixtures is required.'
+            throw 'The exact PowerShell 7 path used by the native legacy fixtures is required.'
           }
           $head = (& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch.' }
-          $root = Join-Path $env:RUNNER_TEMP "cwclosure23-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwspace-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $root) { throw 'Pilot output root must be new.' }
           foreach ($child in @('target', 'test-tmp', 'evidence')) {
             New-Item -ItemType Directory -Path (Join-Path $root $child) | Out-Null
@@ -87,7 +87,7 @@ jobs:
             powershell_fixture_sha256 = (Get-FileHash -LiteralPath $powerShell -Algorithm SHA256).Hash
             sandbox_accounts_initially_absent = $true
             cleanup_boundary = 'Task data and test-path ACL/desktop effects stay on this disposable VM. No extra account provisioning or global uninstall is run; the VM is discarded.'
-            proof_boundary = 'Exactly 23 nonignored cases: eight Core library, six Core integration, and seven native legacy plus two diagnostic-buffer cases on Windows 2025, not local Windows 10 build 19045. Four existing rationale-override variants are not compiled on Windows and remain unrun coverage. No public RPC, elevated-account suite, voice-host, full workspace, deployment or personal credentials. Native and deletion-boundary failures remain failures to investigate; helper availability is not code-mode execution coverage.'
+            proof_boundary = 'All freshly inventoried supported Windows workspace nonignored tests, excluding only codex-voice-host because its matching native SDK is absent. Ordinary complement first, then exactly eleven account-mutating cases in serial groups. Windows 2025 x64 only, not other platforms or local Windows 10. Ignored/cfg-excluded tests and voice runtime remain unqualified. Candidate package is NOT DEPLOYED and NOT APPROVED; test failures remain failures.'
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'provenance.json') -Encoding utf8
           @{
             PILOT_ROOT = $root
@@ -98,7 +98,7 @@ jobs:
             TEMP = (Join-Path $root 'test-tmp')
             TMP = (Join-Path $root 'test-tmp')
           }.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" >> $env:GITHUB_ENV }
-          # Do not invoke setup-ci: its Dev Drive/VHD provisioning is outside this small pilot.
+          # Do not invoke setup-ci: its Dev Drive/VHD provisioning is outside this campaign.
           Get-PSDrive -PSProvider FileSystem |
             Select-Object Name, Free, Used |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'initial-disks.json') -Encoding utf8
@@ -121,7 +121,6 @@ jobs:
 
       - name: Configure checksum-verified V8 inputs from the pinned source
         id: rusty_v8
-        continue-on-error: true
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-pc-windows-msvc
@@ -136,20 +135,89 @@ jobs:
         with:
           tool: nextest@0.9.143
 
-      - name: Build, verify the exact selection, then qualify serially
+      - name: Install pinned ripgrep for the canonical package
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: ripgrep@14.1.1
+
+      - name: Install existing workspace DotSlash prerequisite
+        uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
+
+      - name: Expose DotSlash at the Windows fixture lookup path
+        run: |
+          $directory = Join-Path $env:LOCALAPPDATA 'Microsoft/WindowsApps'
+          New-Item -ItemType Directory -Path $directory -Force | Out-Null
+          Copy-Item -LiteralPath (Get-Command dotslash).Source -Destination (Join-Path $directory 'dotslash.exe')
+
+      - name: Build canonical candidate before tests - NOT DEPLOYED or APPROVED
+        id: candidate
+        continue-on-error: true
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $env:CODEX_THREAD_ID = "windows-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $candidate = Join-Path $env:PILOT_ROOT 'candidate-package'
+          $cargo = (Get-Command cargo).Source
+          $cargoHome = Split-Path -Parent (Split-Path -Parent $cargo)
+          $rustupHome = (& rustup show home).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve the CI Rustup home.' }
+          $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($env:CARGO_TARGET_DIR))
+          if ($drive.AvailableFreeSpace -lt 10GB) { throw 'Less than 10 GiB free before canonical package build.' }
+          $buildArguments = @{
+            Action = 'Build'; CargoProfile = 'dev-small'; PackageDirectory = $candidate
+            CargoPath = $cargo; CargoHome = $cargoHome; RustupHome = $rustupHome
+            PythonPath = (Get-Command python).Source; RipgrepPath = (Get-Command rg).Source; Json = $true
+          }
+          # Existing Build supplies locked native-host builds, source receipts,
+          # package validation and isolated --version smokes. Never call Deploy.
+          $resultText = & ./codex-dev.ps1 @buildArguments
+          $resultText | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'canonical-build-result.json') -Encoding utf8
+          $result = ($resultText -join [Environment]::NewLine) | ConvertFrom-Json
+          $provenancePath = Join-Path $candidate 'codex-dev-build.json'
+          $provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
+          if ($result.Status -ne 'built' -or $provenance.Status -ne 'stable' -or
+              $provenance.SourceBefore.Head -ne $env:SOURCE_SHA -or $provenance.SourceAfter.Head -ne $env:SOURCE_SHA -or
+              $provenance.SourceBefore.Dirty -or $provenance.SourceAfter.Dirty -or
+              -not $provenance.CargoLocked -or $provenance.CargoProfile -ne 'dev-small' -or
+              -not (Test-Path -LiteralPath $result.Receipt -PathType Leaf)) {
+            throw 'Canonical candidate lacks a clean exact-source stable Build receipt.'
+          }
+          $receipt = Get-Content -LiteralPath $result.Receipt -Raw | ConvertFrom-Json
+          if ($receipt.Action -ne 'Build' -or -not $receipt.Details.SourceStable -or
+              $receipt.Details.Package.Provenance.BuildId -ne $provenance.BuildId) { throw 'Build receipt identity mismatch.' }
+          Copy-Item -LiteralPath $provenancePath -Destination (Join-Path $env:PILOT_EVIDENCE 'canonical-build-provenance.json')
+          Copy-Item -LiteralPath $result.Receipt -Destination (Join-Path $env:PILOT_EVIDENCE 'canonical-build-receipt.json')
+          $files = @(Get-ChildItem -LiteralPath $candidate -File -Recurse | ForEach-Object {
+            @{ path = [IO.Path]::GetRelativePath($candidate, $_.FullName); bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+          })
+          @{
+            status = 'NOT DEPLOYED / NOT APPROVED'; source_sha = $env:SOURCE_SHA
+            build_id = $provenance.BuildId; artifact_fingerprint = $provenance.ArtifactFingerprint
+            cargo_target_dir = $env:CARGO_TARGET_DIR; build_arguments = $buildArguments
+            build_jobs = $env:CARGO_BUILD_JOBS; incremental = $env:CARGO_INCREMENTAL
+            proof_limit = 'Version smoke only. Workspace tests may rebuild executables with unified features; same source does not prove packaged-byte execution.'
+            files = $files
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'candidate-package.json') -Encoding utf8
+
+      - name: Retain immutable unapproved candidate before test execution
+        if: steps.candidate.outcome == 'success'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: NOT-DEPLOYED-NOT-APPROVED-windows-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cwspace-${{ github.run_id }}-${{ github.run_attempt }}/candidate-package/
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Build helpers, inventory the supported workspace, and run all groups
+        id: qualification
         working-directory: codex-rs
-        env:
-          V8_SETUP_OUTCOME: ${{ steps.rusty_v8.outcome }}
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           foreach ($name in @('RUNFILES_MANIFEST_ONLY', 'CODEX_WINDOWS_REGISTERED_CORE')) {
-            # A null method argument can leave an empty-but-present marker in pwsh.
             Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
-            if ([Environment]::GetEnvironmentVariables('Process').Contains($name)) {
-              throw "Inherited environment marker is still present: $name"
-            }
+            if ([Environment]::GetEnvironmentVariables('Process').Contains($name)) { throw "Inherited marker still present: $name" }
           }
           function Save-DiskObservation([string]$Phase) {
             $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($env:CARGO_TARGET_DIR))
@@ -168,31 +236,50 @@ jobs:
                 Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE "$Name.txt") -Encoding utf8
             }
           }
-          function Get-SelectedCases([hashtable]$Inventory, [hashtable]$Plan) {
-            if (-not $Inventory.ContainsKey('rust-suites')) { throw 'Unsupported nextest inventory.' }
-            $actual = @()
-            foreach ($suite in $Inventory['rust-suites'].Values) {
-              if ($suite['status'] -ne 'listed') { continue }
+          function Get-CaseKey($Case) {
+            ConvertTo-Json -InputObject @($Case.binary_id, $Case.test) -Compress
+          }
+          function Assert-SameCases($Expected, $Actual) {
+            $left = @($Expected | ForEach-Object { Get-CaseKey $_ } | Sort-Object)
+            $right = @($Actual | ForEach-Object { Get-CaseKey $_ } | Sort-Object)
+            if ($left.Count -ne $right.Count -or $right.Count -ne @($right | Select-Object -Unique).Count -or
+                @(Compare-Object $left $right).Count -ne 0) { throw 'Case identity sets differ or contain duplicates.' }
+          }
+          function Read-Inventory([string]$Path, [switch]$Full) {
+            $file = Get-Item -LiteralPath $Path
+            if ($file.Length -eq 0 -or $file.Length -gt 64MB) { throw 'Inventory is empty or exceeds the 64 MiB bound.' }
+            $inventory = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+            if (-not $inventory.ContainsKey('rust-suites')) { throw 'Unsupported nextest inventory.' }
+            $selected = @(); $ignored = @(); $listedCount = 0
+            foreach ($suite in $inventory['rust-suites'].Values) {
+              if ($suite['status'] -ne 'listed') {
+                if ($Full) { throw 'Full workspace inventory contains an unlisted suite.' }
+                continue
+              }
+              if ($suite['package-name'] -eq 'codex-voice-host' -or
+                  $suite['binary-id'] -isnot [string] -or [string]::IsNullOrWhiteSpace($suite['binary-id'])) {
+                throw 'Unexpected excluded package or missing binary ID.'
+              }
               foreach ($case in $suite['testcases'].GetEnumerator()) {
-                if ($case.Value['filter-match']['status'] -ne 'matches') { continue }
-                if ($suite['package-name'] -ne $Plan.package -or $suite['binary-name'] -ne $Plan.binary -or
-                    $suite['binary-id'] -isnot [string] -or [string]::IsNullOrWhiteSpace($suite['binary-id']) -or
-                    $case.Value['ignored'] -isnot [bool] -or $case.Value['ignored']) {
-                  throw 'Unexpected package/binary, unsupported inventory or ignored case selected.'
+                $listedCount++
+                if ($case.Value['ignored'] -isnot [bool]) { throw 'Missing inventory ignored state.' }
+                $item = @{
+                  package = $suite['package-name']; binary = $suite['binary-name']; binary_id = $suite['binary-id']
+                  test = $case.Key; binary_path = $suite['binary-path']; ignored = $case.Value['ignored']
                 }
-                $actual += @{ package = $suite['package-name']; binary = $suite['binary-name']; binary_id = $suite['binary-id']; test = $case.Key; binary_path = $suite['binary-path'] }
+                if ($case.Value['ignored']) { $ignored += $item; continue }
+                if ($case.Value['filter-match']['status'] -eq 'matches') { $selected += $item }
+                elseif ($Full) { throw 'Nonignored case filtered out of the full workspace inventory.' }
               }
             }
-            if ($actual.Count -ne $Plan.names.Count -or
-                @(Compare-Object ($Plan.names | Sort-Object) ($actual.test | Sort-Object)).Count -ne 0) {
-              throw "Selected test names differ from the exact allowlist for $($Plan.label); no tests executed."
-            }
-            return $actual
+            if ($Full -and $listedCount -ne $inventory['test-count']) { throw 'Full inventory test count is inconsistent.' }
+            if ($selected.Count -eq 0) { throw 'No nonignored tests selected.' }
+            return @{ selected = $selected; ignored = $ignored; listed = $listedCount }
           }
-          function Assert-JUnitReport([string]$Path, [hashtable]$Plan, [DateTime]$StartedUtc) {
+          function Read-JUnitReport([string]$Path, $Expected, [DateTime]$StartedUtc) {
             $file = Get-Item -LiteralPath $Path -ErrorAction Stop
             if ($file.PSIsContainer -or $file.Length -eq 0 -or $file.Length -gt 32MB -or $file.LastWriteTimeUtc -lt $StartedUtc) {
-              throw 'JUnit report is empty, oversized or older than this test invocation.'
+              throw 'JUnit is empty, oversized or older than this invocation.'
             }
             $settings = [Xml.XmlReaderSettings]::new()
             $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
@@ -202,100 +289,72 @@ jobs:
             $reader = [Xml.XmlReader]::Create($file.FullName, $settings)
             try { $document.Load($reader) } finally { $reader.Dispose() }
             $cases = @($document.SelectNodes('/testsuites/testsuite/testcase'))
-            $actualIdentities = @($cases | ForEach-Object {
-              ConvertTo-Json -InputObject @($_.GetAttribute('classname'), $_.GetAttribute('name')) -Compress
-            })
-            $expectedIdentities = @($Plan.caseIdentities | ForEach-Object {
-              ConvertTo-Json -InputObject @($_.classname, $_.name) -Compress
-            })
-            if ($document.DocumentElement.get_Name() -ne 'testsuites' -or $cases.Count -ne $Plan.names.Count -or
-                $document.SelectNodes('//testcase').Count -ne $cases.Count -or
-                @(Compare-Object ($expectedIdentities | Sort-Object) ($actualIdentities | Sort-Object)).Count -ne 0) {
-              throw 'JUnit cases do not exactly match the selected test allowlist.'
-            }
-            if ($document.SelectNodes('//failure | //error | //skipped | //flakyFailure | //flakyError | //rerunFailure | //rerunError').Count -ne 0) {
-              throw 'JUnit contains a failed, errored, skipped or retried case.'
-            }
+            if ($document.DocumentElement.get_Name() -ne 'testsuites' -or
+                $document.SelectNodes('//testcase').Count -ne $cases.Count) { throw 'Unexpected JUnit structure.' }
+            $actual = @($cases | ForEach-Object { @{ binary_id = $_.GetAttribute('classname'); test = $_.GetAttribute('name') } })
+            Assert-SameCases $Expected $actual
             foreach ($node in $document.SelectNodes('/testsuites | /testsuites/testsuite')) {
-              $requiredCounters = @('tests', 'failures', 'errors')
-              foreach ($counter in $requiredCounters) {
+              foreach ($counter in @('tests', 'failures', 'errors')) {
                 if (-not $node.HasAttribute($counter) -or $node.GetAttribute($counter) -notmatch '^\d+$') {
-                  throw 'JUnit required counters are missing or invalid.'
+                  throw 'JUnit required counters missing or invalid.'
                 }
               }
-              if ([long]$node.GetAttribute('tests') -ne $node.SelectNodes('.//testcase').Count) {
-                throw 'JUnit declared test count disagrees with its actual cases.'
+              foreach ($entry in @{ tests = './/testcase'; failures = './/testcase[failure]'; errors = './/testcase[error]'; skipped = './/testcase[skipped]' }.GetEnumerator()) {
+                if ($node.HasAttribute($entry.Key)) {
+                  if ($node.GetAttribute($entry.Key) -notmatch '^\d+$' -or
+                      [long]$node.GetAttribute($entry.Key) -ne $node.SelectNodes($entry.Value).Count) {
+                    throw "JUnit $($entry.Key) counter disagrees with actual cases."
+                  }
+                } elseif ($node.SelectNodes($entry.Value).Count -ne 0) { throw 'JUnit omitted a nonzero counter.' }
               }
-              foreach ($counter in @('failures', 'errors', 'disabled', 'skipped')) {
-                if ($node.HasAttribute($counter) -and ($node.GetAttribute($counter) -notmatch '^\d+$' -or [long]$node.GetAttribute($counter) -ne 0)) {
-                  throw 'JUnit declares failures, errors or skipped tests.'
-                }
-              }
+            }
+            $failures = $document.SelectNodes('//testcase[failure]').Count
+            $errors = $document.SelectNodes('//testcase[error]').Count
+            $skipped = $document.SelectNodes('//testcase[skipped]').Count
+            $retries = $document.SelectNodes('//flakyFailure | //flakyError | //rerunFailure | //rerunError').Count
+            # Failed tests are valid observations, not malformed receipts.
+            return @{
+              tests = $cases.Count; failures = $failures; errors = $errors; skipped = $skipped; retries = $retries
+              passing = ($failures + $errors + $skipped + $retries -eq 0)
+              sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
             }
           }
-          $plans = @(
+          $accountPlans = @(
             @{
-              label = 'core-library'; package = 'codex-core'; binary = 'codex_core'; target = @('--lib')
-              requires_v8 = $true; requires_code_mode_host = $false
+              label = 'core-windows-sandbox'; package = 'codex-core'; binary = 'windows_sandbox'; target = @('--test', 'windows_sandbox')
               names = @(
-                'tools::approvals::closure_tests::protected_exec_rejection_uses_guardian_source_and_captured_turn_state',
-                'tools::approvals::closure_tests::approved_and_non_exec_decisions_keep_their_existing_treatment',
-                'tools::handlers::unified_exec::exec_command::tests::protected_closure_preserves_the_existing_diagnostic_and_complete_host_block',
-                'tools::handlers::unified_exec::exec_command::tests::ordinary_rejection_with_copied_closure_text_does_not_gain_a_protected_notice',
-                'tools::handlers::unified_exec::exec_command::tests::ordinary_exec_failure_keeps_its_existing_rendering',
-                'guardian::tests::full_access_approves_without_mutating_guardian_breaker::open_lane',
-                'guardian::tests::full_access_approves_without_mutating_guardian_breaker::closed_lane',
-                'guardian::tests::guardian_review_closes_lane_and_rejects_next_request_without_review'
+                'windows_sandbox_cli_preserves_managed_deny_reads_across_launches',
+                'windows_elevated_temp_only_core_and_direct_spawn_enforce_carveouts',
+                'windows_elevated_does_not_create_missing_workspace_metadata',
+                'windows_elevated_enforces_deny_read_and_protects_setup_marker',
+                'windows_elevated_powershell_preserves_relative_paths',
+                'windows_elevated_unified_exec_enforces_large_recursive_deny_reads',
+                'windows_elevated_approved_git_pull_preserves_deny_read'
               )
             },
             @{
-              label = 'core-integration'; package = 'codex-core'; binary = 'all'; target = @('--test', 'all')
-              requires_v8 = $true; requires_code_mode_host = $true
-              names = @(
-                'suite::subagent_notifications::guardian_subagent_notification_tests::guardian_circuit_breaker_closes_lane_without_interrupting_child::strict_closes_approval_lane',
-                'suite::subagent_notifications::guardian_subagent_notification_tests::guardian_circuit_breaker_closes_lane_without_interrupting_child::default_closes_approval_lane',
-                'suite::subagent_notifications::guardian_subagent_notification_tests::guardian_circuit_breaker_closes_lane_without_interrupting_child::acting_model_custom_feedback',
-                'suite::subagent_notifications::guardian_subagent_notification_tests::guardian_circuit_breaker_closes_lane_without_interrupting_child::empty_feedback_override',
-                'suite::subagent_notifications::guardian_subagent_notification_tests::guardian_circuit_breaker_closes_lane_without_interrupting_child::long_escaped_unicode_rationale',
-                'suite::scenarios::retained_tool_outputs::retained_tool_output_survives_compaction_and_resume'
-              )
+              label = 'exec-server-filesystem'; package = 'codex-exec-server'; binary = 'file_system_windows'; target = @('--test', 'file_system_windows')
+              names = @('file_system_elevated_relative_read_denial_uses_policy_cwd::local', 'file_system_elevated_relative_read_denial_uses_policy_cwd::remote')
             },
             @{
-              label = 'legacy-sandbox-library'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
-              requires_v8 = $false; requires_code_mode_host = $false
-              names = @(
-                'unified_exec::tests::legacy_capture_emits_output_and_preserves_descendant_after_normal_exit',
-                'unified_exec::tests::legacy_capture_cancellation_terminates_descendants_without_timeout',
-                'unified_exec::tests::legacy_tty_job_terminates_and_preserves_descendants',
-                'unified_exec::tests::legacy_tty_job_with_open_stdin_terminates_and_preserves_descendants',
-                'unified_exec::tests::legacy_non_tty_powershell_interrupt_terminates_process',
-                'unified_exec::tests::legacy_capture_fixture::console_window_probe_rejects_hidden_console_window',
-                'unified_exec::tests::legacy_workspace_write_delete_is_limited_to_writable_roots',
-                'unified_exec::tests::legacy_fixture_diagnostics::bounded_output_retains_prefix_and_counts_discarded_bytes',
-                'unified_exec::tests::legacy_fixture_diagnostics::bounded_output_accepts_empty_chunks'
-              )
+              label = 'exec-server-process'; package = 'codex-exec-server'; binary = 'exec_process'; target = @('--test', 'exec_process')
+              names = @('windows_sandbox::tmpdir_uses_command_environment_over_rpc::elevated')
+            },
+            @{
+              label = 'sandbox-library'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
+              names = @('unified_exec::tests::elevated_non_tty_cmd_forwards_env_output_and_exit')
             }
           )
-          if (($plans | ForEach-Object { $_.names.Count } | Measure-Object -Sum).Sum -ne 23) {
-            throw 'The declared allowlist must contain exactly 23 cases.'
+          foreach ($plan in $accountPlans) {
+            $names = ($plan.names | ForEach-Object { "test(=$_)" }) -join ' | '
+            $plan.filter = "(package(=$($plan.package)) & binary(=$($plan.binary)) & ($names))"
+            $plan.threads = 1
           }
-          $plans | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'expected-tests.json') -Encoding utf8
-          @{
-            reason = 'Existing guardian_review module is cfg(not(target_os = "windows")); these test bodies are present but outside this Windows slice.'
-            source_location = 'codex-rs/core/tests/suite/mod.rs'
-            tests = @(
-              'suite::guardian_review::guardian_denial_rejects_tool_call_with_rationale::legacy_fallback',
-              'suite::guardian_review::guardian_denial_rejects_tool_call_with_rationale::otel_enabled',
-              'suite::guardian_review::guardian_denial_rejects_tool_call_with_rationale::catalog_override',
-              'suite::guardian_review::guardian_denial_rejects_tool_call_with_rationale::empty_override'
-            )
-          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'unrun-coverage.json') -Encoding utf8
+          if (($accountPlans | ForEach-Object { $_.names.Count } | Measure-Object -Sum).Sum -ne 11) { throw 'Expected eleven account cases.' }
+          $accountFilter = ($accountPlans | ForEach-Object { $_.filter }) -join ' | '
+          $plans = @(@{ label = 'ordinary-workspace'; filter = "not ($accountFilter)"; threads = 2 }) + $accountPlans
           $nextestVersion = @(& cargo nextest --version)
-          if ($LASTEXITCODE -ne 0 -or $nextestVersion.Count -eq 0 -or $nextestVersion[0] -notmatch '^cargo-nextest 0\.9\.143(?:\s|$)') {
-            throw 'This pilot requires exactly cargo-nextest 0.9.143.'
-          }
-          # Custom profiles do not inherit junit.path. Supply an explicit CI-only
-          # report path without modifying the source checkout's nextest config.
+          if ($LASTEXITCODE -ne 0 -or $nextestVersion[0] -notmatch '^cargo-nextest 0\.9\.143(?:\s|$)') { throw 'Exactly nextest 0.9.143 is required.' }
           $junit = Join-Path $env:PILOT_ROOT 'junit.xml'
           $nextestConfig = Join-Path $env:PILOT_ROOT 'nextest-ci.toml'
           @(
@@ -305,165 +364,179 @@ jobs:
             'store-success-output = false'
             'store-failure-output = false'
           ) | Set-Content -LiteralPath $nextestConfig -Encoding utf8
-          $nextestConfigArg = "codex-windows-isolated:$nextestConfig"
+          $base = @('--tool-config-file', "codex-windows-isolated:$nextestConfig", '--profile', 'local',
+            '--locked', '--cargo-profile', 'dev-small', '--features', 'codex-v8-poc/sandbox',
+            '--workspace', '--exclude', 'codex-voice-host', '--run-ignored', 'default', '--ignore-default-filter')
           @{
-            cargo = (& cargo --version)
-            rustc = (& rustc -Vv) -join "`n"
-            nextest = $nextestVersion
+            source_sha = $env:SOURCE_SHA; workflow_sha = $env:GITHUB_SHA; base_arguments = $base
+            build_jobs = $env:CARGO_BUILD_JOBS; incremental = $env:CARGO_INCREMENTAL
+            nextest = $nextestVersion; cargo = (& cargo --version); rustc = (& rustc -Vv) -join [Environment]::NewLine
+            just = (& just --version); python = (& python --version); ripgrep = @(& rg --version); dotslash = @(& dotslash --version)
             nextest_tool_config_sha256 = (Get-FileHash -LiteralPath $nextestConfig -Algorithm SHA256).Hash
-            junit_path = $junit
-            just = (& just --version)
-            python = (& python --version)
-          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'tool-versions.json') -Encoding utf8
-          # Core's integration harness discovers this helper for catalogue/runtime
-          # fidelity. Build only this same-source helper, not CLI or account setup binaries.
-          $helper = @{
-            name = 'codex-code-mode-host'; source_sha = $env:SOURCE_SHA
-            v8_setup_outcome = $env:V8_SETUP_OUTCOME; ready = $false
-            build_exit_code = $null; path = $null; sha256 = $null; problem = $null
-          }
-          foreach ($name in @('CARGO_BIN_EXE_codex-code-mode-host', 'CARGO_BIN_EXE_codex_code_mode_host')) {
-            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
-          }
-          Save-DiskObservation 'helper-build'
-          if ($env:V8_SETUP_OUTCOME -eq 'success') {
-            $buildLog = Join-Path $env:PILOT_ROOT 'helper-build.log'
-            try {
-              & cargo build --locked --profile dev-small -p codex-code-mode-host --bin codex-code-mode-host 2>&1 | Tee-Object -FilePath $buildLog
-              $helper.build_exit_code = $LASTEXITCODE
-              if ($helper.build_exit_code -ne 0) { throw "Same-source code-mode helper build failed with exit $($helper.build_exit_code)." }
-              $helper.path = (Resolve-Path -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'dev-small/codex-code-mode-host.exe')).Path
-              $targetRoot = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR).TrimEnd('\') + '\'
-              if (-not ([IO.Path]::GetFullPath($helper.path)).StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
-                throw 'Helper executable escaped this pilot target directory.'
-              }
-              $helper.sha256 = (Get-FileHash -LiteralPath $helper.path -Algorithm SHA256).Hash
-              foreach ($name in @('CARGO_BIN_EXE_codex-code-mode-host', 'CARGO_BIN_EXE_codex_code_mode_host')) {
-                [Environment]::SetEnvironmentVariable($name, $helper.path, 'Process')
-              }
-              $helper.ready = $true
-            } catch {
-              $helper.problem = $_.Exception.Message
-              if ($helper.problem.Length -gt 300) { $helper.problem = $helper.problem.Substring(0, 300) }
-            } finally {
-              Save-DiagnosticTail $buildLog 'helper-build-tail'
+            v8_archive_sha256 = (Get-FileHash -LiteralPath $env:RUSTY_V8_ARCHIVE -Algorithm SHA256).Hash
+            v8_binding_sha256 = (Get-FileHash -LiteralPath $env:RUSTY_V8_SRC_BINDING_PATH -Algorithm SHA256).Hash
+            account_allowlist_source = '5cae58177c3e99376b905f3744bc4630f9247e6c:.github/workflows/rust-ci.yml'
+            ignored_policy = 'normal default: listed and retained, not executed'
+            exclusions = @('codex-voice-host: matching native SDK absent')
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'campaign.json') -Encoding utf8
+
+          Save-DiskObservation 'workspace-helper-build'
+          $helperMessages = Join-Path $env:PILOT_ROOT 'helper-build.jsonl'
+          $helperLog = Join-Path $env:PILOT_ROOT 'helper-build.log'
+          & cargo build --workspace --exclude codex-voice-host --bins --locked --profile dev-small --features codex-v8-poc/sandbox --message-format json 1> $helperMessages 2> $helperLog
+          $helperExit = $LASTEXITCODE
+          Save-DiagnosticTail $helperLog 'helper-build-tail'
+          if ($helperExit -ne 0) { throw "Workspace helper build failed with exit $helperExit." }
+          $helpers = @{}
+          foreach ($line in Get-Content -LiteralPath $helperMessages) {
+            $message = $line | ConvertFrom-Json -AsHashtable
+            if ($message['reason'] -eq 'compiler-artifact' -and $message['target']['kind'] -contains 'bin' -and $message['executable']) {
+              $helpers[$message['target']['name']] = @{ path = $message['executable']; package_id = $message['package_id'] }
             }
-          } else {
-            $helper.problem = 'Checksum-verified V8 setup did not succeed; Core groups remain unqualified.'
           }
-          $helper | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'helper-build.json') -Encoding utf8
-          # Preparation is group-local: failed Core/V8/helper preparation must not
-          # prevent independent native fixtures from running or retaining receipts.
-          $selected = @()
-          $preparation = @()
-          $binaryHashes = @{}
-          foreach ($plan in $plans) {
-            Save-DiskObservation "list-$($plan.label)"
-            $filter = ($plan.names | ForEach-Object { "test(=$_)"} ) -join ' | '
-            $plan.arguments = @('--tool-config-file', $nextestConfigArg, '--profile', 'local', '--locked', '--cargo-profile', 'dev-small', '--run-ignored', 'default', '-p', $plan.package) + $plan.target + @('-E', $filter)
-            $plan.prepared = $false
-            $plan.list_exit_code = $null
-            $plan.preparation_problem = $null
-            $inventoryPath = Join-Path $env:PILOT_ROOT "$($plan.label)-inventory.json"
-            $listLog = Join-Path $env:PILOT_ROOT "$($plan.label)-list.log"
-            try {
-              if ($plan.requires_v8 -and $env:V8_SETUP_OUTCOME -ne 'success') { throw 'Required checksum-verified V8 setup failed.' }
-              if ($plan.requires_code_mode_host -and -not $helper.ready) { throw 'Required same-source code-mode helper is unavailable.' }
-              & cargo nextest list @($plan.arguments) --message-format json 1> $inventoryPath 2> $listLog
-              $plan.list_exit_code = $LASTEXITCODE
-              if ($plan.list_exit_code -ne 0) { throw "Listing/build failed for $($plan.label); this group will not execute." }
-              $inventory = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json -AsHashtable
-              $cases = @(Get-SelectedCases $inventory $plan)
-              $groupBinaryHashes = @{}
-              foreach ($path in ($cases.binary_path | Sort-Object -Unique)) {
-                $targetRoot = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR).TrimEnd('\') + '\'
-                if (-not ([IO.Path]::GetFullPath($path)).StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
-                  throw 'Test executable escaped this pilot target directory.'
-                }
-                $groupBinaryHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-              }
-              $plan.caseIdentities = @($cases | ForEach-Object { @{ classname = $_.binary_id; name = $_.test } })
-              foreach ($entry in $groupBinaryHashes.GetEnumerator()) { $binaryHashes[$entry.Key] = $entry.Value }
-              $selected += $cases
-              $plan.prepared = $true
-            } catch {
-              $plan.preparation_problem = $_.Exception.Message
-              if ($plan.preparation_problem.Length -gt 300) { $plan.preparation_problem = $plan.preparation_problem.Substring(0, 300) }
-            } finally {
-              Save-DiagnosticTail $listLog "$($plan.label)-compile-tail"
-            }
-            $preparation += @{ group = $plan.label; expected_tests = $plan.names.Count; prepared = $plan.prepared; list_exit_code = $plan.list_exit_code; problem = $plan.preparation_problem }
-            $preparation | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'preparation.json') -Encoding utf8
+          foreach ($name in @('codex', 'codex-code-mode-host', 'codex-windows-sandbox-setup', 'codex-command-runner', 'codex-windows-managed-deny-probe')) {
+            if (-not $helpers.ContainsKey($name)) { throw "Required same-source helper was not built: $name" }
           }
-          if (@($plans | Where-Object { -not $_.prepared }).Count -eq 0 -and $selected.Count -ne 23) {
-            throw 'Prepared groups must total exactly 23 selected, nonignored tests.'
-          }
-          $selected | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'selected-tests.json') -Encoding utf8
-          $binaryHashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'test-binary-hashes.json') -Encoding utf8
-          $results = @()
-          # The CI-only config binds every invocation to this exact report path.
-          foreach ($plan in $plans) {
-            Save-DiskObservation "run-$($plan.label)"
-            if (-not $plan.prepared) {
-              $results += @{ group = $plan.label; expected_tests = $plan.names.Count; selected_tests = 0; prepared = $false; exit_code = $null; junit_present = $false; junit_valid = $false; junit_problem = $plan.preparation_problem }
-              $results | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'results.json') -Encoding utf8
-              continue
+          foreach ($entry in $helpers.GetEnumerator()) {
+            foreach ($key in @($entry.Key, $entry.Key.Replace('-', '_')) | Select-Object -Unique) {
+              [Environment]::SetEnvironmentVariable("CARGO_BIN_EXE_$key", $entry.Value.path, 'Process')
             }
-            if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
-            $log = Join-Path $env:PILOT_ROOT "$($plan.label)-run.log"
-            $startedUtc = [DateTime]::UtcNow
-            $exit = $null
-            $runProblem = $null
-            try {
-              & just test @($plan.arguments) --test-threads 1 --retries 0 2>&1 | Tee-Object -FilePath $log
-              $exit = $LASTEXITCODE
-            } catch {
-              $runProblem = $_.Exception.Message
-              if ($runProblem.Length -gt 300) { $runProblem = $runProblem.Substring(0, 300) }
-            }
-            Save-DiagnosticTail $log "$($plan.label)-run-tail"
-            $hasJunit = Test-Path -LiteralPath $junit -PathType Leaf
-            $validJunit = $false
-            $junitProblem = $null
-            try {
-              Assert-JUnitReport $junit $plan $startedUtc
-              $validJunit = $true
-            } catch {
-              $junitProblem = $_.Exception.Message
-              if ($junitProblem.Length -gt 300) { $junitProblem = $junitProblem.Substring(0, 300) }
-            }
-            if ($hasJunit -and (Get-Item -LiteralPath $junit).Length -le 32MB) {
-              Copy-Item -LiteralPath $junit -Destination (Join-Path $env:PILOT_EVIDENCE "$($plan.label).xml")
-            }
-            $results += @{ group = $plan.label; expected_tests = $plan.names.Count; selected_tests = $plan.caseIdentities.Count; prepared = $true; exit_code = $exit; run_problem = $runProblem; junit_present = $hasJunit; junit_valid = $validJunit; junit_problem = $junitProblem }
-            $results | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'results.json') -Encoding utf8
-          }
-          Save-DiskObservation 'after-tests'
-          if ($results.Count -ne 3 -or @($results | Where-Object { -not $_.prepared -or $_.exit_code -ne 0 -or -not $_.junit_valid }).Count) {
-            throw 'At least one selected group could not prepare, failed, or lacked a fresh, complete, passing JUnit receipt. Other groups were still attempted.'
           }
 
-      - name: Final resource observation
+          Save-DiskObservation 'complete-workspace-inventory'
+          $fullPath = Join-Path $env:PILOT_ROOT 'complete-workspace-inventory.json'
+          $listLog = Join-Path $env:PILOT_ROOT 'complete-workspace-list.log'
+          & cargo nextest list @base --message-format json 1> $fullPath 2> $listLog
+          $listExit = $LASTEXITCODE
+          Save-DiagnosticTail $listLog 'complete-workspace-list-tail'
+          if ($listExit -ne 0) { throw "Complete workspace inventory failed with exit $listExit." }
+          $full = Read-Inventory $fullPath -Full
+          Copy-Item -LiteralPath $fullPath -Destination (Join-Path $env:PILOT_EVIDENCE 'complete-workspace-inventory.json')
+          $requiredRegression = @($full.selected | Where-Object {
+            $_.package -eq 'codex-windows-sandbox' -and $_.test -eq 'unified_exec::tests::legacy_workspace_write_delete_is_limited_to_writable_roots'
+          })
+          if ($requiredRegression.Count -ne 1) { throw 'The unresolved deletion-boundary test must remain selected.' }
+          $allPlanned = @()
+          foreach ($plan in $plans) {
+            $plan.arguments = $base + @('-E', $plan.filter)
+            $inventoryPath = Join-Path $env:PILOT_ROOT "$($plan.label)-inventory.json"
+            $listLog = Join-Path $env:PILOT_ROOT "$($plan.label)-list.log"
+            & cargo nextest list @($plan.arguments) --message-format json 1> $inventoryPath 2> $listLog
+            $listExit = $LASTEXITCODE
+            Save-DiagnosticTail $listLog "$($plan.label)-list-tail"
+            if ($listExit -ne 0) { throw "Group inventory failed for $($plan.label)." }
+            $plan.cases = (Read-Inventory $inventoryPath).selected
+            if ($plan.label -ne 'ordinary-workspace') {
+              $expected = @($full.selected | Where-Object {
+                $_.package -eq $plan.package -and $_.binary -eq $plan.binary -and $plan.names -ccontains $_.test
+              })
+              if ($expected.Count -ne $plan.names.Count) { throw "Missing exact account allowlist member in $($plan.label)." }
+              Assert-SameCases $expected $plan.cases
+            }
+            $plan.inventory_sha256 = (Get-FileHash -LiteralPath $inventoryPath -Algorithm SHA256).Hash
+            $allPlanned += $plan.cases
+          }
+          Assert-SameCases $full.selected $allPlanned
+          if (@($plans[0].cases | Where-Object { $_.test -eq $requiredRegression[0].test }).Count -ne 1) {
+            throw 'Deletion-boundary regression is not in the ordinary complement.'
+          }
+          @{
+            source_sha = $env:SOURCE_SHA; listed = $full.listed; selected_count = $full.selected.Count
+            ignored_count = $full.ignored.Count; ignored = $full.ignored; plans = $plans
+            full_inventory_sha256 = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash
+          } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'selected-tests.json') -Encoding utf8
+
+          $targetRoot = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR).TrimEnd('\') + '\'
+          $binaryHashes = @{}
+          foreach ($path in @($full.selected.binary_path + $helpers.Values.path | Sort-Object -Unique)) {
+            if (-not ([IO.Path]::GetFullPath($path)).StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
+              throw 'Executable escaped this campaign target directory.'
+            }
+            $binaryHashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+          }
+          foreach ($directory in @($full.selected.binary_path | ForEach-Object { Split-Path -Parent $_ } | Sort-Object -Unique)) {
+            $resources = Join-Path $directory 'codex-resources'
+            New-Item -ItemType Directory -Path $resources -Force | Out-Null
+            foreach ($name in @('codex-windows-sandbox-setup', 'codex-command-runner')) {
+              Copy-Item -LiteralPath $helpers[$name].path -Destination (Join-Path $resources "$name.exe") -Force
+            }
+          }
+          @{ source_sha = $env:SOURCE_SHA; helpers = $helpers; sha256_by_path = $binaryHashes } |
+            ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'binary-hashes.json') -Encoding utf8
+          $results = @()
+          # Invocations are sequential. The ordinary complement has two slots;
+          # eleven shared-account cases run last with one slot, so account resets
+          # cannot overlap across these groups.
+          foreach ($plan in $plans) {
+            $result = @{
+              group = $plan.label; selected_tests = $plan.cases.Count; exit_code = $null
+              receipt_valid = $false; outcome_passed = $false; report = $null; problem = $null
+            }
+            $log = Join-Path $env:PILOT_ROOT "$($plan.label)-run.log"
+            $startedUtc = $null
+            try {
+              if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
+              Save-DiskObservation "run-$($plan.label)"
+              $startedUtc = [DateTime]::UtcNow
+              & just test @($plan.arguments) --test-threads $plan.threads --retries 0 2>&1 | Tee-Object -FilePath $log
+              $result.exit_code = $LASTEXITCODE
+              $result.report = Read-JUnitReport $junit $plan.cases $startedUtc
+              $result.receipt_valid = $true
+              $result.outcome_passed = ($result.exit_code -eq 0 -and $result.report.passing)
+            } catch {
+              $result.problem = $_.Exception.Message.Substring(0, [Math]::Min(500, $_.Exception.Message.Length))
+            } finally {
+              Save-DiagnosticTail $log "$($plan.label)-run-tail"
+              if ($null -ne $startedUtc -and (Test-Path -LiteralPath $junit -PathType Leaf)) {
+                $reportFile = Get-Item -LiteralPath $junit
+                if ($reportFile.Length -le 32MB -and $reportFile.LastWriteTimeUtc -ge $startedUtc) {
+                  Copy-Item -LiteralPath $junit -Destination (Join-Path $env:PILOT_EVIDENCE "$($plan.label).xml") -Force
+                }
+              }
+              $results += $result
+              $results | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'results.json') -Encoding utf8
+            }
+          }
+          Save-DiskObservation 'after-tests'
+          if (@($results | Where-Object { -not $_.receipt_valid -or -not $_.outcome_passed }).Count) {
+            throw 'One or more groups failed, were incomplete, or lacked fresh structurally valid complete receipts. Other group results were retained.'
+          }
+
+      - name: Final resource and evidence observation
         if: always()
         run: |
-          $root = Join-Path $env:RUNNER_TEMP "cwclosure23-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwspace-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $evidence = Join-Path $root 'evidence'
           if (Test-Path -LiteralPath $evidence) {
             Get-PSDrive -PSProvider FileSystem | Select-Object Name, Free, Used |
               ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'final-disks.json') -Encoding utf8
+            $files = @(Get-ChildItem -LiteralPath $evidence -File | ForEach-Object {
+              @{ name = $_.Name; bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+            })
+            $files | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'evidence-hashes.json') -Encoding utf8
           }
-          # No global uninstall or broad host cleanup: the GitHub VM is discarded.
-          # No test homes, .sandbox-secrets, profiles, config or credentials are retained.
+          # No global uninstall: discard the VM and its account/ACL effects.
+          # No test homes, .sandbox-secrets, profiles, config or credentials retained.
 
-      - name: Retain only qualification evidence
+      - name: Retain only bounded qualification evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: windows-isolated-closure-and-legacy-23-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-supported-workspace-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/cwclosure23-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
-            ${{ runner.temp }}/cwclosure23-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
-            ${{ runner.temp }}/cwclosure23-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
-            ${{ runner.temp }}/cwclosure23-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
+            ${{ runner.temp }}/cwspace-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
+            ${{ runner.temp }}/cwspace-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
+            ${{ runner.temp }}/cwspace-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
+            ${{ runner.temp }}/cwspace-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
           retention-days: 1
           if-no-files-found: warn
+
+      - name: Fail closed on incomplete candidate or campaign
+        if: always()
+        env:
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+          QUALIFICATION_OUTCOME: ${{ steps.qualification.outcome }}
+        run: |
+          if ($env:CANDIDATE_OUTCOME -ne 'success' -or $env:QUALIFICATION_OUTCOME -ne 'success') {
+            throw 'Candidate build or supported Windows workspace qualification did not pass. No deployment or approval is implied.'
+          }
