@@ -97,6 +97,44 @@ function Assert-CodexDevPackageExecutableTargets {
     }
 }
 
+function Remove-CodexDevSmokeHome {
+    param(
+        [string]$SmokeBase,
+        [string]$SmokeHome
+    )
+
+    try {
+        $base = [System.IO.Path]::GetFullPath($SmokeBase).TrimEnd([char[]]"\/")
+        $candidateHome = [System.IO.Path]::GetFullPath($SmokeHome).TrimEnd([char[]]"\/")
+        $boundary = "$base$([System.IO.Path]::DirectorySeparatorChar)"
+        # The caller creates one direct GUID child; never traverse an intermediate directory.
+        if (-not $candidateHome.StartsWith($boundary, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([System.IO.Path]::GetDirectoryName($candidateHome), $base, [System.StringComparison]::OrdinalIgnoreCase) -or
+            [System.IO.Path]::GetFileName($candidateHome) -notmatch '^[0-9a-f]{32}$') {
+            throw "Refusing smoke cleanup outside the owned base's direct GUID children."
+        }
+        $baseItem = Get-Item -LiteralPath $base -ErrorAction Stop
+        $candidateHomeItem = Get-Item -LiteralPath $candidateHome -ErrorAction Stop
+        foreach ($item in @($baseItem, $candidateHomeItem)) {
+            if (-not $item.PSIsContainer -or
+                ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing smoke cleanup through a non-directory or reparse point."
+            }
+        }
+        $resolvedBase = [System.IO.Path]::GetFullPath($baseItem.FullName).TrimEnd([char[]]"\/")
+        $resolvedHome = [System.IO.Path]::GetFullPath($candidateHomeItem.FullName).TrimEnd([char[]]"\/")
+        if (-not [string]::Equals($base, $resolvedBase, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($candidateHome, $resolvedHome, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not $resolvedHome.StartsWith($boundary, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Resolved smoke cleanup target is outside the expected owned base."
+        }
+        Remove-Item -LiteralPath $resolvedHome -Recurse -ErrorAction Stop
+    } catch {
+        # Cleanup is best effort: retain remaining files and never replace a smoke failure.
+        Write-Warning "Smoke home cleanup incomplete; remaining files retained at '$SmokeHome': $($_.Exception.Message)" -WarningAction Continue
+    }
+}
+
 function Get-CodexDevPackageInfo {
     param(
         [string]$PackageDirectory,
@@ -168,10 +206,7 @@ function Get-CodexDevPackageInfo {
         } finally {
             if ($null -eq $oldCodexHome) { Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue } else { $env:CODEX_HOME = $oldCodexHome }
             if ($null -eq $oldSqliteHome) { Remove-Item Env:CODEX_SQLITE_HOME -ErrorAction SilentlyContinue } else { $env:CODEX_SQLITE_HOME = $oldSqliteHome }
-            $resolvedSmoke = [System.IO.Path]::GetFullPath($smokeHome)
-            if ($resolvedSmoke.StartsWith($smokeBase, [System.StringComparison]::OrdinalIgnoreCase)) {
-                Remove-Item -LiteralPath $resolvedSmoke -Recurse -Force -ErrorAction SilentlyContinue
-            }
+            Remove-CodexDevSmokeHome -SmokeBase $smokeBase -SmokeHome $smokeHome
         }
     }
     return [pscustomobject]@{
