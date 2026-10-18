@@ -922,9 +922,16 @@ enum LegacyTtyDescendantLifecycle {
     Preserve,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum LegacyTtyInputLifetime {
+    CloseAfterSpawn,
+    KeepOpenUntilSessionDrop,
+}
+
 async fn assert_legacy_tty_descendant_lifecycle(
     pwsh: &Path,
     lifecycle: LegacyTtyDescendantLifecycle,
+    input_lifetime: LegacyTtyInputLifetime,
 ) {
     let cwd = sandbox_cwd();
     let fixture = TempDir::new_in(&cwd).expect("create descendant lifecycle fixture");
@@ -961,6 +968,10 @@ async fn assert_legacy_tty_descendant_lifecycle(
         &parent_tail,
     );
     let permission_profile = PermissionProfile::workspace_write();
+    let stdin_open = match input_lifetime {
+        LegacyTtyInputLifetime::CloseAfterSpawn => false,
+        LegacyTtyInputLifetime::KeepOpenUntilSessionDrop => true,
+    };
     let spawned = spawn_windows_sandbox_session_legacy(
         &permission_profile,
         workspace_roots_for(cwd.as_path()).as_slice(),
@@ -977,7 +988,7 @@ async fn assert_legacy_tty_descendant_lifecycle(
         &[],
         &[],
         /*tty*/ true,
-        /*stdin_open*/ false,
+        stdin_open,
     )
     .await
     .expect("spawn legacy sandbox ConPTY lifecycle test");
@@ -1075,9 +1086,43 @@ fn legacy_tty_job_terminates_and_preserves_descendants() {
     };
     let _guard = legacy_process_test_guard();
     current_thread_runtime().block_on(async move {
-        assert_legacy_tty_descendant_lifecycle(&pwsh, LegacyTtyDescendantLifecycle::Terminate)
-            .await;
-        assert_legacy_tty_descendant_lifecycle(&pwsh, LegacyTtyDescendantLifecycle::Preserve).await;
+        assert_legacy_tty_descendant_lifecycle(
+            &pwsh,
+            LegacyTtyDescendantLifecycle::Terminate,
+            LegacyTtyInputLifetime::CloseAfterSpawn,
+        )
+        .await;
+        assert_legacy_tty_descendant_lifecycle(
+            &pwsh,
+            LegacyTtyDescendantLifecycle::Preserve,
+            LegacyTtyInputLifetime::CloseAfterSpawn,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn legacy_tty_job_with_open_stdin_terminates_and_preserves_descendants() {
+    let Some(pwsh) = pwsh_path() else {
+        eprintln!("skipping sandbox ConPTY lifecycle test: PowerShell 7 is not installed");
+        return;
+    };
+    let _guard = legacy_process_test_guard();
+    current_thread_runtime().block_on(async move {
+        // A distinct control changes only input lifetime; the closed-input arm
+        // above remains independently selected with the same lifecycle oracles.
+        assert_legacy_tty_descendant_lifecycle(
+            &pwsh,
+            LegacyTtyDescendantLifecycle::Terminate,
+            LegacyTtyInputLifetime::KeepOpenUntilSessionDrop,
+        )
+        .await;
+        assert_legacy_tty_descendant_lifecycle(
+            &pwsh,
+            LegacyTtyDescendantLifecycle::Preserve,
+            LegacyTtyInputLifetime::KeepOpenUntilSessionDrop,
+        )
+        .await;
     });
 }
 
