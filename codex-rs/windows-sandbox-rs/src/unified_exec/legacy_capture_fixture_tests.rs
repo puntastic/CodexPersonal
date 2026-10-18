@@ -75,12 +75,13 @@ pub(super) fn powershell_no_console_probe(stdio_dir: &Path) -> String {
     // Do not use PowerShell's direct native-command path (&): it can allocate a
     // hidden console in PowerShell itself, changing the state being observed.
     format!(
-        "$consoleProbe = Start-Process -ErrorAction Stop -WindowStyle Hidden -FilePath '{}' -ArgumentList '{CONSOLE_PROBE_TEST}','--exact','--nocapture' -RedirectStandardOutput '{stdout}' -RedirectStandardError '{stderr}' -Wait -PassThru; if ($consoleProbe.ExitCode -ne 0 -or ((Get-Content -ErrorAction Stop -Raw -LiteralPath '{stdout}') -notmatch '{CONSOLE_PROBE_MARKER}')) {{ throw ('native sandbox console probe failed: ' + (Get-Content -Raw -LiteralPath '{stderr}')) }};",
+        "$consoleProbe = Start-Process -ErrorAction Stop -WindowStyle Hidden -FilePath '{}' -ArgumentList '{CONSOLE_PROBE_TEST}','--exact','--ignored','--nocapture' -RedirectStandardOutput '{stdout}' -RedirectStandardError '{stderr}' -Wait -PassThru; if ($consoleProbe.ExitCode -ne 0 -or ((Get-Content -ErrorAction Stop -Raw -LiteralPath '{stdout}') -notmatch '{CONSOLE_PROBE_MARKER}')) {{ throw ('native sandbox console probe failed: ' + (Get-Content -Raw -LiteralPath '{stderr}')) }};",
         powershell_literal(&executable),
     )
 }
 
 #[test]
+#[ignore = "invoked by the sandbox console fixture"]
 fn powershell_parent_has_no_console() {
     // Ordinary test runs are not required to have a console-free parent.
     if std::env::var(CONSOLE_PROBE_ENV).as_deref() != Ok("1")
