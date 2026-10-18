@@ -1,16 +1,17 @@
 # October 18 qualification continuation — not deployment
 
 Continue the shared-runtime arc in [October 16](2026-10-16.md) and the
-[October 17 checkpoint](2026-10-17-host-fixture-checkpoint.md). Ath2075 carries
-the evolving operational hand. Historical package qualification does not cover
-later source changes.
+[October 17 checkpoint](2026-10-17-host-fixture-checkpoint.md). Ath2075 retains
+the history and routes to the compact current hand, Ath2368. Historical
+package qualification does not cover later source changes.
 
 ## Current footing
 
-- Latest code checkpoint: `988f24639c26960426cea0de51f90c81b407f47d`, clean and
-  pushed to `personal/codex/shared-runtime-20261016` before this report update.
-  The completed narrow run below tested `d2e83ecdb...`; only a test-prerequisite
-  correction and documentation followed it.
+- Latest code checkpoint: `8dd65c2e81e8544ccf4e5e4b3819482900d35c67`, pushed
+  to `personal/codex/shared-runtime-20261016`. Its test-only selected-token
+  observer has scoped lint and four pure-test passes, not native qualification.
+  The full campaign remains frozen at `988f24639c...`; latest completed native
+  qualification tested DACL-diagnostic source `b103d6a796...`.
 - `personal` is `puntastic/CodexPersonal`; `origin` remains read-only upstream.
   No main integration or installation occurred.
 - The active Desktop CLI remains 0.161.0 at
@@ -19,15 +20,18 @@ later source changes.
 - No live peer policy, persistent delegate, directed grant, configuration
   change, restart or model-driven native-message trial was created.
 - Latest completed qualification:
-  [run 39128289847](https://github.com/puntastic/CodexPersonal/actions/runs/39128289847),
-  workflow `6606b189666d458a4dd3ecc0eef4ac41e7df7de6`, source `d2e83ecdb...`.
-  Both Core groups passed; the native group retained two failures. A broader
-  supported-workspace run is being prepared, not yet claimed executed here.
+  [run 39137145645](https://github.com/puntastic/CodexPersonal/actions/runs/39137145645),
+  workflow `bbe66632f26b5566124c6f653c90ea07c32dd29f`, source `b103d6a796...`:
+  7/8 passed, including the corrected original TTY fixture. Deletion remains
+  failed, but intended file grants/inheritance are now directly observed.
+  The full campaign is executing 21,360 ordinary cases, with eleven exact
+  account-sensitive cases planned afterward. This is live progress, not an
+  aggregate pass or completed campaign.
 
 The workflow replacement exists only on
 `codex/windows-isolated-tests-20261017`. **Do not merge that replacement into
 main.** It records source and workflow identities separately, checks exact
-test inventory, uses serial execution without retries, and preserves failed
+test inventory, uses declared execution concurrency without retries, and preserves failed
 group receipts. It must run only on a disposable GitHub-hosted Windows VM.
 
 ## Isolation correction
@@ -38,11 +42,13 @@ helper that attempts to adjust the NUL device ACL. A temporary `CODEX_HOME`
 does not isolate those effects. The native descendant fixture's workspace was
 the checkout, not only its temporary marker directory.
 
-Source inspection does not establish which ACL operations actually succeeded.
+For the earlier local runs, source inspection does not establish which ACL operations actually succeeded.
 There was no before/after ACL audit, and the NUL helper's unusual path spelling
 and ignored return further limit claims about successful device targeting.
 Do not report either a verified permission change or verified unchanged ACLs.
 No corrective ACL writes or permission-bypassing cleanup were attempted.
+The later disposable-VM DACL readback below does not retroactively audit that
+local host.
 
 The local integration build was interrupted before an observed Nextest start
 or fresh JUnit. Its private prefix is `20261018-capture-integration`. A zero
@@ -69,6 +75,7 @@ populations and must not be added into a unique test total.
 | `45dcbb74-99d3-47a1-a97f-7e290933215d`, `d2e83ecdb` | 8 Core library cases passed in 2.692 s | Provenance, captured-turn state, diagnostic preservation and ordinary/FullAccess controls. |
 | `9b9018e1-e9fb-4c88-8f42-e0b39b91b94c`, `d2e83ecdb` | 6 Core integration cases passed in 10.791 s | Five child/parent feedback variants plus retention, including both enabled/disabled arms. |
 | `4967a78b-b7c4-44b6-b24b-9b8536e8740b`, `d2e83ecdb` | 9 native/buffer cases: 7 passed, 2 failed | The open-input lifecycle control passed in 2.758 s. Closed-input readiness and deletion positive controls still failed. |
+| `f379145b-f8cd-4574-ad40-7b257162ba54`, `b103d6a796` | 8 native/pure cases: 7 passed, 1 failed, 3.587 s | Corrected original TTY passed in 2.768 s. Deletion still failed; complete pre/post DACLs distinguish grant installation from effective access. |
 
 Exact JUnit SHA256 values, in table order:
 
@@ -78,6 +85,7 @@ Exact JUnit SHA256 values, in table order:
 - `c9baebc2d65617b26da33d90a8b48ec20ccf8e729e5848837249dd2e475d1944`
 - `c76140b8776d639b56a63bcc39e70b378bb3a4072d26fb86446e0c86668cc074`
 - `6f348b2a36921100e06da4ac0d9b521ce699d81e374ca0005fa449b6af399d26`
+- `9b8aafeea9c04ac4f575db8444bbbdaac3a42d3e321a0708757c61ae82de05d1`
 
 The local failures comprised one expected enabled-retention snapshot and two
 Guardian closure-message assertions. The retention case reached both modes
@@ -267,8 +275,68 @@ the unchanged deletion test and the corrected TTY lifecycle fixture. It uses
 a separate disposable VM/concurrency group, a 45-minute ceiling and no Core,
 V8, workspace or package build. Both fixed DACL phases/18 rows have a bounded
 projection retained separately from later log output. The original full
-campaign continues at its frozen source and workflow. Neither new run has a
-completed result at this checkpoint.
+campaign continues at its frozen source and workflow. The small run's result
+is now in the table and interpretation below; the full run remains unfinished.
+
+## Installed DACLs versus selected-token access
+
+All eighteen readback rows in run `39137145645` are complete and untruncated.
+Each positive root gained an allow ACE `0x001301bf`, flags `0x03`; its existing
+file inherited the same SID/mask with flags `0x10`. Outside paths were unchanged;
+`.git` gained the expected deny entries and inherited allow. No previous ACE
+disappeared. Missing allow installation/inheritance is therefore substantially
+weakened, not silently assumed from successful spawn.
+
+An independent .NET `RawAcl` decode matched the private decoder for all 147
+ACEs' type, mask, flags and SID across the eighteen rows. That is a binary
+interpretation cross-check, not an independent native access experiment.
+The 157-line private decoder passed 21 invented cases; review caught and repaired
+duplicate-key last-wins interpretation before real-data use. Its hash is
+`c379ba8243e25fa302b5ac341359fc88b9fa91021dd4c4861f44bf67bd38c282`.
+
+The directories have Users add-file/add-subdirectory bits `0x2`/`0x4`, while
+seeded files have Users read access. Marker creation can therefore coexist
+with inability to delete existing files. A normal-user/group grant gap is the
+leading hypothesis, not a diagnosis: actual token user, group attributes and
+restricting membership have not yet been observed. No production permission
+repair or token-flag change is justified by the DACLs alone.
+
+Original small evidence has Ath custody, with hash/size-bound upload and exact
+metadata readback. The DACL projection also passed a full GET/hash round trip:
+
+- DACL projection, 11,312 bytes:
+  `ath-asset:sha256:b50f1d8c371e807d581d911cbfb23897beafc9c26d5cdf2078c0af95f46b183f`.
+- Exact JUnit, 15,051 bytes:
+  `ath-asset:sha256:9b8aafeea9c04ac4f575db8444bbbdaac3a42d3e321a0708757c61ae82de05d1`.
+
+Ath2368 links both; expiring transfer URLs, homes and sandbox secrets are not
+retained. A local OneDrive path alone is not an external-backup claim.
+
+The next test-only observer at `8dd65c2e81...` runs synchronously after ACL
+preparation and before launch, borrowing the actual selected primary token and
+existing root SIDs through an exact-cwd, one-shot thread-local guard. It reads
+bounded token metadata and uses a scoped impersonation duplicate for explicit
+`AccessCheck` queries against actual owner/group/DACL descriptors on the same
+nine fixture paths. It does not impersonate a thread, print owner/group names,
+query SACLs, reopen a PID, construct another restricted token, change flags,
+mutate grants or extend the original token's lifetime. Query failure and access
+denial remain separate. It is not a running-child token query, a CMD-operation
+oracle, or timing-neutral work.
+
+Independent review repaired two diagnostic-only semantics: restricting SIDs
+are always enabled for their check despite raw zero attributes, and large SID
+authorities require canonical hexadecimal notation. Final narrow review found
+no remaining issue. Full formatting/scoped `just fix` passed in 15.79 s. The
+four pure TLS/format tests passed in 0.073 s, Nextest
+`477632c6-fa34-4d26-a6d0-469c270c0439`, 297 filtered, no errors/retries; JUnit
+`6daa8786b6f6cf3548f5a5623dab0cd176c506c87be839c9d41c0c32cae3266b`.
+These do not invoke native token/descriptor queries or `AccessCheck`. Native
+qualification is running as disposable slice
+[39140858454](https://github.com/puntastic/CodexPersonal/actions/runs/39140858454),
+workflow `b413fcb5e7205e696cb8865afbc0011c3ed64100`, code
+`8dd65c2e81e8544ccf4e5e4b3819482900d35c67`. The earlier eight cases plus these
+four pure tests make an exact twelve-case selection. The original full campaign
+continues separately; no new native result is claimed yet.
 
 ## Continuation and release boundary
 
