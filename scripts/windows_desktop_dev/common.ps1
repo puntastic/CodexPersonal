@@ -153,7 +153,9 @@ function Invoke-CodexDevGit {
 function Get-CodexDevGitState {
     $head = ([string](Invoke-CodexDevGit @("rev-parse", "HEAD") | Select-Object -First 1)).Trim()
     $shortHead = ([string](Invoke-CodexDevGit @("rev-parse", "--short=12", "HEAD") | Select-Object -First 1)).Trim()
-    $branch = ([string](Invoke-CodexDevGit @("branch", "--show-current") | Select-Object -First 1)).Trim()
+    # Detached HEAD legitimately emits no rows. Unlike a cast of that empty
+    # pipeline result, -join produces a string on which Trim is safe.
+    $branch = ((Invoke-CodexDevGit @("branch", "--show-current") | Select-Object -First 1) -join "").Trim()
     $status = @(Invoke-CodexDevGit @("status", "--porcelain=v1", "--untracked-files=normal"))
     $fingerprint = Get-CodexDevGitVisibleSourceFingerprint -Head $head
     $headAfter = ([string](Invoke-CodexDevGit @("rev-parse", "HEAD") | Select-Object -First 1)).Trim()
