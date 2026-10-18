@@ -66,6 +66,7 @@ pub use settings::reviewer_tool_policy;
 pub use feedback::FailedReviewFeedback;
 pub use feedback::ReviewFeedbackContext;
 pub use feedback::ReviewFeedbackSettings;
+pub use reporting::APPROVAL_LANE_CLOSED_INSTRUCTIONS;
 pub use reporting::ReviewDenials;
 pub use reporting::ReviewMetadata;
 pub use reporting::ReviewReport;

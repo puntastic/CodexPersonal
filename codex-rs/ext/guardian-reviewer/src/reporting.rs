@@ -26,7 +26,9 @@ use crate::GuardianRejectionCircuitBreakerPolicy;
 use crate::GuardianReviewOutcome;
 use crate::ReviewCompletion;
 
-pub(crate) const APPROVAL_LANE_CLOSED_INSTRUCTIONS: &str = concat!(
+/// Host-owned closure feedback. Consumers may protect this fixed block separately
+/// from bounded diagnostic text after checking the captured turn's denial state.
+pub const APPROVAL_LANE_CLOSED_INSTRUCTIONS: &str = concat!(
     "Automatic approval review is closed for the remainder of this turn after repeated denials. ",
     "The denied action was not executed. ",
     "Do not retry it or request another automatic approval in this turn. ",

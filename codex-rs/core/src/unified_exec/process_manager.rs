@@ -335,7 +335,9 @@ async fn finish_deferred_network_approval_for_session(
 
 fn network_approval_error_message(err: ToolError) -> String {
     match err {
-        ToolError::Rejected(message) => message,
+        ToolError::Rejected(message) | ToolError::RejectedWithApprovalLaneClosed(message) => {
+            message
+        }
         ToolError::Codex(err) => err.to_string(),
     }
 }
@@ -1561,6 +1563,9 @@ impl UnifiedExecProcessManager {
             .await
             .map(|result| (result.output, result.deferred_network_approval))
             .map_err(|err| match err {
+                ToolError::RejectedWithApprovalLaneClosed(rejection) => {
+                    UnifiedExecError::ApprovalLaneClosed { rejection }
+                }
                 ToolError::Codex(err) => match err.details() {
                     CodexErrorDetails::Sandbox(SandboxErr::Denied { output, .. }) => {
                         let output = output.as_ref().clone();

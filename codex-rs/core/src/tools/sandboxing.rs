@@ -372,6 +372,9 @@ pub(crate) struct ToolCtx {
 #[derive(Debug)]
 pub(crate) enum ToolError {
     Rejected(String),
+    /// A Guardian-denied exec whose captured turn's automatic approval lane is
+    /// closed. Keep the original rejection intact for non-exec consumers.
+    RejectedWithApprovalLaneClosed(String),
     Codex(CodexErr),
 }
 

@@ -441,7 +441,7 @@ impl ToolEmitter {
                     (event, result)
                 }
             },
-            Err(ToolError::Rejected(msg)) => {
+            Err(ToolError::Rejected(msg) | ToolError::RejectedWithApprovalLaneClosed(msg)) => {
                 // Normalize common rejection messages for exec tools so tests and
                 // users see a clear, consistent phrase.
                 //

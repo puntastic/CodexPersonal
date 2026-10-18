@@ -821,7 +821,10 @@ impl NetworkApprovalService {
         };
         let approval_decision = match approval_result {
             Ok(decision) => decision,
-            Err(ToolError::Rejected(rejection)) => {
+            Err(
+                ToolError::Rejected(rejection)
+                | ToolError::RejectedWithApprovalLaneClosed(rejection),
+            ) => {
                 if let Some(owner_call) = owner_call.as_ref() {
                     self.record_call_outcome(&owner_call.registration_id, rejection);
                 }

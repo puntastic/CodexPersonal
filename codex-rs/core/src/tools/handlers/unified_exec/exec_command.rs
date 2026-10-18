@@ -26,6 +26,7 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::tools::sandboxing::ToolError;
 use crate::unified_exec::ExecCommandRequest;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
@@ -52,8 +53,22 @@ use super::ExecCommandEnvironmentArgs;
 use super::get_command;
 use super::post_unified_exec_tool_use_payload;
 
-// A byte limit is a conservative hard token bound even for byte-fallback tokenizers.
+// Preserve the existing diagnostic content budget; its truncation marker is additional.
 const EXEC_COMMAND_REJECTION_MAX_BYTES: usize = 900;
+// The existing diagnostic truncator adds a u64 character-count marker outside
+// its 900-byte content budget. Keep that treatment unchanged and reserve a
+// separate fixed allowance for host-owned approval-lane feedback.
+const EXEC_COMMAND_REJECTION_MARKER_MAX_BYTES: usize = 64;
+// This complete-fragment byte bound is at most 400 approximate tokens using
+// the shared output accounting, without raising the ordinary rejection budget.
+const EXEC_COMMAND_CLOSED_APPROVAL_MAX_BYTES: usize = 1_600;
+const _: () = assert!(
+    EXEC_COMMAND_REJECTION_MAX_BYTES
+        + EXEC_COMMAND_REJECTION_MARKER_MAX_BYTES
+        + 1
+        + codex_guardian_reviewer::APPROVAL_LANE_CLOSED_INSTRUCTIONS.len()
+        <= EXEC_COMMAND_CLOSED_APPROVAL_MAX_BYTES
+);
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecCommandHandlerOptions {
@@ -458,15 +473,33 @@ impl ExecCommandHandler {
                     hook_command: Some(hook_command),
                 }))
             }
-            Err(err) => {
-                let message = format!("exec_command failed: {err:?}");
-                Err(FunctionCallError::RespondToModel(truncate_middle_chars(
-                    &message,
-                    EXEC_COMMAND_REJECTION_MAX_BYTES,
-                )))
-            }
+            Err(err) => Err(FunctionCallError::RespondToModel(
+                exec_command_error_message(err),
+            )),
         }
     }
+}
+
+fn exec_command_error_message(error: UnifiedExecError) -> String {
+    let (error, approval_lane_closed) = match error {
+        UnifiedExecError::ApprovalLaneClosed { rejection } => (
+            // Preserve the original denial's exact diagnostic treatment, including
+            // configured model feedback and any inline host suffix. A clipped or
+            // duplicated earlier notice is preferable to guessing which text the
+            // host owns and accidentally removing configured instructions.
+            UnifiedExecError::create_process(format!("{:?}", ToolError::Rejected(rejection))),
+            true,
+        ),
+        error => (error, false),
+    };
+    let message = format!("exec_command failed: {error:?}");
+    let mut message = truncate_middle_chars(&message, EXEC_COMMAND_REJECTION_MAX_BYTES);
+    if approval_lane_closed {
+        message.push('\n');
+        message.push_str(codex_guardian_reviewer::APPROVAL_LANE_CLOSED_INSTRUCTIONS);
+        debug_assert!(message.len() <= EXEC_COMMAND_CLOSED_APPROVAL_MAX_BYTES);
+    }
+    message
 }
 
 fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {
@@ -565,3 +598,7 @@ fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool)
         &[("tty", if tty { "true" } else { "false" })],
     );
 }
+
+#[cfg(test)]
+#[path = "exec_command_tests.rs"]
+mod tests;

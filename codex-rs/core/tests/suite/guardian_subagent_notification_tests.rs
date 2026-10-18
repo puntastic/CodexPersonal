@@ -4,6 +4,7 @@ use super::*;
 use codex_config::config_toml::CircuitBreakAction;
 use codex_core::config::Constrained;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_guardian_reviewer::APPROVAL_LANE_CLOSED_INSTRUCTIONS;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -13,22 +14,67 @@ use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use test_case::test_case;
 
-#[test_case(CircuitBreakAction::Strict; "strict_closes_approval_lane")]
-#[test_case(CircuitBreakAction::Default; "default_closes_approval_lane")]
+#[derive(Clone, Copy)]
+enum ClosureFeedback {
+    Default,
+    Custom,
+    Empty,
+    LongRationale,
+}
+
+impl ClosureFeedback {
+    fn instructions(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Custom | Self::LongRationale => Some("Acting-model custom rejection feedback."),
+            Self::Empty => Some(""),
+        }
+    }
+}
+
+#[test_case(CircuitBreakAction::Strict, ClosureFeedback::Default; "strict_closes_approval_lane")]
+#[test_case(CircuitBreakAction::Default, ClosureFeedback::Default; "default_closes_approval_lane")]
+#[test_case(CircuitBreakAction::Strict, ClosureFeedback::Custom; "acting_model_custom_feedback")]
+#[test_case(CircuitBreakAction::Default, ClosureFeedback::Empty; "empty_feedback_override")]
+#[test_case(CircuitBreakAction::Strict, ClosureFeedback::LongRationale; "long_escaped_unicode_rationale")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guardian_circuit_breaker_closes_lane_without_interrupting_child(
     action: CircuitBreakAction,
+    feedback: ClosureFeedback,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     const SAFE_COMPLETION: &str = "Automatic review is closed for this turn; the denied action was not executed. I can finish the safe status report.";
     let server = start_mock_server().await;
+    let rationale = match feedback {
+        ClosureFeedback::LongRationale => "Denied: \"private\\path\"\n雪\u{1b} ".repeat(100),
+        ClosureFeedback::Default | ClosureFeedback::Custom | ClosureFeedback::Empty => {
+            "Action is not authorized.".to_string()
+        }
+    };
     let mut extensions = ExtensionRegistryBuilder::new();
     extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
     let test = test_codex()
-        .with_model_info_override("test-gpt-5.1-codex", |model| {
+        .with_model_info_override("test-gpt-5.1-codex", move |model| {
             model.multi_agent_version = Some(MultiAgentVersion::V2);
-            model.auto_review_model_override = Some(model.slug.clone());
+            if let Some(instructions) = feedback.instructions() {
+                model.auto_review_model_override = Some("gpt-5.6-luna".to_string());
+                model.model_messages.get_or_insert_default().auto_review = Some(
+                    serde_json::from_value(json!({ "rejection_instructions": instructions }))
+                        .expect("acting-model feedback"),
+                );
+            } else {
+                model.auto_review_model_override = Some(model.slug.clone());
+            }
         })
+        .with_model_info_override("gpt-5.6-luna", |model| {
+            model.model_messages.get_or_insert_default().auto_review = Some(
+                serde_json::from_value(json!({
+                    "rejection_instructions": "Reviewer-only feedback must not reach the acting model."
+                }))
+                .expect("reviewer-only feedback"),
+            );
+        })
+        .with_model("test-gpt-5.1-codex")
         .with_extensions(Arc::new(extensions.build()))
         .with_config(move |config| {
             for feature in [
@@ -104,21 +150,30 @@ async fn guardian_circuit_breaker_closes_lane_without_interrupting_child(
             )
             .await,
         );
-        reviews.push(mount_sse_once_match(
-            &server,
-            |request: &wiremock::Request| {
-                decoded_body(request)
-                    .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-                    .is_some_and(|body| body["client_metadata"]["x-openai-subagent"] == "guardian")
-            },
-            sse(vec![
-                ev_assistant_message(
-                    "denied",
-                    r#"{"risk_level":"high","user_authorization":"low","outcome":"deny","rationale":"Action is not authorized."}"#,
-                ),
-                ev_completed("review-denied"),
-            ]),
-        ).await);
+        reviews.push(
+            mount_sse_once_match(
+                &server,
+                |request: &wiremock::Request| {
+                    decoded_body(request)
+                        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                        .is_some_and(|body| {
+                            body["client_metadata"]["x-openai-subagent"] == "guardian"
+                        })
+                },
+                sse(vec![
+                    ev_assistant_message(
+                        "denied",
+                        &json!({
+                            "risk_level": "high", "user_authorization": "low", "outcome": "deny",
+                            "rationale": rationale,
+                        })
+                        .to_string(),
+                    ),
+                    ev_completed("review-denied"),
+                ]),
+            )
+            .await,
+        );
     }
     let fourth = mount_sse_once_match(
         &server,
@@ -198,6 +253,7 @@ async fn guardian_circuit_breaker_closes_lane_without_interrupting_child(
     );
     for pair in assessments.chunks_exact(2) {
         assert_eq!(pair[0].id, pair[1].id);
+        assert_eq!(pair[1].rationale.as_deref(), Some(rationale.as_str()));
     }
     let closure_warnings = warnings
         .iter()
@@ -252,6 +308,44 @@ async fn guardian_circuit_breaker_closes_lane_without_interrupting_child(
         fourth_rejection.contains("nothing was executed"),
         "fourth rejection: {fourth_rejection:?}",
     );
+    for output in [&threshold_rejection, &fourth_rejection] {
+        assert!(output.ends_with(APPROVAL_LANE_CLOSED_INSTRUCTIONS));
+        assert!(
+            output.len() <= 1_600,
+            "closed-lane feedback must remain bounded"
+        );
+        assert!(codex_utils_output_truncation::approx_token_count(output) < 1_000);
+        assert!(!output.contains("Reviewer-only feedback"));
+    }
+    let ordinary_rejection = worker_request(&calls[1])
+        .function_call_output_text("first")
+        .expect("ordinary denial reaches the acting model before lane closure");
+    assert!(!ordinary_rejection.contains("closed for the remainder of this turn"));
+    assert!(!ordinary_rejection.contains("Reviewer-only feedback"));
+    if let Some(instructions) = feedback.instructions() {
+        assert!(ordinary_rejection.contains(instructions));
+        assert!(
+            !ordinary_rejection.contains("The agent must not attempt to achieve the same outcome")
+        );
+        if !matches!(feedback, ClosureFeedback::LongRationale) {
+            assert!(threshold_rejection.contains(instructions));
+            assert!(
+                !threshold_rejection
+                    .contains("The agent must not attempt to achieve the same outcome")
+            );
+        }
+    }
+    if matches!(feedback, ClosureFeedback::Default) {
+        assert!(
+            ordinary_rejection.contains("The agent must not attempt to achieve the same outcome")
+        );
+    }
+    if matches!(feedback, ClosureFeedback::LongRationale) {
+        assert!(threshold_rejection.contains("chars truncated"));
+    }
+    // Long feedback still has the pre-existing diagnostic clipping. The full
+    // rationale remains in its assessment; the extra host block is independently
+    // complete even if an earlier inline copy or custom diagnostic is clipped.
 
     // Ordinary completion is delivered to the parent for either action setting.
     // If mailbox delivery is pending, wait_agent observes it before the next request.

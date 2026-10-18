@@ -401,6 +401,28 @@ struct ApprovalResolution {
 }
 
 impl ApprovalResolution {
+    async fn into_exec_tool_result(
+        self,
+        model_info: &ModelInfo,
+        thread_store: &codex_extension_api::ExtensionData,
+        captured_turn_id: &str,
+    ) -> Result<ReviewDecision, ToolError> {
+        match self {
+            Self {
+                decision: ReviewDecision::Denied { rejection },
+                source: ApprovalResolutionSource::Guardian,
+            } => {
+                if let Some(denials) = thread_store.get::<codex_guardian_reviewer::ReviewDenials>()
+                    && denials.is_closed(captured_turn_id).await
+                {
+                    return Err(ToolError::RejectedWithApprovalLaneClosed(rejection));
+                }
+                Err(ToolError::Rejected(rejection))
+            }
+            resolution => resolution.into_tool_result(model_info),
+        }
+    }
+
     fn into_tool_result(self, model_info: &ModelInfo) -> Result<ReviewDecision, ToolError> {
         let source = self.source;
         match self.decision {
@@ -452,6 +474,7 @@ impl Session {
         {
             return Err(ToolError::Rejected(reason.to_string()));
         }
+        let is_exec_command = matches!(&action, ApprovalAction::ExecCommand { .. });
         let is_mcp_tool_call = matches!(&action, ApprovalAction::McpToolCall { .. });
         let is_network_approval = matches!(&action, ApprovalAction::NetworkAccess { .. });
         let permission_request_run_id = match &action {
@@ -506,7 +529,18 @@ impl Session {
                 _ => {}
             }
         }
-        resolution.into_tool_result(ctx.review_context.model_info.as_ref())
+        if is_exec_command {
+            // Bind feedback to the issuing turn, not whichever turn is now active.
+            resolution
+                .into_exec_tool_result(
+                    ctx.review_context.model_info.as_ref(),
+                    &self.services.thread_extension_data,
+                    &ctx.review_context.turn().sub_id,
+                )
+                .await
+        } else {
+            resolution.into_tool_result(ctx.review_context.model_info.as_ref())
+        }
     }
 
     async fn request_reviewer_approval(
@@ -818,3 +852,7 @@ fn record_resolution(ctx: &ApprovalContext, resolution: &ApprovalResolution) {
 #[cfg(all(test, unix))]
 #[path = "approvals_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "approvals_closure_tests.rs"]
+mod closure_tests;
