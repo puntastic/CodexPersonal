@@ -49,7 +49,13 @@ use tokio::time::timeout;
 use windows_sys::Win32::Foundation::WAIT_FAILED;
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+use windows_sys::Win32::Security::CONTAINER_INHERIT_ACE;
+use windows_sys::Win32::Security::INHERITED_ACE;
+use windows_sys::Win32::Security::OBJECT_INHERIT_ACE;
+use windows_sys::Win32::Security::TOKEN_QUERY;
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::OpenProcess;
+use windows_sys::Win32::System::Threading::OpenProcessToken;
 use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
@@ -710,6 +716,32 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
     runtime.block_on(async move {
         // Keep writable roots out of USERPROFILE exclusions such as AppData.
         let test_root = TempDir::new_in(sandbox_cwd()).expect("create legacy delete test root");
+        // Give the ordinary caller-user side a full-access baseline before any
+        // child is created. Keep FILE_DELETE_CHILD: outside/.git must still be
+        // protected by the sandbox, not by an accidentally weak host baseline.
+        let mut caller_token = std::ptr::null_mut();
+        // SAFETY: the pseudo process handle is current; only TOKEN_QUERY is
+        // requested and successful ownership is immediately wrapped below.
+        assert_ne!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut caller_token) },
+            0,
+            "query deletion-fixture caller token: {}",
+            std::io::Error::last_os_error(),
+        );
+        let caller_token = unsafe { OwnedHandle::from_raw_handle(caller_token) };
+        // SAFETY: the query handle is live, and the reader returns owned SID bytes.
+        let mut caller_sid = unsafe { crate::token::get_user_sid_bytes(caller_token.as_raw_handle()) }
+            .expect("read deletion-fixture caller TokenUser");
+        drop(caller_token);
+        // SAFETY: only this newly owned, still-empty fixture root is mutated;
+        // caller_sid remains owned until all baseline readbacks finish.
+        unsafe {
+            crate::acl::grant_legacy_delete_fixture_user_full_access(
+                test_root.path(),
+                caller_sid.as_mut_ptr().cast(),
+            )
+        }
+        .expect("establish deletion-fixture ordinary-user full-access baseline");
         let codex_home = sandbox_home("legacy-delete-writable-roots");
         let workspace = test_root.path().join("workspace");
         let temp_root = test_root.path().join("temp");
@@ -751,6 +783,36 @@ fn legacy_workspace_write_delete_is_limited_to_writable_roots() {
             ),
         )
         .expect("write delete script");
+        let inherited_directory = INHERITED_ACE | OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+        for (path, required_flags) in [
+            (test_root.path(), OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE),
+            (&workspace, inherited_directory),
+            (&temp_root, inherited_directory),
+            (&tmp_root, inherited_directory),
+            (&outside_root, inherited_directory),
+            (&protected_git_dir, inherited_directory),
+            (&workspace_file, INHERITED_ACE),
+            (&temp_file, INHERITED_ACE),
+            (&tmp_file, INHERITED_ACE),
+            (&outside_file, INHERITED_ACE),
+            (&script, INHERITED_ACE),
+        ] {
+            // Baseline-ACE qualification only, before sandbox ACL application.
+            // SAFETY: every path is owned by this fixture; caller_sid is live.
+            assert!(
+                unsafe {
+                    crate::acl::legacy_delete_fixture_has_full_user_grant(
+                        path,
+                        caller_sid.as_mut_ptr().cast(),
+                        required_flags,
+                    )
+                }
+                .expect("read deletion-fixture inherited user baseline"),
+                "fixture baseline lacks caller-user full access with required ACE flags: {}",
+                path.display(),
+            );
+        }
+        drop(caller_sid);
         let pre_spawn_dacl = legacy_fixture_diagnostics::workspace_dacl_snapshot(test_root.path());
 
         let env_map = HashMap::from([

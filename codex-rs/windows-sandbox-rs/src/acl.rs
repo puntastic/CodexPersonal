@@ -727,6 +727,127 @@ pub(crate) unsafe fn grant_read_execute_aces(
     )
 }
 
+/// Qualify the deletion fixture's baseline ACEs, not restricted-token access.
+///
+/// # Safety
+/// `user_sid` must remain valid and `path` must be an owned fixture path.
+#[cfg(test)]
+pub(crate) unsafe fn legacy_delete_fixture_has_full_user_grant(
+    path: &Path,
+    user_sid: *mut c_void,
+    required_flags: u32,
+) -> Result<bool> {
+    let (dacl, descriptor) = fetch_dacl_handle(path)?;
+    // Keep the descriptor alive through every ACE/SID read, including failures.
+    let result = (|| -> Result<bool> {
+        ensure!(!dacl.is_null(), "unsupported null/absent fixture DACL");
+        ensure!(IsValidAcl(dacl) != 0, "unsupported invalid fixture DACL");
+        let mut info = ACL_SIZE_INFORMATION::default();
+        ensure!(
+            GetAclInformation(
+                dacl,
+                (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            ) != 0,
+            "read fixture DACL information: {}",
+            std::io::Error::last_os_error(),
+        );
+        ensure!(
+            info.AceCount <= 256 && info.AclBytesInUse <= 16 * 1024,
+            "unsupported fixture DACL size: {} ACEs, {} bytes",
+            info.AceCount,
+            info.AclBytesInUse,
+        );
+        let mapping = GENERIC_MAPPING {
+            GenericRead: FILE_GENERIC_READ,
+            GenericWrite: FILE_GENERIC_WRITE,
+            GenericExecute: FILE_GENERIC_EXECUTE,
+            GenericAll: FILE_ALL_ACCESS,
+        };
+        let mut found = false;
+        for index in 0..info.AceCount {
+            let mut pointer = std::ptr::null_mut();
+            ensure!(
+                GetAce(dacl, index, &mut pointer) != 0 && !pointer.is_null(),
+                "read fixture ACE {index}: {}",
+                std::io::Error::last_os_error(),
+            );
+            let header = &*pointer.cast::<ACE_HEADER>();
+            // Do not normalize a host deny, callback/object ACE, or another
+            // unsupported baseline into a passing fixture. Check every ACE even
+            // after finding a full user grant, before any grant can be written.
+            ensure!(
+                header.AceType == ACCESS_ALLOWED_ACE_TYPE,
+                "unsupported fixture ACE {index}: type {} (only simple allows supported)",
+                header.AceType,
+            );
+            let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+            ensure!(
+                usize::from(header.AceSize) >= sid_offset + 8,
+                "truncated fixture allow ACE {index}",
+            );
+            let sid = pointer.cast::<u8>().add(sid_offset);
+            let sid_length = 8 + usize::from(*sid.add(1)) * 4;
+            ensure!(
+                sid_length <= 68
+                    && sid_length <= usize::from(header.AceSize) - sid_offset
+                    && windows_sys::Win32::Security::IsValidSid(sid.cast()) != 0,
+                "invalid fixture ACE {index} SID",
+            );
+            let ace = &*pointer.cast::<ACCESS_ALLOWED_ACE>();
+            let mut mask = ace.Mask;
+            MapGenericMask(&mut mask, &mapping);
+            // NO_PROPAGATE_INHERIT_ACE (0x04) would not establish the nested
+            // .git/file baseline. INHERIT_ONLY does not apply to this object.
+            if EqualSid(sid.cast(), user_sid) != 0
+                && mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS
+                && u32::from(header.AceFlags) & required_flags == required_flags
+                && header.AceFlags & (INHERIT_ONLY_ACE | 0x04) == 0
+            {
+                found = true;
+            }
+        }
+        Ok(found)
+    })();
+    if !descriptor.is_null() {
+        LocalFree(descriptor as HLOCAL);
+    }
+    result.with_context(|| format!("qualify deletion-fixture baseline on {}", path.display()))
+}
+
+/// Add one inheritable full-access baseline for the actual caller to a fresh,
+/// owned fixture root. This is test setup, not a sandbox capability grant.
+///
+/// # Safety
+/// `root` must be a newly owned fixture directory with no children yet, and
+/// `user_sid` must remain valid through the grant and both readbacks.
+#[cfg(test)]
+pub(crate) unsafe fn grant_legacy_delete_fixture_user_full_access(
+    root: &Path,
+    user_sid: *mut c_void,
+) -> Result<()> {
+    let inheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+    // Reject unsupported baselines before changing anything. A missing user
+    // grant is expected here; denies and null DACLs are not repair permission.
+    legacy_delete_fixture_has_full_user_grant(root, user_sid, inheritance)?;
+    ensure_allow_mask_aces_with_inheritance_impl(
+        root,
+        &[user_sid],
+        FILE_ALL_ACCESS,
+        /*disallow_mask*/ 0,
+        GRANT_ACCESS,
+        inheritance,
+    )?;
+    // The helper's bool is not evidence: false can mean no refresh or a deny,
+    // and its refresh predicate does not certify inheritable ACE flags.
+    ensure!(
+        legacy_delete_fixture_has_full_user_grant(root, user_sid, inheritance)?,
+        "fixture root lacks a full effective OI|CI caller-user grant after setup",
+    );
+    Ok(())
+}
+
 /// Ensure all provided SIDs have an allow ACE with the requested mask on the path.
 /// Returns true if any ACE was added.
 ///
