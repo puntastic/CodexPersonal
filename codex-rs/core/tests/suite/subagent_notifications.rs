@@ -1451,7 +1451,7 @@ async fn grandchild_full_fork_preserves_context_baseline(
 }
 
 #[derive(Clone, Copy)]
-enum FullHistoryV2ModelSelection {
+enum ForkHistoryV2ModelSelection {
     ConfiguredDefault,
     ExplicitOverride(&'static str),
     WorldStateIdentity,
@@ -1460,17 +1460,17 @@ enum FullHistoryV2ModelSelection {
     MultiAgentModeTransitions,
 }
 
-#[test_case(FullHistoryV2ModelSelection::ConfiguredDefault; "configured default with omitted fork_turns")]
-#[test_case(FullHistoryV2ModelSelection::ExplicitOverride("all"); "explicit override with fork_turns all")]
-#[test_case(FullHistoryV2ModelSelection::ExplicitOverride("1"); "legacy one turn forks full history with explicit override")]
-#[test_case(FullHistoryV2ModelSelection::ExplicitOverride("3"); "legacy three turns forks full history with explicit override")]
-#[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
-#[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
-#[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
-#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork restores explicit policy after proactive transition")]
+#[test_case(ForkHistoryV2ModelSelection::ConfiguredDefault; "configured default with omitted fork_turns")]
+#[test_case(ForkHistoryV2ModelSelection::ExplicitOverride("all"); "explicit override with fork_turns all")]
+#[test_case(ForkHistoryV2ModelSelection::ExplicitOverride("1"); "last turn excludes older seed with explicit override")]
+#[test_case(ForkHistoryV2ModelSelection::ExplicitOverride("3"); "last three turns retain available seed with explicit override")]
+#[test_case(ForkHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
+#[test_case(ForkHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
+#[test_case(ForkHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
+#[test_case(ForkHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork restores explicit policy after proactive transition")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
-    selection: FullHistoryV2ModelSelection,
+async fn spawned_v2_child_uses_model_precedence_and_selected_fork_history(
+    selection: ForkHistoryV2ModelSelection,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -1486,11 +1486,11 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
     )
     .await;
     let (spawn_args, expected_model, expected_reasoning_effort) = match selection {
-        FullHistoryV2ModelSelection::ConfiguredDefault
-        | FullHistoryV2ModelSelection::WorldStateIdentity
-        | FullHistoryV2ModelSelection::CurrentTimeReminders
-        | FullHistoryV2ModelSelection::MultiAgentModeInstructions
-        | FullHistoryV2ModelSelection::MultiAgentModeTransitions => (
+        ForkHistoryV2ModelSelection::ConfiguredDefault
+        | ForkHistoryV2ModelSelection::WorldStateIdentity
+        | ForkHistoryV2ModelSelection::CurrentTimeReminders
+        | ForkHistoryV2ModelSelection::MultiAgentModeInstructions
+        | ForkHistoryV2ModelSelection::MultiAgentModeTransitions => (
             json!({
                 "message": CHILD_PROMPT,
                 "task_name": "worker",
@@ -1498,7 +1498,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             V2_DEFAULT_MODEL,
             V2_DEFAULT_REASONING_EFFORT,
         ),
-        FullHistoryV2ModelSelection::ExplicitOverride(fork_turns) => (
+        ForkHistoryV2ModelSelection::ExplicitOverride(fork_turns) => (
             json!({
                 "message": CHILD_PROMPT,
                 "task_name": "worker",
@@ -1513,7 +1513,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
     let spawn_args = serde_json::to_string(&spawn_args)?;
     let mode_transition_turns = if matches!(
         selection,
-        FullHistoryV2ModelSelection::MultiAgentModeTransitions
+        ForkHistoryV2ModelSelection::MultiAgentModeTransitions
     ) {
         Some((
             mount_sse_once_match(
@@ -1610,7 +1610,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             });
             if matches!(
                 selection,
-                FullHistoryV2ModelSelection::MultiAgentModeTransitions
+                ForkHistoryV2ModelSelection::MultiAgentModeTransitions
             ) && model == INHERITED_MODEL
             {
                 model_info
@@ -1621,19 +1621,19 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                     });
             }
         }
-        if matches!(selection, FullHistoryV2ModelSelection::WorldStateIdentity) {
+        if matches!(selection, ForkHistoryV2ModelSelection::WorldStateIdentity) {
             config
                 .features
                 .enable(Feature::TokenBudget)
                 .expect("test config should allow feature update");
             config.model_context_window = Some(128_000);
         }
-        if matches!(selection, FullHistoryV2ModelSelection::ConfiguredDefault) {
+        if matches!(selection, ForkHistoryV2ModelSelection::ConfiguredDefault) {
             config.developer_instructions = None;
             config.multi_agent_v2.subagent_developer_instructions =
                 Some(FULL_HISTORY_SUBAGENT_DEVELOPER_INSTRUCTIONS.to_string());
         }
-        if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
+        if matches!(selection, ForkHistoryV2ModelSelection::CurrentTimeReminders) {
             config
                 .features
                 .enable(Feature::CurrentTimeReminder)
@@ -1651,14 +1651,14 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         }
         if matches!(
             selection,
-            FullHistoryV2ModelSelection::MultiAgentModeInstructions
+            ForkHistoryV2ModelSelection::MultiAgentModeInstructions
         ) {
             config.multi_agent_v2.multi_agent_mode_hint_text =
                 Some(FULL_HISTORY_MULTI_AGENT_MODE_HINT.to_string());
         }
         if matches!(
             selection,
-            FullHistoryV2ModelSelection::MultiAgentModeTransitions
+            ForkHistoryV2ModelSelection::MultiAgentModeTransitions
         ) {
             config.multi_agent_v2.root_agent_usage_hint_text =
                 Some(FULL_HISTORY_SHARED_USAGE_HINT.to_string());
@@ -1670,10 +1670,10 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         config.agent_default_subagent_model = Some(V2_DEFAULT_MODEL.to_string());
         config.agent_default_subagent_reasoning_effort = Some(V2_DEFAULT_REASONING_EFFORT);
     });
-    if matches!(selection, FullHistoryV2ModelSelection::WorldStateIdentity) {
+    if matches!(selection, ForkHistoryV2ModelSelection::WorldStateIdentity) {
         builder = builder.with_history_mode(ThreadHistoryMode::Paginated);
     }
-    if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
+    if matches!(selection, ForkHistoryV2ModelSelection::CurrentTimeReminders) {
         #[derive(Default)]
         struct FailFirstClockRead(std::sync::atomic::AtomicBool);
 
@@ -1699,7 +1699,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             builder.with_external_time_provider(std::sync::Arc::new(FailFirstClockRead::default()));
     }
     let test = builder.build_with_auto_env(&server).await?;
-    if matches!(selection, FullHistoryV2ModelSelection::WorldStateIdentity) {
+    if matches!(selection, ForkHistoryV2ModelSelection::WorldStateIdentity) {
         test.codex.submit(Op::Compact).await?;
         wait_for_event(&test.codex, |event| {
             matches!(event, EventMsg::TurnComplete(_))
@@ -1760,7 +1760,15 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
     let parent_request = spawn_turn.single_request();
 
     let child_request = wait_for_request_with_model(&child_request_log, expected_model).await?;
-    assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
+    assert_eq!(
+        child_request.body_contains_text(TURN_0_FORK_PROMPT),
+        !matches!(
+            selection,
+            ForkHistoryV2ModelSelection::ExplicitOverride("1")
+        ),
+        "only the one-turn fork excludes the older seed turn",
+    );
+    assert!(child_request.body_contains_text(TURN_1_PROMPT));
     let misaligned_child_messages = child_request
         .inputs_of_type("message")
         .into_iter()
@@ -1776,7 +1784,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         .collect::<Vec<_>>();
     assert_eq!(misaligned_child_messages, Vec::<Value>::new());
     let child_developer_messages = child_request.message_input_texts("developer");
-    if matches!(selection, FullHistoryV2ModelSelection::ConfiguredDefault) {
+    if matches!(selection, ForkHistoryV2ModelSelection::ConfiguredDefault) {
         assert_eq!(
             (
                 parent_request.body_contains_text(FULL_HISTORY_SUBAGENT_DEVELOPER_INSTRUCTIONS),
@@ -1791,7 +1799,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
     }
     if !matches!(
         selection,
-        FullHistoryV2ModelSelection::MultiAgentModeTransitions
+        ForkHistoryV2ModelSelection::MultiAgentModeTransitions
     ) {
         assert!(child_request.has_content_kinds(&["multi_agent.role_instructions"]));
         assert_eq!(
@@ -1808,7 +1816,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
     }));
     if matches!(
         selection,
-        FullHistoryV2ModelSelection::MultiAgentModeInstructions
+        ForkHistoryV2ModelSelection::MultiAgentModeInstructions
     ) {
         let mode_instruction_count = |request: &ResponsesRequest| {
             request
@@ -1827,7 +1835,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
     }
     if matches!(
         selection,
-        FullHistoryV2ModelSelection::MultiAgentModeTransitions
+        ForkHistoryV2ModelSelection::MultiAgentModeTransitions
     ) {
         assert_eq!(
             (
@@ -1851,7 +1859,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             (1, 1, 0, 1)
         );
     }
-    if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
+    if matches!(selection, ForkHistoryV2ModelSelection::CurrentTimeReminders) {
         let notice_count = |request: &ResponsesRequest, marker: &str| {
             request
                 .message_input_texts("developer")
@@ -1871,7 +1879,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         assert_eq!(notice_count(&child_request, "<current_time_reminder>"), 1);
     }
     let child_body = child_request.body_json();
-    if matches!(selection, FullHistoryV2ModelSelection::WorldStateIdentity) {
+    if matches!(selection, ForkHistoryV2ModelSelection::WorldStateIdentity) {
         let child_thread_id = ThreadId::from_string(
             child_body["client_metadata"]["thread_id"]
                 .as_str()

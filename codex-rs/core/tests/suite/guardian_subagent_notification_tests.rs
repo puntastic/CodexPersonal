@@ -1,27 +1,25 @@
-//! Guardian circuit breakers notify the parent without changing the child's interrupted state.
+//! Guardian denial limits close the child's approval lane without interrupting safe continuation.
 
 use super::*;
 use codex_config::config_toml::CircuitBreakAction;
 use codex_core::config::Constrained;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_protocol::config_types::ApprovalsReviewer;
-use codex_protocol::protocol::CodexErrorInfo;
-use codex_protocol::protocol::ErrorEvent;
+use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::TurnAbortReason;
 use core_test_support::ThreadIdle;
-use core_test_support::streaming_sse::StreamingSseChunk;
-use core_test_support::streaming_sse::start_streaming_sse_server;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use test_case::test_case;
-use tokio::sync::oneshot;
 
-#[test_case(CircuitBreakAction::Strict; "strict_notifies_parent")]
-#[test_case(CircuitBreakAction::Default; "default_stays_silent")]
+#[test_case(CircuitBreakAction::Strict; "strict_closes_approval_lane")]
+#[test_case(CircuitBreakAction::Default; "default_closes_approval_lane")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardian_circuit_breaker_notifies_parent(action: CircuitBreakAction) -> Result<()> {
+async fn guardian_circuit_breaker_closes_lane_without_interrupting_child(
+    action: CircuitBreakAction,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
+    const SAFE_COMPLETION: &str = "Automatic review is closed for this turn; the denied action was not executed. I can finish the safe status report.";
     let server = start_mock_server().await;
     let mut extensions = ExtensionRegistryBuilder::new();
     extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
@@ -121,24 +119,33 @@ async fn guardian_circuit_breaker_notifies_parent(action: CircuitBreakAction) ->
             ]),
         ).await);
     }
-    // A continuation can race the third denial's interruption. Keep it pending so
-    // only the actual Guardian circuit breaker can end the child's turn.
-    let (_release, gate) = oneshot::channel();
-    let (pending, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
-        gate: Some(gate),
-        body: sse(vec![ev_completed("unexpected-worker-completion")]),
-    }]])
+    let fourth = mount_sse_once_match(
+        &server,
+        is_worker,
+        sse(vec![
+            ev_function_call(
+                "fourth",
+                "exec_command",
+                &json!({
+                    "cmd": "echo fourth",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "Verify the closed approval lane rejects without review."
+                })
+                .to_string(),
+            ),
+            ev_completed("fourth"),
+        ]),
+    )
     .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .and(is_worker)
-        .respond_with(
-            wiremock::ResponseTemplate::new(/*s*/ 307)
-                .insert_header("location", format!("{}/v1/responses", pending.uri())),
-        )
-        .with_priority(/*priority*/ 20)
-        .mount(&server)
-        .await;
+    let worker_completed = mount_sse_once_match(
+        &server,
+        is_worker,
+        sse(vec![
+            ev_assistant_message("safe-completion", SAFE_COMPLETION),
+            ev_completed("worker-completed"),
+        ]),
+    )
+    .await;
 
     let mut created = test.thread_manager.subscribe_thread_created();
     test.submit_text_turn("Spawn a worker to run the checks.")
@@ -148,62 +155,97 @@ async fn guardian_circuit_breaker_notifies_parent(action: CircuitBreakAction) ->
         .thread_manager
         .get_thread(created.recv().await?)
         .await?;
-    let warning = wait_for_event_match(&worker, |event| match event {
-        EventMsg::GuardianWarning(warning) if warning.message.contains("3 consecutive") => {
-            Some(warning.message.clone())
+    let mut warnings = Vec::new();
+    let mut assessments = Vec::new();
+    let mut safe_completion_reached = false;
+    loop {
+        match wait_for_event(&worker, |_| true).await {
+            EventMsg::Warning(warning) => warnings.push(warning.message),
+            EventMsg::GuardianAssessment(assessment) => assessments.push(assessment),
+            EventMsg::AgentMessage(message) if message.message == SAFE_COMPLETION => {
+                safe_completion_reached = true;
+            }
+            EventMsg::TurnAborted(aborted) => {
+                panic!("approval lane closure unexpectedly interrupted the child: {aborted:?}");
+            }
+            EventMsg::Error(error) => panic!("child continuation failed: {error:?}"),
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
         }
-        _ => None,
-    })
-    .await;
-    let aborted = wait_for_event_match(&worker, |event| match event {
-        EventMsg::TurnAborted(aborted) => Some(aborted.clone()),
-        _ => None,
-    })
-    .await;
+    }
     ThreadIdle::wait(&worker).await;
-    assert_eq!(
-        (aborted.reason, aborted.error, worker.agent_status().await),
-        (
-            TurnAbortReason::Interrupted,
-            (action == CircuitBreakAction::Strict).then_some(ErrorEvent {
-                message: warning.clone(),
-                codex_error_info: Some(CodexErrorInfo::TooManyDenials),
-                misalignment: None,
-            }),
-            AgentStatus::Interrupted,
-        ),
+    assert!(
+        safe_completion_reached,
+        "child did not finish its safe update"
     );
+    assert_eq!(
+        worker.agent_status().await,
+        AgentStatus::Completed(Some(SAFE_COMPLETION.to_string())),
+    );
+    assert_eq!(
+        assessments
+            .iter()
+            .map(|event| event.status)
+            .collect::<Vec<_>>(),
+        vec![
+            GuardianAssessmentStatus::InProgress,
+            GuardianAssessmentStatus::Denied,
+            GuardianAssessmentStatus::InProgress,
+            GuardianAssessmentStatus::Denied,
+            GuardianAssessmentStatus::InProgress,
+            GuardianAssessmentStatus::Denied,
+        ],
+        "the fourth request must not start another Guardian review",
+    );
+    for pair in assessments.chunks_exact(2) {
+        assert_eq!(pair[0].id, pair[1].id);
+    }
+    let closure_warnings = warnings
+        .iter()
+        .filter(|warning| warning.contains("Automatic approval lane closed for this turn"))
+        .collect::<Vec<_>>();
+    assert_eq!(closure_warnings.len(), 1);
+    let warning = closure_warnings[0];
+    assert!(warning.contains("3 consecutive, 3 in the last 50 reviews"));
+    assert!(warning.contains("Nothing from this request was executed"));
+    assert!(warning.contains("the turn remains active"));
+    assert!(warnings.iter().any(|warning| {
+        warning.contains("Automatic approval lane is closed for this turn")
+            && warning.contains("rejected exec_command request without review")
+    }));
+    let threshold_rejection = fourth
+        .function_call_output_text("third")
+        .expect("third denial reaches the child model");
+    assert!(threshold_rejection.contains("closed for the remainder of this turn"));
+    assert!(threshold_rejection.contains("In your next user-visible update"));
+    let fourth_rejection = worker_completed
+        .function_call_output_text("fourth")
+        .expect("closed-lane rejection reaches the child model");
+    assert!(fourth_rejection.contains("closed for the remainder of this turn"));
+    assert!(fourth_rejection.contains("nothing was executed"));
 
-    // Delivery is queued. If the parent samples before draining its mailbox,
-    // wait_agent must observe the notification before the next model request.
-    let _wait = if action == CircuitBreakAction::Strict {
-        Some(
-            mount_sse_once_match(
-                &server,
-                move |request: &wiremock::Request| {
-                    is_root(request) && !body_contains(request, "Agent interrupted by Guardian:")
-                },
-                sse(vec![
-                    ev_function_call_with_namespace(
-                        "wait-worker",
-                        MULTI_AGENT_V2_NAMESPACE,
-                        "wait_agent",
-                        "{}",
-                    ),
-                    ev_completed("parent-wait"),
-                ]),
-            )
-            .await,
-        )
-    } else {
-        None
-    };
+    // Ordinary completion is delivered to the parent for either action setting.
+    // If mailbox delivery is pending, wait_agent observes it before the next request.
+    let _wait = mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| {
+            is_root(request) && !body_contains(request, SAFE_COMPLETION)
+        },
+        sse(vec![
+            ev_function_call_with_namespace(
+                "wait-worker",
+                MULTI_AGENT_V2_NAMESPACE,
+                "wait_agent",
+                "{}",
+            ),
+            ev_completed("parent-wait"),
+        ]),
+    )
+    .await;
     let continued = mount_sse_once_match(
         &server,
         move |request: &wiremock::Request| {
-            is_root(request)
-                && (action == CircuitBreakAction::Default
-                    || body_contains(request, "Agent interrupted by Guardian:"))
+            is_root(request) && body_contains(request, SAFE_COMPLETION)
         },
         sse(vec![ev_completed("parent-continued")]),
     )
@@ -211,21 +253,17 @@ async fn guardian_circuit_breaker_notifies_parent(action: CircuitBreakAction) ->
     test.submit_text_turn("Report the worker's status.").await?;
     let continued_request = continued.single_request();
     let messages = continued_request.inputs_of_type("agent_message");
-    let expected = if action == CircuitBreakAction::Strict {
-        vec![json!({
-            "type": "agent_message",
-            "author": "/root/worker",
-            "recipient": "/root",
-            "content": [{
-                "type": "input_text",
-                "text": format!(
-                    "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\nAgent interrupted by Guardian: {warning}\n\nTell the user this agent stopped after repeated Guardian denials. Do not resume this agent or retry its blocked work until the user explicitly confirms that it should continue."
-                ),
-            }],
-        })]
-    } else {
-        Vec::new()
-    };
+    let expected = vec![json!({
+        "type": "agent_message",
+        "author": "/root/worker",
+        "recipient": "/root",
+        "content": [{
+            "type": "input_text",
+            "text": format!(
+                "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n{SAFE_COMPLETION}"
+            ),
+        }],
+    })];
     assert_eq!(
         strip_response_item_ids_from_json(strip_metadata_from_json(json!(messages))),
         json!(expected),
@@ -266,6 +304,19 @@ async fn guardian_circuit_breaker_notifies_parent(action: CircuitBreakAction) ->
             .collect::<Vec<_>>(),
         vec![1, 1, 1]
     );
-    pending.shutdown().await;
+    for response in [&fourth, &worker_completed] {
+        assert_eq!(
+            response
+                .requests()
+                .iter()
+                .filter(|request| {
+                    request.body_json()["client_metadata"]["x-codex-parent-thread-id"]
+                        == json!(root)
+                        && request.body_json()["client_metadata"]["x-openai-subagent"] != "guardian"
+                })
+                .count(),
+            1,
+        );
+    }
     Ok(())
 }
