@@ -49,6 +49,42 @@ use super::support::is_unsupported_restricted_token_host;
 use super::support::read_only_sandbox;
 use super::support::workspace_write_sandbox;
 
+pub(crate) fn io_error_with_phase(phase: &str, error: std::io::Error) -> anyhow::Error {
+    let kind = error.kind();
+    let raw_os_error = error.raw_os_error();
+    anyhow::Error::new(error).context(format!(
+        "phase={phase}, io_kind={kind:?}, raw_os_error={raw_os_error:?}"
+    ))
+}
+
+#[test]
+fn io_error_phase_preserves_kind_code_and_source() {
+    for error in [
+        std::io::Error::from_raw_os_error(/*code*/ 5),
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "helper operation denied"),
+        std::io::Error::other("helper transport denied"),
+    ] {
+        let kind = error.kind();
+        let raw_os_error = error.raw_os_error();
+        let message = error.to_string();
+        let reported = io_error_with_phase("write/parent-seeded-file", error);
+
+        assert_eq!(
+            reported.to_string(),
+            format!(
+                "phase=write/parent-seeded-file, io_kind={kind:?}, raw_os_error={raw_os_error:?}"
+            )
+        );
+        let source = reported
+            .downcast_ref::<std::io::Error>()
+            .expect("original I/O error remains available");
+        assert_eq!(
+            (source.kind(), source.raw_os_error(), source.to_string()),
+            (kind, raw_os_error, message)
+        );
+    }
+}
+
 #[test]
 fn sandbox_context_from_profile_preserves_workspace_write_read_only_subpaths() -> Result<()> {
     let tmp = TempDir::new()?;
@@ -146,11 +182,16 @@ async fn file_system_create_directory_creates_nested_directories(
     follow_symlinks: bool,
     sandboxed: bool,
 ) -> Result<()> {
-    let context = create_file_system_context(implementation).await?;
+    let context = create_file_system_context(implementation)
+        .await
+        .context("phase=setup/filesystem-context")?;
     let file_system = context.file_system;
 
-    let tmp = TempDir::new()?;
-    let root = tmp.path().canonicalize()?;
+    let tmp = TempDir::new().map_err(|error| io_error_with_phase("setup/tempdir", error))?;
+    let root = tmp
+        .path()
+        .canonicalize()
+        .map_err(|error| io_error_with_phase("setup/canonicalize-root", error))?;
     let nested_dir = root.join("source").join("nested");
     let sandbox = sandboxed.then(|| workspace_write_sandbox(root));
 
@@ -166,9 +207,14 @@ async fn file_system_create_directory_creates_nested_directories(
         .await;
     #[cfg(windows)]
     if is_unsupported_restricted_token_host(&result) {
+        eprintln!(
+            "phase=create-directory/nested, outcome=unsupported-restricted-token, mode={implementation}"
+        );
         return Ok(());
     }
-    result.with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
+    result
+        .map_err(|error| io_error_with_phase("create-directory/nested", error))
+        .with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
     assert!(nested_dir.is_dir());
 
     Ok(())
@@ -186,11 +232,16 @@ async fn file_system_write_file_writes_bytes(
     follow_symlinks: bool,
     sandboxed: bool,
 ) -> Result<()> {
-    let context = create_file_system_context(implementation).await?;
+    let context = create_file_system_context(implementation)
+        .await
+        .context("phase=setup/filesystem-context")?;
     let file_system = context.file_system;
 
-    let tmp = TempDir::new()?;
-    let root = tmp.path().canonicalize()?;
+    let tmp = TempDir::new().map_err(|error| io_error_with_phase("setup/tempdir", error))?;
+    let root = tmp
+        .path()
+        .canonicalize()
+        .map_err(|error| io_error_with_phase("setup/canonicalize-root", error))?;
     let file_path = root.join("note.txt");
     let sandbox = sandboxed.then(|| workspace_write_sandbox(root.clone()));
     let result = file_system
@@ -203,13 +254,23 @@ async fn file_system_write_file_writes_bytes(
         .await;
     #[cfg(windows)]
     if is_unsupported_restricted_token_host(&result) {
+        eprintln!(
+            "phase=write/new-file, outcome=unsupported-restricted-token, mode={implementation}"
+        );
         return Ok(());
     }
-    result.with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
-    assert_eq!(std::fs::read(file_path)?, b"hello from trait");
+    result
+        .map_err(|error| io_error_with_phase("write/new-file", error))
+        .with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
+    assert_eq!(
+        std::fs::read(file_path)
+            .map_err(|error| io_error_with_phase("verify/read-new-file", error))?,
+        b"hello from trait"
+    );
 
     let file_path = root.join("existing.txt");
-    std::fs::write(&file_path, b"before")?;
+    std::fs::write(&file_path, b"before")
+        .map_err(|error| io_error_with_phase("setup/seed-existing-file", error))?;
     file_system
         .write_file(
             &PathUri::from_host_native_path(&file_path)?,
@@ -218,8 +279,13 @@ async fn file_system_write_file_writes_bytes(
             sandbox.as_ref(),
         )
         .await
+        .map_err(|error| io_error_with_phase("write/parent-seeded-file", error))
         .with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
-    assert_eq!(std::fs::read(file_path)?, b"after");
+    assert_eq!(
+        std::fs::read(file_path)
+            .map_err(|error| io_error_with_phase("verify/read-overwritten-file", error))?,
+        b"after"
+    );
 
     Ok(())
 }
@@ -754,10 +820,15 @@ async fn file_system_remove_no_follow_removes_file_and_empty_directory(
     implementation: FileSystemImplementation,
     sandboxed: bool,
 ) -> Result<()> {
-    let context = create_file_system_context(implementation).await?;
+    let context = create_file_system_context(implementation)
+        .await
+        .context("phase=setup/filesystem-context")?;
     let file_system = context.file_system;
-    let tmp = TempDir::new()?;
-    let root = tmp.path().canonicalize()?;
+    let tmp = TempDir::new().map_err(|error| io_error_with_phase("setup/tempdir", error))?;
+    let root = tmp
+        .path()
+        .canonicalize()
+        .map_err(|error| io_error_with_phase("setup/canonicalize-root", error))?;
     let sandbox = sandboxed.then(|| workspace_write_sandbox(root.clone()));
     let options = RemoveOptions {
         recursive: false,
@@ -766,7 +837,8 @@ async fn file_system_remove_no_follow_removes_file_and_empty_directory(
     };
 
     let file_path = root.join("remove-me.txt");
-    std::fs::write(&file_path, b"remove")?;
+    std::fs::write(&file_path, b"remove")
+        .map_err(|error| io_error_with_phase("setup/seed-removable-file", error))?;
     let result = file_system
         .remove(
             &PathUri::from_host_native_path(&file_path)?,
@@ -776,13 +848,19 @@ async fn file_system_remove_no_follow_removes_file_and_empty_directory(
         .await;
     #[cfg(windows)]
     if is_unsupported_restricted_token_host(&result) {
+        eprintln!(
+            "phase=remove/parent-seeded-file, outcome=unsupported-restricted-token, mode={implementation}"
+        );
         return Ok(());
     }
-    result.with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
+    result
+        .map_err(|error| io_error_with_phase("remove/parent-seeded-file", error))
+        .with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
     assert!(!file_path.exists());
 
     let directory_path = root.join("remove-me");
-    std::fs::create_dir(&directory_path)?;
+    std::fs::create_dir(&directory_path)
+        .map_err(|error| io_error_with_phase("setup/seed-empty-directory", error))?;
     file_system
         .remove(
             &PathUri::from_host_native_path(&directory_path)?,
@@ -790,6 +868,7 @@ async fn file_system_remove_no_follow_removes_file_and_empty_directory(
             sandbox.as_ref(),
         )
         .await
+        .map_err(|error| io_error_with_phase("remove/parent-seeded-empty-directory", error))
         .with_context(|| format!("mode={implementation}, sandboxed={sandboxed}"))?;
     assert!(!directory_path.exists());
 

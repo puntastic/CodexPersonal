@@ -931,6 +931,8 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
     );
     let descendant_process = Arc::new(Mutex::new(None));
     let descendant_process_for_cancellation = Arc::clone(&descendant_process);
+    let first_cancellation_at = Arc::new(Mutex::new(None));
+    let first_cancellation_at_for_callback = Arc::clone(&first_cancellation_at);
     let cancellation = WindowsSandboxCancellationToken::new(move || {
         let Ok(pid) = fs::read_to_string(&ready_marker).and_then(|pid| {
             pid.trim()
@@ -945,6 +947,10 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
         *descendant_process_for_cancellation
             .lock()
             .expect("descendant process lock poisoned") = Some(process);
+        first_cancellation_at_for_callback
+            .lock()
+            .expect("cancellation observation lock poisoned")
+            .get_or_insert_with(Instant::now);
         true
     });
 
@@ -964,17 +970,39 @@ fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
         HashMap::new(),
         Some(30_000),
         /*cancellation*/ Some(cancellation),
-    )
-    .expect("run legacy capture powershell with cancellation");
+    );
+    let completed_at = Instant::now();
+    let total_ms = completed_at.duration_since(started_at).as_millis();
+    let (pre_cancel_ms, post_cancel_ms) = match *first_cancellation_at
+        .lock()
+        .expect("cancellation observation lock poisoned")
+    {
+        Some(cancelled_at) => (
+            cancelled_at
+                .duration_since(started_at)
+                .as_millis()
+                .to_string(),
+            completed_at
+                .duration_since(cancelled_at)
+                .as_millis()
+                .to_string(),
+        ),
+        None => ("not-observed".to_string(), "not-observed".to_string()),
+    };
+    let phase_diagnostics = format!(
+        "LEGACY-CANCEL-PHASE total_ms={total_ms} pre_cancel_ms={pre_cancel_ms} post_cancel_ms={post_cancel_ms}"
+    );
+    eprintln!("{phase_diagnostics}");
+    let result = result.expect("run legacy capture powershell with cancellation");
 
     assert!(
         started_at.elapsed() < Duration::from_secs(10),
-        "cancellation should end capture before the timeout; {}",
+        "cancellation should end capture before the timeout; {phase_diagnostics}; {}",
         capture_result_diagnostics(&result)
     );
     assert!(
         !result.timed_out,
-        "cancellation should not be reported as a timeout; {}",
+        "cancellation should not be reported as a timeout; {phase_diagnostics}; {}",
         capture_result_diagnostics(&result)
     );
     assert_ne!(result.exit_code, 0);

@@ -43,6 +43,7 @@ use uuid::Uuid;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
+use crate::shared::io_error_with_phase;
 use crate::support::FileSystemImplementation;
 use crate::support::create_file_system_context;
 use crate::support::is_unsupported_restricted_token_host;
@@ -93,16 +94,23 @@ async fn file_system_sandboxed_canonicalize_resolves_directory_junction(
 async fn file_system_operations_can_reject_junctions_in_any_path_component(
     implementation: FileSystemImplementation,
 ) -> Result<()> {
-    let context = create_file_system_context(implementation).await?;
-    let tmp = tempfile::TempDir::new()?;
+    let context = create_file_system_context(implementation)
+        .await
+        .context("phase=setup/filesystem-context")?;
+    let tmp =
+        tempfile::TempDir::new().map_err(|error| io_error_with_phase("setup/tempdir", error))?;
     let real = tmp.path().join("real");
-    std::fs::create_dir(&real)?;
+    std::fs::create_dir(&real)
+        .map_err(|error| io_error_with_phase("setup/real-directory", error))?;
     let existing = real.join("existing.txt");
-    std::fs::write(&existing, "unchanged")?;
+    std::fs::write(&existing, "unchanged")
+        .map_err(|error| io_error_with_phase("setup/seed-existing-file", error))?;
     let removable = real.join("removable.txt");
-    std::fs::write(&removable, "keep")?;
+    std::fs::write(&removable, "keep")
+        .map_err(|error| io_error_with_phase("setup/seed-removable-file", error))?;
     let directory_junction = tmp.path().join("directory-junction");
-    create_directory_junction(&real, &directory_junction)?;
+    create_directory_junction(&real, &directory_junction)
+        .context("phase=setup/directory-junction")?;
 
     let no_follow_read = ReadFileOptions {
         follow_symlinks: false,
@@ -128,12 +136,14 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
         context
             .file_system
             .read_file(&uri(&existing)?, no_follow_read, /*sandbox*/ None,)
-            .await?,
+            .await
+            .map_err(|error| io_error_with_phase("read/unsandboxed-existing-file", error))?,
         b"unchanged"
     );
 
     let file_link_target = real.join("file-link-target.txt");
-    std::fs::write(&file_link_target, "target")?;
+    std::fs::write(&file_link_target, "target")
+        .map_err(|error| io_error_with_phase("setup/seed-file-link-target", error))?;
     let file_link = tmp.path().join("file-link.txt");
     if std::os::windows::fs::symlink_file(&file_link_target, &file_link).is_ok() {
         assert!(
@@ -148,7 +158,11 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
                 .await
                 .is_err()
         );
-        assert_eq!(std::fs::read_to_string(&file_link_target)?, "target");
+        assert_eq!(
+            std::fs::read_to_string(&file_link_target)
+                .map_err(|error| io_error_with_phase("verify/file-link-target", error))?,
+            "target"
+        );
     }
 
     assert!(
@@ -174,7 +188,11 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
             .await
             .is_err()
     );
-    assert_eq!(std::fs::read_to_string(&existing)?, "unchanged");
+    assert_eq!(
+        std::fs::read_to_string(&existing)
+            .map_err(|error| io_error_with_phase("verify/unsandboxed-junction-target", error))?,
+        "unchanged"
+    );
     assert!(
         context
             .file_system
@@ -189,7 +207,8 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
     let directory_metadata = context
         .file_system
         .get_metadata(&uri(&real)?, no_follow_metadata, /*sandbox*/ None)
-        .await?;
+        .await
+        .map_err(|error| io_error_with_phase("metadata/unsandboxed-real-directory", error))?;
     assert!(directory_metadata.is_directory);
     assert!(
         context
@@ -228,7 +247,8 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
     );
     assert!(
         directory_junction
-            .symlink_metadata()?
+            .symlink_metadata()
+            .map_err(|error| io_error_with_phase("verify/directory-junction", error))?
             .file_type()
             .is_symlink()
     );
@@ -238,7 +258,10 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
         .file_system
         .read_file(&uri(&existing)?, no_follow_read, Some(&sandbox))
         .await;
-    assert_eq!(read_result?, b"unchanged");
+    assert_eq!(
+        read_result.map_err(|error| io_error_with_phase("read/sandboxed-existing-file", error))?,
+        b"unchanged"
+    );
     let write_result = context
         .file_system
         .write_file(
@@ -249,9 +272,12 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
         )
         .await;
     if is_unsupported_restricted_token_host(&write_result) {
+        eprintln!(
+            "phase=write/sandboxed-existing-file, outcome=unsupported-restricted-token, mode={implementation}"
+        );
         return Ok(());
     }
-    write_result?;
+    write_result.map_err(|error| io_error_with_phase("write/sandboxed-existing-file", error))?;
     assert!(
         context
             .file_system
@@ -275,7 +301,11 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
             .await
             .is_err()
     );
-    assert_eq!(std::fs::read_to_string(&existing)?, "unchanged");
+    assert_eq!(
+        std::fs::read_to_string(&existing)
+            .map_err(|error| io_error_with_phase("verify/sandboxed-junction-target", error))?,
+        "unchanged"
+    );
     assert!(
         context
             .file_system
@@ -566,14 +596,18 @@ async fn file_system_elevated_relative_read_denial_uses_policy_cwd(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_system_private_desktop_survives_helper_exits_and_separates_permissions() -> Result<()>
 {
-    let context = create_file_system_context(FileSystemImplementation::Local).await?;
+    let context = create_file_system_context(FileSystemImplementation::Local)
+        .await
+        .context("phase=setup/filesystem-context")?;
     let file_system = context.file_system;
-    let tmp = tempfile::TempDir::new()?;
+    let tmp =
+        tempfile::TempDir::new().map_err(|error| io_error_with_phase("setup/tempdir", error))?;
     let path = tmp.path().join("contents.txt");
-    std::fs::write(&path, b"initial")?;
+    std::fs::write(&path, b"initial")
+        .map_err(|error| io_error_with_phase("setup/seed-desktop-test-file", error))?;
     let uri = PathUri::from_host_native_path(&path)?;
     let sandbox = workspace_write_sandbox(tmp.path().to_path_buf());
-    let before = process_private_desktops()?;
+    let before = process_private_desktops().context("phase=private-desktop/snapshot-before")?;
     let write = file_system
         .write_file(
             &uri,
@@ -583,13 +617,15 @@ async fn file_system_private_desktop_survives_helper_exits_and_separates_permiss
         )
         .await;
     if is_unsupported_restricted_token_host(&write) {
-        eprintln!("Skipping private desktop reuse: this host cannot create restricted tokens");
+        eprintln!(
+            "phase=private-desktop/initial-existing-write, outcome=unsupported-restricted-token"
+        );
         return Ok(());
     }
-    write?;
+    write.map_err(|error| io_error_with_phase("private-desktop/initial-existing-write", error))?;
 
     // Ownership must outlive each helper; a desktop held only by the helper disappears here.
-    let warmed = process_private_desktops()?;
+    let warmed = process_private_desktops().context("phase=private-desktop/snapshot-warmed")?;
     assert_eq!(warmed.difference(&before).count(), 1);
     for contents in ["updated", "updated again"] {
         file_system
@@ -599,32 +635,50 @@ async fn file_system_private_desktop_survives_helper_exits_and_separates_permiss
                 WriteFileOptions::default(),
                 Some(&sandbox),
             )
-            .await?;
-        assert_eq!(process_private_desktops()?, warmed);
+            .await
+            .map_err(|error| io_error_with_phase("private-desktop/rewrite-existing-file", error))?;
+        assert_eq!(
+            process_private_desktops().context("phase=private-desktop/snapshot-after-write")?,
+            warmed
+        );
         assert_eq!(
             file_system
                 .read_file(&uri, ReadFileOptions::default(), Some(&sandbox))
-                .await?,
+                .await
+                .map_err(|error| io_error_with_phase("private-desktop/read-file", error))?,
             contents.as_bytes()
         );
-        assert_eq!(process_private_desktops()?, warmed);
+        assert_eq!(
+            process_private_desktops().context("phase=private-desktop/snapshot-after-read")?,
+            warmed
+        );
         assert!(
             file_system
                 .get_metadata(&uri, GetMetadataOptions::default(), Some(&sandbox))
-                .await?
+                .await
+                .map_err(|error| io_error_with_phase("private-desktop/metadata", error))?
                 .is_file
         );
-        assert_eq!(process_private_desktops()?, warmed);
+        assert_eq!(
+            process_private_desktops().context("phase=private-desktop/snapshot-after-metadata")?,
+            warmed
+        );
         let chunks = file_system
             .read_file_stream(&uri, Some(&sandbox))
-            .await?
+            .await
+            .map_err(|error| io_error_with_phase("private-desktop/open-read-stream", error))?
             .try_collect::<Vec<_>>()
-            .await?;
+            .await
+            .map_err(|error| io_error_with_phase("private-desktop/read-stream", error))?;
         assert_eq!(chunks.concat(), contents.as_bytes());
-        assert_eq!(process_private_desktops()?, warmed);
+        assert_eq!(
+            process_private_desktops().context("phase=private-desktop/snapshot-after-stream")?,
+            warmed
+        );
     }
 
-    let mut readonly = read_only_sandbox_for_cwd(tmp.path().to_path_buf())?;
+    let mut readonly = read_only_sandbox_for_cwd(tmp.path().to_path_buf())
+        .context("phase=setup/readonly-policy")?;
     readonly.windows_sandbox_selection = WindowsSandboxSelection::RestrictedToken;
     file_system
         .write_file(
@@ -635,17 +689,26 @@ async fn file_system_private_desktop_survives_helper_exits_and_separates_permiss
         )
         .await
         .expect_err("read-only filesystem requests must reject writes");
-    assert_eq!(std::fs::read(&path)?, b"updated again");
-    let separated = process_private_desktops()?;
+    assert_eq!(
+        std::fs::read(&path)
+            .map_err(|error| io_error_with_phase("verify/readonly-write-denied", error))?,
+        b"updated again"
+    );
+    let separated = process_private_desktops()
+        .context("phase=private-desktop/snapshot-separated-permissions")?;
     assert!(warmed.is_subset(&separated));
     assert_eq!(separated.difference(&warmed).count(), 1);
     assert_eq!(
         file_system
             .read_file(&uri, ReadFileOptions::default(), Some(&readonly))
-            .await?,
+            .await
+            .map_err(|error| io_error_with_phase("private-desktop/readonly-read", error))?,
         b"updated again"
     );
-    assert_eq!(process_private_desktops()?, separated);
+    assert_eq!(
+        process_private_desktops().context("phase=private-desktop/snapshot-after-readonly-read")?,
+        separated
+    );
     Ok(())
 }
 
