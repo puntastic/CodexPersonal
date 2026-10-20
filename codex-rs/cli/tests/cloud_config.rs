@@ -247,9 +247,18 @@ async fn login_and_logout_persist_only_cloud_managed_mcp_oauth_credentials() -> 
         .mount(&fixture.server)
         .await;
 
-    let mut command = fixture.command(&["mcp", "login", MANAGED_SERVER_NAME])?;
-    command.stdout(Stdio::piped()).stderr(Stdio::inherit());
+    let mut command = fixture.command(&["mcp", "login", MANAGED_SERVER_NAME, "--no-browser"])?;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
     let mut child = command.spawn()?;
+    // Keep manual input open while the existing HTTP callback completes login.
+    // The credential-store fixture must not launch the host's browser.
+    let stdin = child
+        .stdin
+        .take()
+        .context("MCP login did not provide piped stdin")?;
     let stdout = child
         .stdout
         .take()
@@ -338,15 +347,21 @@ async fn login_and_logout_persist_only_cloud_managed_mcp_oauth_credentials() -> 
         "managed MCP login failed: status={login_status}"
     );
     timeout(Duration::from_secs(30), async {
+        let mut saw_success = false;
         while let Some(line) = lines.next_line().await? {
             if line.contains("Successfully logged in to MCP server 'managed-slack'.") {
-                return Ok::<_, anyhow::Error>(());
+                saw_success = true;
             }
         }
-        anyhow::bail!("managed MCP login exited before printing its success message")
+        ensure!(
+            saw_success,
+            "managed MCP login exited before printing its success message"
+        );
+        Ok::<_, anyhow::Error>(())
     })
     .await
-    .context("timed out waiting for the managed MCP login success message")??;
+    .context("managed MCP login stdout did not close after the child exited")??;
+    drop(stdin);
 
     let credentials_path = fixture.codex_home.path().join(".credentials.json");
     let credentials: Value = serde_json::from_slice(&std::fs::read(&credentials_path)?)?;
