@@ -112,7 +112,9 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(any(line.startswith(b"::") for line in stdout.splitlines()))
         self.assertNotIn(b"##[", stdout)
         summary = next(
-            line for line in stdout.splitlines() if line.startswith(b"capture stdout.log ")
+            line
+            for line in stdout.splitlines()
+            if line.startswith(b"capture stdout.log ")
         )
         self.assertEqual(
             json.loads(summary.split(b" tail=", 1)[1]),
@@ -143,7 +145,13 @@ class CaptureTests(unittest.TestCase):
             patch.object(
                 sys,
                 "argv",
-                ["capture", "--output-dir", str(self.root / "preflight"), "--", sys.executable],
+                [
+                    "capture",
+                    "--output-dir",
+                    str(self.root / "preflight"),
+                    "--",
+                    sys.executable,
+                ],
             ),
             redirect_stderr(console),
         ):
@@ -330,7 +338,8 @@ class CaptureTests(unittest.TestCase):
                         and (self.root / "done").exists()
                     )
         self.assertTrue(
-            self.safe_to_remove, "Wrapper or descendant exit unverified; no cleanup attempted"
+            self.safe_to_remove,
+            "Wrapper or descendant exit unverified; no cleanup attempted",
         )
         self.assertEqual(code, 7)
         self.assertFalse(done_at_return)
