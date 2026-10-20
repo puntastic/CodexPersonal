@@ -9,11 +9,18 @@ exercised every lazy store or a model turn. No test resumes a real source rollou
 Green DB startup does not prove that an older reader can replay new V2
 retained_source metadata: dropping an unknown field before hash validation is
 a separate source-derived conditional compatibility risk, not exercised here.
+
+Before copying or launching, refuse any Windows system config/requirements file.
+This intentionally includes benign policy: presence-only qualification avoids
+reading credential-bearing provider settings or partially interpreting policy.
+Child auth markers are removed and auth.json stays absent. These controls are
+not network isolation or permission-policy changes.
 """
 
 import argparse
 from collections import deque
 from contextlib import closing
+import ctypes
 import hashlib
 import json
 import os
@@ -23,15 +30,108 @@ import sqlite3
 import subprocess
 import threading
 import time
+from uuid import UUID
 
 
 ARCHIVE_SORT_KEYS = ("created_at", "updated_at", "recency_at")
 DEFAULT_EXPECTED_ADDED_MIGRATIONS = (58,)
+CHILD_ENV_EXCLUSIONS = frozenset(
+    (
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "CODEX_ACCESS_TOKEN",
+        "OPENAI_FEDERATION_RULE_ID",
+        "OPENAI_IDENTITY_TOKEN_FILE",
+        "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+        "CODEX_APP_SERVER_TEST_USER_CONFIG_FILE",
+        # Standalone app-server debug hooks; the shared-library hook is above.
+        "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
+        "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG",
+        "CODEX_CLI_PATH",
+    )
+)
 
 
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def windows_system_config_directory():
+    """Match the Windows loader's Known Folder, not the ProgramData environment."""
+    require(os.name == "nt", "copied-state startup rehearsal requires Windows")
+    shell = ctypes.WinDLL("shell32")
+    ole = ctypes.WinDLL("ole32")
+    query = shell.SHGetKnownFolderPath
+    query.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    query.restype = ctypes.c_long
+    ole.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole.CoTaskMemFree.restype = None
+    # FOLDERID_ProgramData, as used by config/src/loader/mod.rs.
+    folder_id = ctypes.create_string_buffer(
+        UUID("62ab5d82-fdc1-4dc3-a9dd-070d1d495d97").bytes_le
+    )
+    returned = ctypes.c_void_p()
+    try:
+        status = query(ctypes.byref(folder_id), 0, None, ctypes.byref(returned))
+        # The runtime may fall back to C:\ProgramData; this harness instead refuses
+        # an uncertain policy location before reading any source database.
+        require(
+            status == 0 and returned.value is not None,
+            "cannot resolve Windows ProgramData known folder for isolation preflight",
+        )
+        program_data = Path(ctypes.wstring_at(returned.value))
+        require(program_data.is_absolute(), "Windows ProgramData path is not absolute")
+        return program_data / "OpenAI" / "Codex"
+    finally:
+        if returned.value is not None:
+            ole.CoTaskMemFree(returned)
+
+
+def require_absent(path, label):
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise RuntimeError(f"cannot establish absence of {label}") from None
+    raise RuntimeError(
+        f"rehearsal refuses existing {label}; separate isolation qualification is required"
+    )
+
+
+def preflight_system_configuration():
+    directory = windows_system_config_directory()
+    for name in ("requirements.toml", "config.toml"):
+        require_absent(directory / name, f"Windows system {name}")
+
+
+def child_environment(home, parent_environment):
+    # Windows environment names are case-insensitive. Never report removed values.
+    env = {
+        key: value
+        for key, value in parent_environment.items()
+        if key.upper() not in CHILD_ENV_EXCLUSIONS
+        and key.upper()
+        not in {
+            "CODEX_HOME",
+            "CODEX_SQLITE_HOME",
+            "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED",
+            "OTEL_SDK_DISABLED",
+        }
+    }
+    env.update(
+        CODEX_HOME=str(home),
+        CODEX_SQLITE_HOME=str(home),
+        CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED="1",
+        OTEL_SDK_DISABLED="true",
+    )
+    return env
 
 
 def file_hash(path):
@@ -277,15 +377,11 @@ def list_metadata(request, *, check_attachments):
 
 
 def startup(executable, home, *, check_attachments=False):
-    env = dict(os.environ)
-    env.update(
-        CODEX_HOME=str(home),
-        CODEX_SQLITE_HOME=str(home),
-        CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED="1",
-        OTEL_SDK_DISABLED="true",
-    )
-    for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_CLI_PATH"):
-        env.pop(key, None)
+    # Recheck immediately before each candidate/previous process, not only once.
+    preflight_system_configuration()
+    require_absent(home / "auth.json", "trial auth.json")
+    require_absent(home / "config.toml", "trial config.toml")
+    env = child_environment(home, os.environ)
     messages = queue.Queue()
     errors = deque(maxlen=12)
     process = subprocess.Popen(
@@ -295,6 +391,8 @@ def startup(executable, home, *, check_attachments=False):
             'cli_auth_credentials_store="file"',
             "-c",
             f"sqlite_home={json.dumps(str(home))}",
+            "-c",
+            f"log_dir={json.dumps(str(home / 'log'))}",
             "app-server",
         ],
         cwd=home,
@@ -398,6 +496,8 @@ def run_probe(args):
     candidate = args.candidate.resolve(strict=True)
     previous = args.previous.resolve(strict=True)
     output = args.output.resolve()
+    # Refuse before source connections, backups, or either package's startup.
+    preflight_system_configuration()
     output.mkdir(parents=True, exist_ok=False)
     home = output / "isolated-home"
     home.mkdir()
@@ -448,6 +548,7 @@ def run_probe(args):
                 report[startup_key] = startup(
                     executable, home, check_attachments=check_attachments
                 )
+                require_absent(home / "auth.json", "trial auth.json after startup")
             except Exception as error:
                 startup_error = error
                 report[startup_key] = {"failure": str(error)}

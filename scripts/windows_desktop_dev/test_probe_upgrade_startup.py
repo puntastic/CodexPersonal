@@ -3,11 +3,13 @@
 from argparse import Namespace
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
 
 import probe_upgrade_startup as probe
 
@@ -68,6 +70,18 @@ class ProbeTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.resolve_windows_system_config_directory = (
+            probe.windows_system_config_directory
+        )
+        # Never query this machine's ProgramData or read any live policy/config.
+        self.system_config_directory = self.root / "synthetic-system-config"
+        patcher = patch.object(
+            probe,
+            "windows_system_config_directory",
+            return_value=self.system_config_directory,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.source = self.root / "state.sqlite"
         create_database(self.source)
         self.before = probe.schema(self.source)
@@ -444,6 +458,216 @@ class ProbeTests(unittest.TestCase):
             self.assertIn(self.source.name + "-wal", after)
         finally:
             db.close()
+
+    def test_child_environment_removes_auth_and_test_config_markers(self):
+        home = self.root / "isolated-home"
+        excluded_names = (
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "CODEX_ACCESS_TOKEN",
+            "OPENAI_FEDERATION_RULE_ID",
+            "OPENAI_IDENTITY_TOKEN_FILE",
+            "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+            "CODEX_APP_SERVER_TEST_USER_CONFIG_FILE",
+            "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
+            "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG",
+            "CODEX_CLI_PATH",
+        )
+        parent = {name.lower(): "synthetic-secret" for name in excluded_names}
+        parent.update(
+            PATH="synthetic-path",
+            codex_home="outside",
+            codex_sqlite_home="outside",
+            otel_sdk_disabled="false",
+            codex_internal_app_server_remote_control_disabled="0",
+        )
+        before = dict(parent)
+
+        self.assertEqual(
+            probe.child_environment(home, parent),
+            {
+                "PATH": "synthetic-path",
+                "CODEX_HOME": str(home),
+                "CODEX_SQLITE_HOME": str(home),
+                "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED": "1",
+                "OTEL_SDK_DISABLED": "true",
+            },
+        )
+        self.assertEqual(parent, before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows Known Folder ABI fixture")
+    def test_windows_config_directory_uses_known_folder_and_frees_result(self):
+        program_data = self.root / "synthetic-program-data"
+        buffer = probe.ctypes.create_unicode_buffer(str(program_data))
+
+        for status in (0, 1):
+            with self.subTest(status=status):
+                shell, ole = Mock(), Mock()
+
+                def query(folder_id, flags, token, returned):
+                    self.assertEqual(
+                        probe.ctypes.string_at(folder_id, 16),
+                        probe.UUID("62ab5d82-fdc1-4dc3-a9dd-070d1d495d97").bytes_le,
+                    )
+                    self.assertEqual((flags, token), (0, None))
+                    probe.ctypes.cast(
+                        returned, probe.ctypes.POINTER(probe.ctypes.c_void_p)
+                    ).contents.value = probe.ctypes.addressof(buffer)
+                    return status
+
+                shell.SHGetKnownFolderPath.side_effect = query
+                with (
+                    patch.object(probe.ctypes, "WinDLL", side_effect=[shell, ole]),
+                    patch.object(
+                        probe.os, "environ", {"ProgramData": "must-not-be-used"}
+                    ),
+                ):
+                    if status == 0:
+                        self.assertEqual(
+                            self.resolve_windows_system_config_directory(),
+                            program_data / "OpenAI" / "Codex",
+                        )
+                    else:
+                        with self.assertRaisesRegex(
+                            RuntimeError, "cannot resolve Windows ProgramData"
+                        ):
+                            self.resolve_windows_system_config_directory()
+                ole.CoTaskMemFree.assert_called_once()
+                self.assertEqual(
+                    ole.CoTaskMemFree.call_args.args[0].value,
+                    probe.ctypes.addressof(buffer),
+                )
+
+    def test_absent_system_policy_allows_preflight_without_creating_files(self):
+        probe.preflight_system_configuration()
+        self.assertFalse(self.system_config_directory.exists())
+
+    def test_system_policy_presence_refuses_before_backup_or_process(self):
+        executable = self.root / "not-an-executable"
+        executable.touch()
+        cases = (
+            ("requirements.toml", 'sqlite_home="C:/outside"\n'),
+            ("requirements.toml", 'cli_auth_credentials_store="auto"\n'),
+            ("requirements.toml", 'log_dir="C:/outside"\n'),
+            (
+                "config.toml",
+                'model_provider="custom"\n[model_providers.custom]\n'
+                'env_key="SYNTHETIC_PROVIDER_SECRET"\n',
+            ),
+            # Conservative cost: even harmless settings require separate qualification.
+            ("requirements.toml", 'allowed_approval_policies=["on-request"]\n'),
+            ("config.toml", 'model_provider="openai"\n'),
+        )
+        for index, (name, contents) in enumerate(cases):
+            with self.subTest(name=name, index=index):
+                directory = self.root / f"policy-{index}"
+                directory.mkdir()
+                (directory / name).write_text(contents, encoding="utf-8")
+                args = Namespace(
+                    candidate=executable,
+                    previous=executable,
+                    source_db=self.source,
+                    source_companion_db=[],
+                    output=self.root / f"refused-output-{index}",
+                )
+                with (
+                    patch.object(
+                        probe, "windows_system_config_directory", return_value=directory
+                    ),
+                    patch.object(probe, "backup") as backup,
+                    patch.object(probe, "startup") as startup,
+                    patch.object(probe.subprocess, "Popen") as popen,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, f"Windows system {name}"):
+                        probe.run_probe(args)
+                backup.assert_not_called()
+                startup.assert_not_called()
+                popen.assert_not_called()
+                self.assertFalse(args.output.exists())
+
+    def test_unknown_system_policy_presence_refuses(self):
+        with patch.object(Path, "lstat", side_effect=PermissionError("synthetic")):
+            with self.assertRaisesRegex(RuntimeError, "cannot establish absence"):
+                probe.preflight_system_configuration()
+
+    def test_startup_rechecks_system_policy_before_process(self):
+        self.system_config_directory.mkdir()
+        (self.system_config_directory / "requirements.toml").write_text(
+            "", encoding="utf-8"
+        )
+        with patch.object(probe.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(
+                RuntimeError, "Windows system requirements.toml"
+            ):
+                probe.startup(self.root / "not-an-executable", self.root / "home")
+        popen.assert_not_called()
+
+    def test_startup_refuses_existing_trial_auth_without_reading_it(self):
+        home = self.root / "isolated-home"
+        home.mkdir()
+        (home / "auth.json").write_text('{"OPENAI_API_KEY":null,"tokens":null}')
+        with patch.object(probe.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(RuntimeError, "trial auth.json"):
+                probe.startup(self.root / "not-an-executable", home)
+        popen.assert_not_called()
+
+    def test_startup_contains_paths_and_leaves_auth_absent(self):
+        home = self.root / "isolated-home"
+        home.mkdir()
+        executable = self.root / "not-an-executable"
+        with (
+            patch.object(
+                probe.os, "environ", {"CODEX_ACCESS_TOKEN": "synthetic-secret"}
+            ),
+            patch.object(probe.subprocess, "CREATE_NO_WINDOW", 0, create=True),
+            patch.object(
+                probe.subprocess,
+                "Popen",
+                side_effect=RuntimeError("synthetic launch boundary"),
+            ) as popen,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "synthetic launch boundary"):
+                probe.startup(executable, home)
+        self.assertEqual(
+            popen.call_args.args[0],
+            [
+                str(executable),
+                "-c",
+                'cli_auth_credentials_store="file"',
+                "-c",
+                f"sqlite_home={json.dumps(str(home))}",
+                "-c",
+                f"log_dir={json.dumps(str(home / 'log'))}",
+                "app-server",
+            ],
+        )
+        self.assertEqual(popen.call_args.kwargs["cwd"], home)
+        self.assertNotIn("CODEX_ACCESS_TOKEN", popen.call_args.kwargs["env"])
+        self.assertFalse((home / "auth.json").exists())
+
+    def test_auth_material_created_by_startup_is_a_failed_rehearsal(self):
+        executable = self.root / "not-an-executable"
+        executable.touch()
+        args = Namespace(
+            candidate=executable,
+            previous=executable,
+            source_db=self.source,
+            source_companion_db=[],
+            output=self.root / "output",
+        )
+
+        def startup(_executable, home, *, check_attachments=False):
+            migrate(home / self.source.name)
+            (home / "auth.json").write_text("null", encoding="utf-8")
+            return {"synthetic": True}
+
+        with patch.object(probe, "startup", side_effect=startup) as mocked:
+            with self.assertRaisesRegex(RuntimeError, "trial auth.json after startup"):
+                probe.run_probe(args)
+        self.assertEqual(mocked.call_count, 1)
+        receipt = json.loads((args.output / "receipt.json").read_text(encoding="utf-8"))
+        self.assertFalse(receipt["passed"])
+        self.assertTrue(receipt["untouched_backups_verified"])
 
 
 if __name__ == "__main__":
