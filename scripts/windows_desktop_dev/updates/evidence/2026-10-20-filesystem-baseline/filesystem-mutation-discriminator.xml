@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="1" skipped="0" failures="1" errors="0" uuid="a570bf74-94f7-4050-b4af-0ebd4e2cef76" timestamp="2026-10-20T02:44:19.356+00:00" time="2.804">
+    <testsuite name="codex-exec-server::file_system_windows" tests="1" skipped="0" errors="0" failures="1">
+        <testcase name="windows_mutation_discriminator::parent_and_helper_files_compare_baselines_and_follow_modes" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:19.357+00:00" time="2.802">
+            <failure message="Error: discriminator retained failed operations or incomplete arms; inspect FS-DISCRIMINATOR rows" type="test failure with exit code 101">Error: discriminator retained failed operations or incomplete arms; inspect FS-DISCRIMINATOR rows</failure>
+        </testcase>
+    </testsuite>
+</testsuites>

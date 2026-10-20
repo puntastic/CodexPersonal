@@ -25,8 +25,8 @@ to this pass. Other qualification/recovery duties remain.
    of the old 128, without directory enumeration. Ambiguous or unfinished search
    still returns no result. Four new controls cover multi-ancestor paths, native
    roots, a dead-end branch and budget exhaustion after a match. All seventeen
-   selected Cursor tests passed locally on Windows. The separate app-server
-   end-to-end import case remains to run; POSIX-specific branches were not run.
+   selected Cursor tests and the separate app-server end-to-end import case
+   passed locally on Windows. POSIX-specific branches were not run.
 3. **Two TUI failures:** fixture-only candidates use a valid file URL in Markdown
    and inspect the decoded Kitty file-reference payload rather than rejecting
    a base64 substring that can legitimately occur in a filename. Original
@@ -85,8 +85,9 @@ manual-input pipe open while the HTTP callback completes, and requires stdout
 EOF after direct-child exit as well as the existing success and credential
 assertions. This fixture repair does not establish the source of the earlier
 LEAK or later campaign silence. Independent source review found no new
-lifecycle blocker. Scoped CLI Clippy/fix passed in10m29s; runtime qualification
-remains in progress.
+lifecycle blocker. Scoped CLI Clippy/fix passed in10m29s. The corrected-launch
+OAuth login/logout case passed, with the manual-input path observed and no
+unsupported-host skip marker or reported leak.
 
 The first local end-to-end import attempt compiled in18m39s, then stopped at
 app-server startup before import: the private launch script's PowerShell null
@@ -95,7 +96,21 @@ non-secret variable reproduced present/empty after that setter and absent
 after Remove-Item Env:. The launcher now removes and checks absence instead;
 the original failed Nextest3995877f-7014-4ac0-bfb5-3efa3c21ba39/JUnit remains.
 This failure does not test or refute the decoder repair. No real credential was
-passed. Repaired-launch runtime results must be added separately.
+passed. The already-started first login attempt had the same startup failure
+after18m55s build (Nextest3b28b888-288b-4438-8fad-c1d9317f32b2); it did not reach
+the mocked service. Neither failed startup is attributed to application logic.
+
+Corrected-launch results, with all existing test assertions retained:
+
+- Import: Nextest `87878c7a-80a0-487d-8c7d-1373f3aa26ec`, one test passed in1.426s,
+  no retries/skips for the selected case. JUnit SHA256
+  `7f19f16dcb9e305d15c1ab0d937e6cb36beab0d9872b4ce9c754dab22d1e23f0`.
+- Login/logout: Nextest `f5c8c755-249b-4ec6-bf69-8033eb649924`, one test passed
+  in0.334s, no selected-case retries/skips or reported leak. JUnit SHA256
+  `7038cffd0d00082ed72ed6d731958a571718a7364b5ba47e87a10a1d5889490d`.
+
+Both capture receipts record root0 and capture-complete. The local Windows
+checks do not establish all-platform support or the cause of the older LEAK.
 
 The copied-state probe now refuses Windows Known-Folder system requirements or
 config presence before copying and before each launch. This deliberately also
@@ -123,7 +138,7 @@ independent static review found no functional blocker; runtime is pending.
 ## Execution plan and boundaries
 
 - Local Rust work is serialized: the first scoped lint/import/TUI checks above
-  and CLI lint are complete; two end-to-end cases remain. Native
+  and CLI lint, plus both end-to-end cases, are complete. Native
   sandbox, desktop, account and ACL tests stay on disposable runners.
 - The completed disposable workflow selected 24 cases in six serial groups:
   nine filesystem cases plus one pure diagnostic check, three legacy capture
@@ -152,6 +167,61 @@ under [selected scoped-run evidence](evidence/2026-10-20-scoped-native/).
 They are small outcome/source records, not test homes or credentials. The
 triage account's proposed discriminator is historical planning; the current
 test deliberately omits production grant-result/native-call hooks.
+
+## Native baseline result and fixture-only repair
+
+Run [39357755251](https://github.com/puntastic/CodexPersonal/actions/runs/39357755251)
+used source `ed187364700f4c0e23aa2c2cf09d3bfdf2f07633` and workflow
+`8137bc3323c32b60a11d80b112c6dca585e312f5`. Eleven exact cases ran: the original
+diagnostics still3pass/7fail, and the intentionally failure-preserving
+discriminator failed. Build/list/capture/report receipts were complete; no
+selected skips, retries or JUnit errors occurred.
+
+The discriminator retained67 bounded rows:35ACL,28operation,2scope,1prediction
+and1summary;31,722 accounted bytes, largest row976, no missing operations or
+incomplete arms. Both roots began with identical descriptors and Administrator
+ownership, without an actual-user full-access OI/CI ACE. The comparison added
+exactly that one allow ACE, preserved every prior ACE and ownership, and
+verified its inheritance onto parent-seeded children.
+
+| Ordinary fixture baseline | Parent-before/after overwrite and remove | Helper-created create/overwrite/remove |
+| --- | --- | --- |
+| Inherited | 8 failures, both follow modes | 6 successes |
+| Qualified actual user | 8 successes, both follow modes | 6 successes |
+
+Content/NotFound oracles independently confirmed these outcomes. The additive
+baseline was sufficient in this ordered VM trial. This is not minimal-rights,
+selected-token AccessCheck, helper-internal syscall, all-host or isolation proof.
+The original seven cases still need their own confirmation after fixture repair.
+Exact [original diagnostic output and JUnit](evidence/2026-10-20-filesystem-baseline/)
+remain available; later mutability-only lint cleanup is not part of that CI pin.
+
+The test-only repair establishes that ordinary-user baseline on fresh, empty,
+owned roots before seeding the four source cases and checks child inheritance.
+Shared cases apply it only to sandboxed Windows variants. All original oracles,
+the ignored inherited countercase and production behavior remain unchanged.
+The native helper moved to a shared fixture module; its previous native bodies
+were retained. Main and independent source review passed, followed by full
+formatting and scoped Clippy/fix (1m06s); no local native execution occurred.
+
+## Unselected build path
+
+The Desktop Build lane now accepts explicit Build-only
+`-SkipLatestPackagePointer`. It keeps package validation, provenance and the
+Build receipt but neither resolves nor updates the task convenience pointer.
+Successful builds report `built_unselected`; actual build/source/receipt failures
+retain their own failure. Default behavior is unchanged. Twenty mocked build/
+router scenarios passed, alongside the timestamp (three cultures), Git-state
+and non-forcing smoke-cleanup regressions. These checks did not build, deploy,
+execute a package or touch live selectors.
+
+The existing selected package was read-only verified again: version0.161.0,
+source8399793e3f65d9c9d931da6a47a0c5a420faa128, six-file fingerprint
+`5328848f19ce219673d8f9aa5a6fda77e9ac3ec6597719091f6e8908648f2301`.
+Persistent and inherited entrypoint selectors agree; this is not attestation
+of the loaded Desktop binary. No selector or package was changed. All five new
+local test-temp roots were empty and removed without recursion/force; older
+protected remnants and recovery evidence remain untouched.
 
 This is a continuation checkpoint, not completed qualification or runtime
 adoption. Add actual returns and exact committed identities when available.

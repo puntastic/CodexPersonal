@@ -1,0 +1,17 @@
+{
+  "accepted_limitation": "legacy_workspace_write_delete_is_limited_to_writable_roots is deliberately not selected. Its known boundary remains unresolved, not xfailed or converted into a passing security claim.",
+  "sandbox_accounts_initially_absent": true,
+  "source_sha": "ed187364700f4c0e23aa2c2cf09d3bfdf2f07633",
+  "image_version": "20261007.264.1",
+  "workflow_sha": "8137bc3323c32b60a11d80b112c6dca585e312f5",
+  "runner_arch": "X64",
+  "proof_boundary": "Exactly 11 selected Rust cases in file_system_windows: the existing 9 native filesystem diagnostics plus one pure error check, followed by one explicitly ignored parent/helper baseline and follow-mode discriminator. Each inventory must match its exact expected ignored status. Both groups are serial, retries zero. Previously observed legacy/account groups are not rerun. The separate Python capture-helper self-tests are not part of this Rust population. No full workspace inventory/run, canonical package, installation or deployment. Passes may include explicitly reported unsupported-token early returns and do not establish full path coverage.",
+  "image_os": "win25-vs2026",
+  "run_attempt": "1",
+  "powershell_fixture_sha256": "BFB46AF89433268872DDB43D1CA7A3F433452EE91ED356A9786940F90118E285",
+  "run_id": "39357755251",
+  "powershell_fixture_path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+  "workflow_ref": "puntastic/CodexPersonal/.github/workflows/rust-ci.yml@refs/heads/codex/windows-isolated-tests-20261017",
+  "cleanup_boundary": "Native, account, desktop and test-path ACL effects occur only on this disposable Windows 2025 VM. No extra provisioning, PID killing, force cleanup or global uninstall; the VM is discarded.",
+  "host_os_version": "Microsoft Windows NT 10.0.26100.0"
+}

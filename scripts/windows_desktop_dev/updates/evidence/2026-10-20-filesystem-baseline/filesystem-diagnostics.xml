@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="10" skipped="0" failures="7" errors="0" uuid="718e54ae-99ed-44cc-8663-8558a1c111b8" timestamp="2026-10-20T02:44:11.177+00:00" time="3.134">
+    <testsuite name="codex-exec-server::file_system_windows" tests="10" skipped="0" errors="0" failures="7">
+        <testcase name="file_system_operations_can_reject_junctions_in_any_path_component::local" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:11.178+00:00" time="0.813">
+            <failure message="Error: phase=write/sandboxed-existing-file, io_kind=InvalidInput, raw_os_error=None" type="test failure with exit code 101">Error: phase=write/sandboxed-existing-file, io_kind=InvalidInput, raw_os_error=None
+
+Caused by:
+    Access is denied. (os error 5)</failure>
+        </testcase>
+        <testcase name="file_system_operations_can_reject_junctions_in_any_path_component::remote" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:11.992+00:00" time="0.363">
+            <failure message="Error: phase=write/sandboxed-existing-file, io_kind=InvalidInput, raw_os_error=None" type="test failure with exit code 101">Error: phase=write/sandboxed-existing-file, io_kind=InvalidInput, raw_os_error=None
+
+Caused by:
+    Access is denied. (os error 5)</failure>
+        </testcase>
+        <testcase name="file_system_private_desktop_survives_helper_exits_and_separates_permissions" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:12.355+00:00" time="0.134">
+            <failure message="Error: phase=private-desktop/initial-existing-write, io_kind=InvalidInput, raw_os_error=None" type="test failure with exit code 101">Error: phase=private-desktop/initial-existing-write, io_kind=InvalidInput, raw_os_error=None
+
+Caused by:
+    Access is denied. (os error 5)</failure>
+        </testcase>
+        <testcase name="shared::file_system_create_directory_creates_nested_directories::local_sandboxed_no_follow" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:12.490+00:00" time="0.133"/>
+        <testcase name="shared::file_system_create_directory_creates_nested_directories::remote_sandboxed_no_follow" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:12.622+00:00" time="0.339"/>
+        <testcase name="shared::file_system_remove_no_follow_removes_file_and_empty_directory::local_sandboxed" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:12.962+00:00" time="0.158">
+            <failure message="Error: mode=local, sandboxed=true" type="test failure with exit code 101">Error: mode=local, sandboxed=true
+
+Caused by:
+    0: phase=remove/parent-seeded-file, io_kind=InvalidInput, raw_os_error=None
+    1: Access is denied. (os error 5)</failure>
+        </testcase>
+        <testcase name="shared::file_system_remove_no_follow_removes_file_and_empty_directory::remote_sandboxed" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:13.120+00:00" time="0.382">
+            <failure message="Error: mode=remote, sandboxed=true" type="test failure with exit code 101">Error: mode=remote, sandboxed=true
+
+Caused by:
+    0: phase=remove/parent-seeded-file, io_kind=InvalidInput, raw_os_error=None
+    1: Access is denied. (os error 5)</failure>
+        </testcase>
+        <testcase name="shared::file_system_write_file_writes_bytes::local_sandboxed_no_follow" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:13.503+00:00" time="0.279">
+            <failure message="Error: mode=local, sandboxed=true" type="test failure with exit code 101">Error: mode=local, sandboxed=true
+
+Caused by:
+    0: phase=write/parent-seeded-file, io_kind=InvalidInput, raw_os_error=None
+    1: Access is denied. (os error 5)</failure>
+        </testcase>
+        <testcase name="shared::file_system_write_file_writes_bytes::remote_sandboxed_no_follow" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:13.782+00:00" time="0.501">
+            <failure message="Error: mode=remote, sandboxed=true" type="test failure with exit code 101">Error: mode=remote, sandboxed=true
+
+Caused by:
+    0: phase=write/parent-seeded-file, io_kind=InvalidInput, raw_os_error=None
+    1: Access is denied. (os error 5)</failure>
+        </testcase>
+        <testcase name="shared::io_error_phase_preserves_kind_code_and_source" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T02:44:14.283+00:00" time="0.027"/>
+    </testsuite>
+</testsuites>
