@@ -289,13 +289,13 @@ impl Security {
             );
             let ace = unsafe { &*pointer.cast::<ACCESS_ALLOWED_ACE>() };
             let mut mapped_mask = ace.Mask;
-            let mut mapping = GENERIC_MAPPING {
+            let mapping = GENERIC_MAPPING {
                 GenericRead: FILE_GENERIC_READ,
                 GenericWrite: FILE_GENERIC_WRITE,
                 GenericExecute: FILE_GENERIC_EXECUTE,
                 GenericAll: FILE_ALL_ACCESS,
             };
-            unsafe { MapGenericMask(&mut mapped_mask, &mut mapping) };
+            unsafe { MapGenericMask(&mut mapped_mask, &mapping) };
             aces.push(AceFact {
                 ace_type: header.AceType,
                 flags: header.AceFlags,
