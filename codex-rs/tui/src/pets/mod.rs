@@ -276,6 +276,9 @@ fn clear_sixel_area(writer: &mut impl Write, area: SixelClearArea) -> std::io::R
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use pretty_assertions::assert_eq;
     use std::error::Error as _;
     use std::io;
     use std::path::PathBuf;
@@ -347,30 +350,51 @@ mod tests {
     #[test]
     fn kitty_local_file_pet_image_uses_file_reference_without_inline_payload() {
         let dir = tempfile::tempdir().unwrap();
-        let frame = dir.path().join("frame.png");
-        std::fs::write(&frame, b"png").unwrap();
-        let request = AmbientPetDraw {
-            frame,
-            protocol: ImageProtocol::KittyLocalFile,
-            x: 2,
-            y: 3,
-            clear_top_y: 3,
-            columns: 4,
-            rows: 2,
-            height_px: 75,
-            sixel_dir: PathBuf::new(),
-        };
-        let mut output = Vec::new();
-        let mut state = PetImageRenderState::default();
+        let mut path_payload_contains_png_marker = false;
+        // Vary the filename by one byte to cover every base64 triplet alignment.
+        for file_name in ["frame.png", "frame0.png", "frame01.png"] {
+            let frame = dir.path().join(file_name);
+            std::fs::write(&frame, b"png").unwrap();
+            let canonical_frame = frame.canonicalize().unwrap();
+            let request = AmbientPetDraw {
+                frame,
+                protocol: ImageProtocol::KittyLocalFile,
+                x: 2,
+                y: 3,
+                clear_top_y: 3,
+                columns: 4,
+                rows: 2,
+                height_px: 75,
+                sixel_dir: PathBuf::new(),
+            };
+            let mut output = Vec::new();
+            let mut state = PetImageRenderState::default();
 
-        render_ambient_pet_image(&mut output, &mut state, Some(request)).unwrap();
+            render_ambient_pet_image(&mut output, &mut state, Some(request)).unwrap();
 
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("a=d,d=I,i=49374,q=2;"));
-        assert!(output.contains("\x1b[4;3H"));
-        assert!(output.contains("a=T,t=f,f=100,c=4,r=2,q=2,i=49374;"));
-        assert!(!output.contains("cG5n"));
-        assert!(output.contains("\x1b8"));
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("a=d,d=I,i=49374,q=2;"));
+            assert_eq!(output.matches("\x1b_G").count(), 2);
+            let header = "\x1b_Ga=T,t=f,f=100,c=4,r=2,q=2,i=49374;";
+            let transmission = output.split_once(header).expect("file transmission").1;
+            let encoded_path = transmission.split_once('\x1b').unwrap().0;
+            let decoded_path = STANDARD.decode(encoded_path).unwrap();
+            assert_eq!(
+                decoded_path.as_slice(),
+                canonical_frame.to_string_lossy().as_bytes(),
+            );
+            path_payload_contains_png_marker |= encoded_path.contains("cG5n");
+
+            let save = output.find("\x1b7").expect("saves cursor position");
+            let move_to = output.find("\x1b[4;3H").expect("moves to pet position");
+            let image = output.find(header).unwrap();
+            let restore = output.find("\x1b8").expect("restores cursor position");
+            assert!(save < move_to);
+            assert!(move_to < image);
+            assert!(image < restore);
+        }
+        // A valid file path can contain the base64 encoding of the bytes `png`.
+        assert!(path_payload_contains_png_marker);
     }
 
     #[test]

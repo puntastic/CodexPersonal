@@ -185,16 +185,19 @@ fn file_citations_preserve_adjacent_entities_and_escaped_punctuation() {
 #[test]
 fn file_citation_after_local_link_soft_break_starts_a_new_line_snapshot() {
     let cwd = std::env::temp_dir();
-    let markdown = format!(
-        "[first](<{}>)\n:codex-file-citation{{path=\"second.txt\"}}",
-        cwd.join("first.txt").display(),
-    );
-    let rendered = rendered_text(&markdown, Some(&cwd));
+    for cwd in [cwd.clone(), cwd.join("_temp with spaces")] {
+        // Native Windows backslashes can escape Markdown punctuation such as `\_`.
+        let first = url::Url::from_file_path(cwd.join("first.txt")).unwrap();
+        let markdown = format!("[first](<{first}>)\n:codex-file-citation{{path=\"second.txt\"}}",);
+        let rendered = rendered_text(&markdown, Some(&cwd));
 
-    insta::assert_snapshot!(rendered, @r"
-    first (first.txt)
-    second.txt
-    ");
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(rendered, @r"
+            first (first.txt)
+            second.txt
+            ");
+        }
+    }
 }
 
 #[test]
