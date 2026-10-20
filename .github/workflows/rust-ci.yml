@@ -116,7 +116,7 @@ jobs:
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          $python = (Get-Command python -CommandType Application).Source
+          $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
           $helper = Join-Path $env:GITHUB_WORKSPACE 'scripts/windows_desktop_dev/capture_native_command.py'
           $tests = Join-Path $env:GITHUB_WORKSPACE 'scripts/windows_desktop_dev'
           $capture = Join-Path $env:PILOT_ROOT 'native-capture-selftest'
@@ -213,9 +213,9 @@ jobs:
             } finally { $stream.Dispose() }
           }
           $captureHelper = Join-Path $env:GITHUB_WORKSPACE 'scripts/windows_desktop_dev/capture_native_command.py'
-          $python = (Get-Command python -CommandType Application).Source
-          $cargo = (Get-Command cargo -CommandType Application).Source
-          $just = (Get-Command just -CommandType Application).Source
+          $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
+          $cargo = (Get-Command cargo -CommandType Application | Select-Object -First 1).Source
+          $just = (Get-Command just -CommandType Application | Select-Object -First 1).Source
           if (-not (Test-Path -LiteralPath $captureHelper -PathType Leaf)) { throw 'Pinned source lacks the reviewed capture helper.' }
           function Invoke-Captured([string]$Label, [string[]]$NativeArguments) {
             $directory = Join-Path $env:PILOT_ROOT "native-$Label"
