@@ -360,6 +360,64 @@ try {
         (-not (Test-Path -LiteralPath $caughtPaths.Pending)) `
         "Caught deployment failure left a pending transaction behind."
 
+    # Mock a refused pending-file deletion; never change real ACLs or file attributes.
+    $cleanupFailure = New-TransactionTestFixture -Root (Join-Path $testRoot "pending-cleanup-failure")
+    $cleanupPaths = Get-CodexDevDeploymentPaths $cleanupFailure.DeploymentRoot
+    $cleanupConfigBefore = Get-Content -LiteralPath $cleanupFailure.Config -Raw
+    $cleanupPersistentBefore = Get-CodexDevPersistentSelector
+    $script:TransactionTestBlockedCleanupPath = $cleanupPaths.Pending
+    $script:TransactionTestBlockedCleanupAttempts = 0
+    function Remove-Item {
+        [CmdletBinding()]
+        param(
+            [string]$LiteralPath,
+            [switch]$Recurse,
+            [switch]$Force
+        )
+
+        if ($Force) { throw "Unexpected forced deletion during cleanup regression." }
+        if (Test-CodexDevPathEqual -Left $LiteralPath -Right $script:TransactionTestBlockedCleanupPath) {
+            $script:TransactionTestBlockedCleanupAttempts++
+            throw "injected pending cleanup refusal"
+        }
+        Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+    }
+    try {
+        $null = Assert-TransactionTestThrows `
+            -Pattern "injected pending cleanup refusal" `
+            -Message "Refused ordinary cleanup was hidden or retried with Force." `
+            -Body {
+                Install-CodexDevPackage `
+                    -PackageDirectory $cleanupFailure.Package `
+                    -ConfigPath $cleanupFailure.Config `
+                    -DeploymentRoot $cleanupFailure.DeploymentRoot `
+                    -SkipSmoke
+            }
+    } finally {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Remove-Item -ErrorAction Stop
+    }
+    Assert-TransactionTestTrue `
+        ($script:TransactionTestBlockedCleanupAttempts -gt 0) `
+        "Cleanup regression did not reach the pending deletion seam."
+    Assert-TransactionTestEqual `
+        $cleanupConfigBefore `
+        (Get-Content -LiteralPath $cleanupFailure.Config -Raw) `
+        "Cleanup refusal did not preserve the restored config image."
+    Assert-TransactionTestEqual `
+        $cleanupPersistentBefore `
+        (Get-CodexDevPersistentSelector) `
+        "Cleanup refusal did not preserve the restored persistent selector."
+    Assert-TransactionTestTrue `
+        (-not (Test-Path -LiteralPath $cleanupPaths.State)) `
+        "Cleanup refusal did not restore the absent Before state."
+    Assert-TransactionTestTrue `
+        (Test-Path -LiteralPath $cleanupPaths.Pending -PathType Leaf) `
+        "Cleanup refusal discarded its pending recovery evidence."
+    Assert-TransactionTestEqual `
+        "pending_recoverable_before" `
+        (Get-CodexDevDeploymentStatus -ConfigPath $cleanupFailure.Config -DeploymentRoot $cleanupFailure.DeploymentRoot).Status `
+        "Cleanup refusal left an unclassified transaction disposition."
+
     $interruptionCases = @(
         foreach ($action in @("Deploy", "Rollback")) {
             foreach ($stage in @(
@@ -1719,12 +1777,30 @@ try {
     $script:TransactionTestReceiptFailure = $null
     $script:TransactionTestPackageInfoHook = $null
     Clear-CodexDevPersistentSelectorTestAdapter
-    $resolvedTestRoot = [System.IO.Path]::GetFullPath($testRoot)
-    if ($resolvedTestRoot.StartsWith($tempBase, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Remove-Item `
-            -LiteralPath $resolvedTestRoot `
-            -Recurse `
-            -Force `
-            -ErrorAction SilentlyContinue
+    try {
+        $baseItem = Get-Item -LiteralPath $tempBase -ErrorAction Stop
+        $rootItem = Get-Item -LiteralPath $testRoot -ErrorAction Stop
+        foreach ($item in @($baseItem, $rootItem)) {
+            if (-not $item.PSIsContainer -or
+                ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Refusing transaction-test cleanup through a non-directory or reparse point.'
+            }
+        }
+        $resolvedTempBase = [System.IO.Path]::GetFullPath($baseItem.FullName).TrimEnd([char[]]"\/")
+        $resolvedTestRoot = [System.IO.Path]::GetFullPath($rootItem.FullName).TrimEnd([char[]]"\/")
+        if (-not [string]::Equals(
+            [System.IO.Path]::GetDirectoryName($resolvedTestRoot),
+            $resolvedTempBase,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or [System.IO.Path]::GetFileName($resolvedTestRoot) -notmatch '^codex-desktop-deployment-transaction-tests-[0-9a-f]{32}$') {
+            throw 'Refusing transaction-test cleanup outside the owned direct GUID child.'
+        }
+        Remove-Item -LiteralPath $resolvedTestRoot -Recurse -ErrorAction Stop
+    } catch {
+        try {
+            Write-Warning "Transaction-test cleanup incomplete; any remaining fixture retained at '$testRoot': $($_.Exception.Message)" -WarningAction Continue
+        } catch {
+            # Keep the original test outcome if the diagnostic stream is unavailable.
+        }
     }
 }

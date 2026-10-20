@@ -199,6 +199,12 @@ persistent next-launch selector, config mirror, and process-live startup snapsho
 separately and reruns the isolated package smoke. Equality of that inherited
 process snapshot is not attestation of which binary the GUI already loaded.
 
+Failed deployment staging is retained for inspection instead of recursively
+deleted. Temporary-file and transaction-journal cleanup uses ordinary deletion,
+not forced deletion; a protected journal remains recoverable evidence rather
+than being silently discarded. Intentional atomic config/state replacement is
+separate from cleanup.
+
 ## Retention and disk use
 
 Build packages, immutable releases, receipts, and config backups are retained;

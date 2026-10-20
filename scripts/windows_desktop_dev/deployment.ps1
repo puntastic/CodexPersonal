@@ -133,18 +133,22 @@ function Install-CodexDevPackage {
                 if ($staged.Fingerprint -ne $package.Fingerprint) {
                     throw "Staged package fingerprint changed during copy."
                 }
-                Move-Item -LiteralPath $staging -Destination $releasePath
-            } finally {
-                if (Test-Path -LiteralPath $staging) {
-                    $resolvedStaging = [System.IO.Path]::GetFullPath($staging)
-                    if ($resolvedStaging.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
-                        Remove-Item `
-                            -LiteralPath $resolvedStaging `
-                            -Recurse `
-                            -Force `
-                            -ErrorAction SilentlyContinue
-                    }
+                $resolvedStaging = [System.IO.Path]::GetFullPath($staging)
+                $resolvedRelease = [System.IO.Path]::GetFullPath($releasePath)
+                if (-not (Test-CodexDevPathEqual -Left (Split-Path -Parent $resolvedStaging) -Right $root) -or
+                    -not (Test-CodexDevPathEqual -Left (Split-Path -Parent $resolvedRelease) -Right (Join-Path $root 'releases')) -or
+                    (Split-Path -Leaf $resolvedStaging) -notmatch '^\.staging-[0-9a-f]{32}$') {
+                    throw 'Staging or release move target escaped its intended deployment directory.'
                 }
+                Move-Item -LiteralPath $resolvedStaging -Destination $resolvedRelease
+            } catch {
+                $stagingFailure = $_
+                # Preserve failed staging for inspection; never force cleanup or
+                # let a diagnostic failure replace the original staging error.
+                try {
+                    Write-Warning "Deployment staging failed; any remaining files are retained at '$staging'." -WarningAction Continue
+                } catch { }
+                throw $stagingFailure
             }
         } else {
             $existing = Get-CodexDevPackageInfo `

@@ -268,6 +268,7 @@ Rollback selects that prior entrypoint; it does not delete packages or data.
             foreach ($testName in @(
                 "environment_tests.ps1",
                 "deployment_transaction_tests.ps1",
+                "staging_retention_tests.ps1",
                 "tests.ps1"
             )) {
                 $testScript = Join-Path $PSScriptRoot $testName

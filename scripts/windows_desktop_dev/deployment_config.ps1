@@ -167,6 +167,16 @@ function Set-CodexCliPathInConfig {
         }
         Move-Item -LiteralPath $tempPath -Destination $ConfigPath -Force
     } finally {
-        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        try {
+            if (Test-Path -LiteralPath $tempPath -PathType Leaf -ErrorAction Stop) {
+                Remove-Item -LiteralPath $tempPath -ErrorAction Stop
+            }
+        } catch {
+            try {
+                Write-Warning "Config temporary-file cleanup incomplete; any remaining file retained at '$tempPath': $($_.Exception.Message)" -WarningAction Continue
+            } catch {
+                # A diagnostic failure must not replace the config operation's outcome.
+            }
+        }
     }
 }

@@ -24,7 +24,17 @@ function Restore-CodexDevConfigBackup {
         [System.IO.File]::WriteAllBytes($tempPath, $backupBytes)
         Move-Item -LiteralPath $tempPath -Destination $ConfigPath -Force
     } finally {
-        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        try {
+            if (Test-Path -LiteralPath $tempPath -PathType Leaf -ErrorAction Stop) {
+                Remove-Item -LiteralPath $tempPath -ErrorAction Stop
+            }
+        } catch {
+            try {
+                Write-Warning "Config restore temporary-file cleanup incomplete; any remaining file retained at '$tempPath': $($_.Exception.Message)" -WarningAction Continue
+            } catch {
+                # A diagnostic failure must not replace the restoration outcome.
+            }
+        }
     }
 }
 
@@ -38,7 +48,9 @@ function Restore-CodexDevStateSnapshot {
     if ($StateExists) {
         Write-CodexDevJson -Path $StatePath -Value $StateValue
     } else {
-        Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $StatePath -ErrorAction Stop) {
+            Remove-Item -LiteralPath $StatePath -ErrorAction Stop
+        }
     }
 }
 
@@ -174,7 +186,7 @@ function Invoke-CodexDevDeploymentTransaction {
                 "(config=$finalConfigMatches persistent=$finalPersistentMatches state=$finalStateMatches)."
             )
         }
-        Remove-Item -LiteralPath $paths.Pending -Force
+        Remove-Item -LiteralPath $paths.Pending -ErrorAction Stop
     } catch {
         $originalError = $_
         if ($originalError.Exception.Data["CodexDevDeploymentInterrupted"] -eq $true) {
@@ -261,7 +273,7 @@ function Invoke-CodexDevDeploymentTransaction {
                     -StateRead $restoredState `
                     -ExpectedExists $StateBeforeExists `
                     -ExpectedValue $StateBefore)) {
-                Remove-Item -LiteralPath $paths.Pending -Force
+                Remove-Item -LiteralPath $paths.Pending -ErrorAction Stop
                 throw $originalError
             }
             $restoreErrors.Add(
@@ -365,7 +377,7 @@ function Repair-CodexDevInterruptedTransaction {
             -ExpectedValue $expectedState)) {
         throw "Interrupted deployment recovery did not verify; pending transaction was retained."
     }
-    Remove-Item -LiteralPath $paths.Pending -Force
+    Remove-Item -LiteralPath $paths.Pending -ErrorAction Stop
     return [pscustomobject]@{
         Status = $recoveryStatus
         TransactionId = [string]$pending.TransactionId
