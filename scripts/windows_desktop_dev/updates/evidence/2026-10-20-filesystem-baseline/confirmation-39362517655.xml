@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="10" skipped="0" failures="0" errors="0" uuid="4980dc55-d87f-4aef-96d3-99788954a251" timestamp="2026-10-20T03:30:51.668+00:00" time="5.156">
+    <testsuite name="codex-exec-server::file_system_windows" tests="10" skipped="0" errors="0" failures="0">
+        <testcase name="file_system_operations_can_reject_junctions_in_any_path_component::local" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:51.669+00:00" time="1.348"/>
+        <testcase name="file_system_operations_can_reject_junctions_in_any_path_component::remote" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:53.017+00:00" time="0.910"/>
+        <testcase name="file_system_private_desktop_survives_helper_exits_and_separates_permissions" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:53.927+00:00" time="0.337"/>
+        <testcase name="shared::file_system_create_directory_creates_nested_directories::local_sandboxed_no_follow" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:54.264+00:00" time="0.115"/>
+        <testcase name="shared::file_system_create_directory_creates_nested_directories::remote_sandboxed_no_follow" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:54.379+00:00" time="0.636"/>
+        <testcase name="shared::file_system_remove_no_follow_removes_file_and_empty_directory::local_sandboxed" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:55.016+00:00" time="0.185"/>
+        <testcase name="shared::file_system_remove_no_follow_removes_file_and_empty_directory::remote_sandboxed" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:55.200+00:00" time="0.700"/>
+        <testcase name="shared::file_system_write_file_writes_bytes::local_sandboxed_no_follow" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:55.901+00:00" time="0.195"/>
+        <testcase name="shared::file_system_write_file_writes_bytes::remote_sandboxed_no_follow" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:56.096+00:00" time="0.709"/>
+        <testcase name="shared::io_error_phase_preserves_kind_code_and_source" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T03:30:56.805+00:00" time="0.019"/>
+    </testsuite>
+</testsuites>

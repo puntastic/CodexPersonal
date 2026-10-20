@@ -120,7 +120,7 @@ pins File auth and trial SQLite/log paths, and requires trial auth/config absenc
 All original18 synthetic tests plus9 isolation controls passed; after formatting,
 the27 probe tests and12 capture tests passed together (39/39,18.425s).
 These controls are not network isolation or protection against concurrent
-machine-policy changes. No current real DB copy or candidate rehearsal is claimed.
+machine-policy changes. The later actual copied-state rehearsal is recorded below.
 
 The new test-only filesystem discriminator separates native fixture inspection
 from the experiment/reporting module. It is ignored in ordinary runs and
@@ -133,7 +133,8 @@ DACL and operation/data/NotFound observations preserve failures; the final test
 remains nonzero if required operations fail or an arm is incomplete. An allow
 ACE is not AccessCheck, environment gating is not VM attestation, and no
 helper-internal syscall stage or isolation repair is claimed. Main and
-independent static review found no functional blocker; runtime is pending.
+independent static review found no functional blocker; subsequent runtime results
+follow below.
 
 ## Execution plan and boundaries
 
@@ -192,7 +193,7 @@ verified its inheritance onto parent-seeded children.
 Content/NotFound oracles independently confirmed these outcomes. The additive
 baseline was sufficient in this ordered VM trial. This is not minimal-rights,
 selected-token AccessCheck, helper-internal syscall, all-host or isolation proof.
-The original seven cases still need their own confirmation after fixture repair.
+The original seven cases subsequently passed their confirmation below.
 Exact [original diagnostic output and JUnit](evidence/2026-10-20-filesystem-baseline/)
 remain available; later mutability-only lint cleanup is not part of that CI pin.
 
@@ -223,5 +224,87 @@ of the loaded Desktop binary. No selector or package was changed. All five new
 local test-temp roots were empty and removed without recursion/force; older
 protected remnants and recovery evidence remain untouched.
 
-This is a continuation checkpoint, not completed qualification or runtime
-adoption. Add actual returns and exact committed identities when available.
+## Candidate result and remaining adoption boundary
+
+Canonical Build completed in2m55s from clean unchanged source
+`3c9af802b8c8505fdd2d4e7c5828f0baec6b1667`, before/after Git-visible fingerprint
+`506ad218df1e84ecf165cd0b36eaa7b082b3c7de38c6df73cfb3125b1766c0a9`.
+Package `3c9af802b8c8-dev-small-20261020-unselected-local` reports0.163.0;
+all six files were independently rehashed against fingerprint
+`9c274537f15ed80aaffd896e5e48e518afa2687e62e91c49d9e2ef9c8bf39d2e`.
+Build returned `built_unselected`, no pointer/receipt error, and verified the
+task convenience pointer and persistent runtime selector unchanged. It was
+not deployed. Private capture: reports/20261020-unselected-build-01.
+
+### Copied-state rehearsal
+
+The hardened fresh-copy rehearsal passed and was independently checked:
+candidate0.163.0 -> previous0.161.0 -> candidate0.163.0 all exited0. Exactly
+migrations59/60/61 were added; original ledger rows and logical evidence for
+2,158threads/2,232attachments remained identical through all readbacks. Primary
+and both companions passed integrity/file-identity checks; all nine recorded
+untouched-backup DB/WAL/SHM hashes matched. No recovery backup was created.
+
+Receipt SHA256 `8dd32ac304f15d7a520bea81c3216daa664b156c3c960db18ddad6dec79864b7`.
+Private originals remain under
+`%LOCALAPPDATA%/CodexPersonal/upgrade-probes/20261020-shared-runtime-3c9af802b8c8`;
+capture reports/20261020-upgrade-probe-01. Do not publish those databases or the
+full private receipt. Startup used isolated copies, not the original source
+home. Read-only SQLite backup connections can still have sidecar/locking
+effects; this is not an audit of concurrent live writers. Companion row
+contents, model work, real-rollout replay, live Desktop behavior and general
+rollback safety are outside the evidence. Local copies are not external
+disaster-recovery proof.
+
+### Original filesystem confirmation
+
+Run [39362517655](https://github.com/puntastic/CodexPersonal/actions/runs/39362517655),
+source3c9af802b8c8505fdd2d4e7c5828f0baec6b1667,
+workflowf30fb035fffadd61083169919c3835023ccc9ccb, passed all original ten selected
+cases, including all seven formerly failing variants. Nextest
+`4980dc55-d87f-4aef-96d3-99788954a251`,5.156s; selected failures/errors/skips/
+retries zero. Exact identity/hash/native/capture/report checks passed, and the
+single-plan/results JSON retained array shape. Complete successful output had
+no unsupported-token markers; those marked early-return branches were not taken.
+The optional file-symlink branch in the junction test remains unobserved
+separately. This is not a full-workspace rerun or a production isolation fix.
+
+Exact [confirmation JUnit](evidence/2026-10-20-filesystem-baseline/confirmation-39362517655.xml),
+2,465bytes, SHA256
+`11301cffd9743e1f045162b27a6df5e9bdc05e8f9978966d031be69d5bb0f104`, is retained
+beside its complete output/provenance and the earlier failed observations.
+The ignored inherited countercase remains unchanged and was not selected for
+this confirmation. The separately accepted legacy deletion limitation remains.
+
+### Correction: exact old-reader source, not a version assumption
+
+The earlier probe scope text singled out new V2 `retained_source` as an unknown
+field that the older reader would discard before hashing. That claim is not
+supported for the actual previous8399793/candidate3c9af802 pair: the previous
+fork already declares the field, both complete `history/src/retained_source.rs`
+files have Git blob `78ef1ca6ff2856f6c03c552ae9acb546c093465c`, and metadata
+serialized fields plus the digest prefix/function block are unchanged. The
+1,857-character LF-normalized digest block SHA256 is
+`f936740c15166f9eab30837f097b6d9f9646a0eb6331b5e27343f0f5a5298d32`.
+The probe now states its actual general codec/replay evidence ceiling without
+that unsupported specific explanation. The original private receipt is retained
+unchanged and must be read beside this correction;27 synthetic tests pass after
+the scope-wording repair. The compiled candidate is not rebuilt for this Python
+report-text/documentation correction.
+
+Public paginated requests map to V1, while persisted/internal V2 modes remain
+conditional paths. A read-only grouped-mode query on the mutable isolated
+rehearsal copy (not the untouched backups or live source) found all2,158 stored
+rows labelled `paginated`. This is not a universal future-mode/replay guarantee.
+One separately scoped future codec discriminator could compare actual pinned
+old/new libraries on a message with the newly serialized `status` field under
+V2; see candidate `protocol/src/models.rs:1040`, `core/src/stream_events_utils.rs:93`
+and `core/tests/suite/output_token_replay.rs:45` at the pinned3c9af802 source.
+No such experiment was run or made an adoption gate here. Do not replace
+the corrected warning with an invented blanket compatibility guarantee.
+
+The targeted repairs/rechecks, clean candidate build and copied-state rehearsal
+are complete. Installation/restart and live Desktop behavior remain separate.
+No selector, live permission, backend or persistent delegate was changed.
+Last free space92.309GiB; private recovery copies intentionally remain local.
+The wider Ath1988 memory/recall goal remains unfinished.

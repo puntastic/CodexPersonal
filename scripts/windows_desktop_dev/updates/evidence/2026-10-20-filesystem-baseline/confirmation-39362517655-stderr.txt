@@ -1,0 +1,97 @@
+$env:RUST_MIN_STACK = "8388608"; $env:NEXTEST_PROFILE = "local"; cargo nextest run --no-fail-fast @($args | Select-Object -Skip 1)
+    Finished `dev-small` profile [unoptimized] target(s) in 1.31s
+────────────
+ Nextest run ID 4980dc55-d87f-4aef-96d3-99788954a251 with nextest profile: local
+    Starting 10 tests across 1 binary (59 tests skipped)
+        PASS [   1.348s] ( 1/10) codex-exec-server::file_system_windows file_system_operations_can_reject_junctions_in_any_path_component::local
+  stdout ───
+
+    running 1 test
+    test file_system_operations_can_reject_junctions_in_any_path_component::local ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 1.33s
+
+
+        PASS [   0.910s] ( 2/10) codex-exec-server::file_system_windows file_system_operations_can_reject_junctions_in_any_path_component::remote
+  stdout ───
+
+    running 1 test
+    test file_system_operations_can_reject_junctions_in_any_path_component::remote ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.89s
+
+
+        PASS [   0.337s] ( 3/10) codex-exec-server::file_system_windows file_system_private_desktop_survives_helper_exits_and_separates_permissions
+  stdout ───
+
+    running 1 test
+    test file_system_private_desktop_survives_helper_exits_and_separates_permissions ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.32s
+
+
+        PASS [   0.115s] ( 4/10) codex-exec-server::file_system_windows shared::file_system_create_directory_creates_nested_directories::local_sandboxed_no_follow
+  stdout ───
+
+    running 1 test
+    test shared::file_system_create_directory_creates_nested_directories::local_sandboxed_no_follow ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.09s
+
+
+        PASS [   0.636s] ( 5/10) codex-exec-server::file_system_windows shared::file_system_create_directory_creates_nested_directories::remote_sandboxed_no_follow
+  stdout ───
+
+    running 1 test
+    test shared::file_system_create_directory_creates_nested_directories::remote_sandboxed_no_follow ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.62s
+
+
+        PASS [   0.185s] ( 6/10) codex-exec-server::file_system_windows shared::file_system_remove_no_follow_removes_file_and_empty_directory::local_sandboxed
+  stdout ───
+
+    running 1 test
+    test shared::file_system_remove_no_follow_removes_file_and_empty_directory::local_sandboxed ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.16s
+
+
+        PASS [   0.700s] ( 7/10) codex-exec-server::file_system_windows shared::file_system_remove_no_follow_removes_file_and_empty_directory::remote_sandboxed
+  stdout ───
+
+    running 1 test
+    test shared::file_system_remove_no_follow_removes_file_and_empty_directory::remote_sandboxed ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.68s
+
+
+        PASS [   0.195s] ( 8/10) codex-exec-server::file_system_windows shared::file_system_write_file_writes_bytes::local_sandboxed_no_follow
+  stdout ───
+
+    running 1 test
+    test shared::file_system_write_file_writes_bytes::local_sandboxed_no_follow ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.18s
+
+
+        PASS [   0.709s] ( 9/10) codex-exec-server::file_system_windows shared::file_system_write_file_writes_bytes::remote_sandboxed_no_follow
+  stdout ───
+
+    running 1 test
+    test shared::file_system_write_file_writes_bytes::remote_sandboxed_no_follow ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.69s
+
+
+        PASS [   0.019s] (10/10) codex-exec-server::file_system_windows shared::io_error_phase_preserves_kind_code_and_source
+  stdout ───
+
+    running 1 test
+    test shared::io_error_phase_preserves_kind_code_and_source ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 68 filtered out; finished in 0.00s
+
+
+────────────
+     Summary [   5.156s] 10 tests run: 10 passed, 59 skipped

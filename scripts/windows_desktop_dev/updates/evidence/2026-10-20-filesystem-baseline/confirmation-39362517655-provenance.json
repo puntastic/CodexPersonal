@@ -1,0 +1,17 @@
+{
+  "image_version": "20261007.264.1",
+  "run_id": "39362517655",
+  "host_os_version": "Microsoft Windows NT 10.0.26100.0",
+  "run_attempt": "1",
+  "proof_boundary": "Exactly 10 selected nonignored Rust cases in file_system_windows: the existing 9 native filesystem diagnostics plus one pure error check. The single group is serial, retries zero, with exact ignored=false/default inventory checks. The ignored inherited-baseline discriminator remains in source but is not selected; its prior observations and the legacy/account groups remain historical evidence. The separate Python capture-helper self-tests are not part of this Rust population. No full workspace inventory/run, canonical package, installation or deployment. Passes may include explicitly reported unsupported-token early returns and do not establish full path coverage or a production isolation repair.",
+  "sandbox_accounts_initially_absent": true,
+  "workflow_ref": "puntastic/CodexPersonal/.github/workflows/rust-ci.yml@refs/heads/codex/windows-isolated-tests-20261017",
+  "runner_arch": "X64",
+  "accepted_limitation": "legacy_workspace_write_delete_is_limited_to_writable_roots is deliberately not selected. Its known boundary remains unresolved, not xfailed or converted into a passing security claim.",
+  "workflow_sha": "f30fb035fffadd61083169919c3835023ccc9ccb",
+  "cleanup_boundary": "Native, account, desktop and test-path ACL effects occur only on this disposable Windows 2025 VM. No extra provisioning, PID killing, force cleanup or global uninstall; the VM is discarded.",
+  "image_os": "win25-vs2026",
+  "powershell_fixture_path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+  "source_sha": "3c9af802b8c8505fdd2d4e7c5828f0baec6b1667",
+  "powershell_fixture_sha256": "BFB46AF89433268872DDB43D1CA7A3F433452EE91ED356A9786940F90118E285"
+}

@@ -6,9 +6,8 @@ The schema assertions preserve migrations55–58 and require an explicit expecte
 addition set for newer candidates; existing callers default to migration58. Optional
 companion copies preserve history/memory recovery without claiming that startup
 exercised every lazy store or a model turn. No test resumes a real source rollout.
-Green DB startup does not prove that an older reader can replay new V2
-retained_source metadata: dropping an unknown field before hash validation is
-a separate source-derived conditional compatibility risk, not exercised here.
+Green DB startup does not establish old-reader rollout replay or general
+forward/backward codec compatibility. Those require separate source-bound checks.
 
 Before copying or launching, refuse any Windows system config/requirements file.
 This intentionally includes benign policy: presence-only qualification avoids
@@ -522,8 +521,7 @@ def run_probe(args):
     report["expected_added_migrations"] = expected_added_migrations
     report["scope_limit"] = (
         "DB startup/schema/metadata only; no model turn or real rollout resumed. "
-        "This does not establish old-reader replay of new V2 retained_source metadata: "
-        "unknown-field dropping before hash validation is a separate source-derived conditional risk. "
+        "This does not establish old-reader rollout replay or general forward/backward codec compatibility. "
         "Companion checks cover integrity, file identity, and existing migration rows; "
         "they do not require logs or other companion rows to remain unchanged."
     )
