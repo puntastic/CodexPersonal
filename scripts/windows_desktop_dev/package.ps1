@@ -261,7 +261,8 @@ function Invoke-CodexDevBuild {
         [string]$RustupHome,
         [string]$PythonPath,
         [string]$RipgrepPath,
-        [string]$RemoteControlAppServerVersion
+        [string]$RemoteControlAppServerVersion,
+        [switch]$SkipLatestPackagePointer
     )
 
     $environment = Initialize-CodexDevEnvironment -CargoPath $CargoPath -CargoHome $CargoHome -RustupHome $RustupHome -PythonPath $PythonPath
@@ -269,7 +270,9 @@ function Invoke-CodexDevBuild {
     $taskToken = Get-CodexDevTaskToken
     $buildId = [guid]::NewGuid().ToString("N")
     $startedAtUtc = [DateTime]::UtcNow.ToString("o")
-    $pointerPath = Get-CodexDevLastPackagePointerPath -TaskToken $taskToken
+    $pointerPath = if ($SkipLatestPackagePointer) { $null } else {
+        Get-CodexDevLastPackagePointerPath -TaskToken $taskToken
+    }
     $output = if (-not [string]::IsNullOrWhiteSpace($PackageDirectory)) {
         [System.IO.Path]::GetFullPath($PackageDirectory)
     } else {
@@ -347,6 +350,7 @@ function Invoke-CodexDevBuild {
             Package = $package
             SourceAfter = $sourceAfter
             SourceStable = $sourceStable
+            SkipLatestPackagePointer = [bool]$SkipLatestPackagePointer
         }) -Source $sourceBefore
     } catch {
         $receiptError = $_.Exception.Message
@@ -364,10 +368,14 @@ function Invoke-CodexDevBuild {
         StartedAtUtc = $startedAtUtc
         CompletedAtUtc = [DateTime]::UtcNow.ToString("o")
     }
-    $pointerResult = Complete-CodexDevBuildPointer `
-        -SourceStable $sourceStable `
-        -PointerPath $pointerPath `
-        -Pointer $pointer
+    $pointerResult = if ($SkipLatestPackagePointer) {
+        [pscustomobject]@{ Advanced = $false; Error = $null }
+    } else {
+        Complete-CodexDevBuildPointer `
+            -SourceStable $sourceStable `
+            -PointerPath $pointerPath `
+            -Pointer $pointer
+    }
     $pointerAdvanced = [bool]$pointerResult.Advanced
     $pointerError = $pointerResult.Error
     return [pscustomobject]@{
@@ -375,10 +383,12 @@ function Invoke-CodexDevBuild {
             "source_changed_during_build"
         } elseif ($null -ne $pointerError) {
             "built_pointer_failed"
-        } elseif (-not $pointerAdvanced) {
+        } elseif (-not $SkipLatestPackagePointer -and -not $pointerAdvanced) {
             "built_pointer_superseded"
         } elseif ($null -ne $receiptError) {
             "built_receipt_failed"
+        } elseif ($SkipLatestPackagePointer) {
+            "built_unselected"
         } else {
             "built"
         }
@@ -388,7 +398,10 @@ function Invoke-CodexDevBuild {
         LastPackagePointer = $pointerPath
         PointerAdvanced = $pointerAdvanced
         PointerError = $pointerError
-        Next = if ($sourceStable) {
+        LatestPackagePointerSkipped = [bool]$SkipLatestPackagePointer
+        Next = if ($SkipLatestPackagePointer) {
+            $null
+        } elseif ($sourceStable) {
             ".\codex-dev.ps1 -Action Deploy -PackageDirectory '$($package.PackageRoot)'"
         } else {
             ".\codex-dev.ps1 -Action Build -CargoProfile $CargoProfile"

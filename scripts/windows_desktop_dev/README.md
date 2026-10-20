@@ -84,6 +84,7 @@ ordinary Rust recipes unsandboxed.
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small
 .\codex-dev.ps1 -Action Build -CargoProfile release
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.157.1
+.\codex-dev.ps1 -Action Build -CargoProfile dev-small -SkipLatestPackagePointer
 ```
 
 Build has no preview mode: `-Action Build -WhatIf` fails before toolchain setup,
@@ -106,6 +107,13 @@ stable build for the current task, not necessarily the most recent attempt.
 If updating that convenience pointer fails, the completed package remains
 usable and the Build result returns `built_pointer_failed`, `PointerError`, and
 an explicit Deploy command.
+
+For an unselected candidate, pass `-SkipLatestPackagePointer` (Build only).
+It preserves package validation, source provenance, and the Build receipt but
+does not resolve or update the task's convenience pointer. A successful build
+returns `built_unselected`, `PointerAdvanced=false`, and no pointer error;
+source changes or receipt failures retain their failure status. This is not a
+deployment or permission switch, and it does not approve the package for use.
 
 `-RemoteControlAppServerVersion` is a diagnostic compatibility override for
 the version sent in a fresh remote-control enrollment and returned when the

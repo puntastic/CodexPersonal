@@ -1,22 +1,10 @@
+[CmdletBinding()]
+param([switch]$BuildPointerOnly)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "workflow.ps1")
-
-$script:SelfTestRealUserSelectorBefore = [System.Environment]::GetEnvironmentVariable(
-    "CODEX_CLI_PATH",
-    [System.EnvironmentVariableTarget]::User
-)
-$script:SelfTestPersistentSelector = $null
-Set-CodexDevPersistentSelectorTestAdapter `
-    -Reader {
-        param($Name)
-        return $script:SelfTestPersistentSelector
-    } `
-    -Writer {
-        param($Name, $Value)
-        $script:SelfTestPersistentSelector = $Value
-    }
 
 function Assert-CodexDevEqual {
     param(
@@ -42,6 +30,195 @@ function Assert-CodexDevThrows {
     }
     throw $Message
 }
+
+# This section is entirely mocked: no build, package execution, filesystem
+# write, current-task identity change, or live selector/configuration read.
+$buildMockNames = @(
+    "Initialize-CodexDevEnvironment", "Get-CodexDevGitState", "Get-CodexDevTaskToken",
+    "Get-CodexDevLastPackagePointerPath", "Resolve-CodexDevRipgrep", "Invoke-CodexDevNative",
+    "Get-CodexDevPackageInfo", "Write-CodexDevJson", "Write-CodexDevReceipt",
+    "Complete-CodexDevBuildPointer", "Set-CodexDevLastPackagePointer",
+    "Get-CodexDevDoctorReport", "Invoke-CodexDevToolSetup", "Resolve-CodexDevPackageDirectory",
+    "Install-CodexDevPackage", "Invoke-CodexDevVerify", "Invoke-CodexDevRollback"
+)
+$savedBuildMocks = @{}
+foreach ($name in $buildMockNames) { $savedBuildMocks[$name] = (Get-Command $name).ScriptBlock }
+$mockRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-build-pointer-mock-" + [guid]::NewGuid().ToString("N"))
+try {
+    function Initialize-CodexDevEnvironment {
+        param($CargoPath, $CargoHome, $RustupHome, $PythonPath)
+        return [pscustomobject]@{ Python = "mock-python"; Cargo = "mock-cargo"; HostTarget = "x86_64-pc-windows-msvc" }
+    }
+    function Get-CodexDevGitState {
+        $script:BuildPointerCase.SourceReads++
+        $changed = -not $script:BuildPointerCase.Stable -and $script:BuildPointerCase.SourceReads -gt 1
+        return [pscustomobject]@{
+            Head = if ($changed) { "changed" } else { "before" }; ShortHead = "before"; Branch = "mock"
+            GitVisibleSourceFingerprint = if ($changed) { "changed" } else { "same" }; Dirty = $false
+        }
+    }
+    function Get-CodexDevTaskToken { return "mock-task-identity" }
+    function Get-CodexDevLastPackagePointerPath {
+        param($TaskToken)
+        $script:BuildPointerCase.PointerPathCalls++
+        if ($script:BuildPointerCase.Skip) { throw "Skipped build requested a pointer path." }
+        return Join-Path $mockRoot "last-package.json"
+    }
+    function Test-Path {
+        param([string]$LiteralPath)
+        Assert-CodexDevEqual (Join-Path $mockRoot "package") $LiteralPath "Unexpected filesystem existence check."
+        return $false
+    }
+    function Resolve-CodexDevRipgrep { param($ExplicitPath) return "mock-rg" }
+    function Invoke-CodexDevNative {
+        param($FilePath, $ArgumentList)
+        $script:BuildPointerCase.NativeCalls++
+        if ($script:BuildPointerCase.Fault -eq "build") { throw "synthetic build failure" }
+        Assert-CodexDevEqual $true ($ArgumentList -contains "--cargo-locked") "Build lost its locked flag."
+        Assert-CodexDevEqual $true ($ArgumentList -contains "--cargo-native-host") "Build lost native-host mode."
+    }
+    function Get-CodexDevPackageInfo {
+        param($PackageDirectory, [switch]$SkipSmoke)
+        $script:BuildPointerCase.PackageChecks++
+        Assert-CodexDevEqual $false ([bool]$SkipSmoke) "Pointer opt-out skipped package smoke validation."
+        if ($script:BuildPointerCase.Fault -eq "validation") { throw "synthetic validation failure" }
+        return [pscustomobject]@{
+            PackageRoot = $PackageDirectory; Fingerprint = "mock-artifact-fingerprint"
+            ProvenanceStatus = if ($null -eq $script:BuildPointerCase.Provenance) { "unavailable" } else { $script:BuildPointerCase.Provenance.Status }
+            Provenance = $script:BuildPointerCase.Provenance
+        }
+    }
+    function Write-CodexDevJson {
+        param($Path, $Value)
+        Assert-CodexDevEqual (Join-Path $mockRoot "package/codex-dev-build.json") $Path "Unexpected JSON write target."
+        if ($script:BuildPointerCase.Fault -eq "provenance") { throw "synthetic provenance failure" }
+        $script:BuildPointerCase.Provenance = $Value
+    }
+    function Write-CodexDevReceipt {
+        param($Action, $Details, $Source)
+        Assert-CodexDevEqual "Build" $Action "Unexpected receipt action."
+        $script:BuildPointerCase.ReceiptCalls++
+        $script:BuildPointerCase.ReceiptDetails = $Details
+        if ($script:BuildPointerCase.Fault -eq "receipt") { throw "synthetic receipt failure" }
+        return Join-Path $mockRoot "build-receipt.json"
+    }
+    function Complete-CodexDevBuildPointer {
+        param($SourceStable, $PointerPath, $Pointer)
+        $script:BuildPointerCase.PointerCompletionCalls++
+        if ($script:BuildPointerCase.Skip) { throw "Skipped build called pointer completion." }
+        $original = $savedBuildMocks["Complete-CodexDevBuildPointer"]
+        return & $original -SourceStable $SourceStable -PointerPath $PointerPath -Pointer $Pointer
+    }
+    function Set-CodexDevLastPackagePointer {
+        param($PointerPath, $Pointer)
+        $script:BuildPointerCase.PointerWriterCalls++
+        if ($script:BuildPointerCase.PointerMode -eq "failure") { throw "synthetic pointer failure" }
+        return $script:BuildPointerCase.PointerMode -eq "advance"
+    }
+    function Get-CodexDevDoctorReport { throw "Unexpected Doctor action." }
+    function Invoke-CodexDevToolSetup { throw "Unexpected Setup action." }
+    function Resolve-CodexDevPackageDirectory { throw "Unexpected package resolution." }
+    function Install-CodexDevPackage { throw "Unexpected Deploy action." }
+    function Invoke-CodexDevVerify { throw "Unexpected Verify action." }
+    function Invoke-CodexDevRollback { throw "Unexpected Rollback action." }
+
+    $cases = @(
+        @{ Name = "default"; Skip = $false; Stable = $true; Fault = ""; PointerMode = "advance"; Status = "built"; Writes = 1 },
+        @{ Name = "unselected"; Skip = $true; Stable = $true; Fault = ""; PointerMode = "advance"; Status = "built_unselected"; Writes = 0 },
+        @{ Name = "default-unstable"; Skip = $false; Stable = $false; Fault = ""; PointerMode = "advance"; Status = "source_changed_during_build"; Writes = 0 },
+        @{ Name = "unselected-unstable"; Skip = $true; Stable = $false; Fault = ""; PointerMode = "advance"; Status = "source_changed_during_build"; Writes = 0 },
+        @{ Name = "default-receipt-failure"; Skip = $false; Stable = $true; Fault = "receipt"; PointerMode = "advance"; Status = "built_receipt_failed"; Writes = 1 },
+        @{ Name = "unselected-receipt-failure"; Skip = $true; Stable = $true; Fault = "receipt"; PointerMode = "advance"; Status = "built_receipt_failed"; Writes = 0 },
+        @{ Name = "default-pointer-failure"; Skip = $false; Stable = $true; Fault = ""; PointerMode = "failure"; Status = "built_pointer_failed"; Writes = 1 },
+        @{ Name = "default-superseded"; Skip = $false; Stable = $true; Fault = ""; PointerMode = "superseded"; Status = "built_pointer_superseded"; Writes = 1 },
+        @{ Name = "unselected-build-failure"; Skip = $true; Stable = $true; Fault = "build"; PointerMode = "advance"; Status = "throws"; Writes = 0 },
+        @{ Name = "unselected-validation-failure"; Skip = $true; Stable = $true; Fault = "validation"; PointerMode = "advance"; Status = "throws"; Writes = 0 },
+        @{ Name = "unselected-provenance-failure"; Skip = $true; Stable = $true; Fault = "provenance"; PointerMode = "advance"; Status = "throws"; Writes = 0 }
+    )
+    $mockParameters = @{
+        CargoProfile = "dev-small"; PackageDirectory = Join-Path $mockRoot "package"
+        ConfigPath = Join-Path $mockRoot "unused-config.toml"; DeploymentRoot = Join-Path $mockRoot "unused-deployments"; Json = $true
+    }
+    foreach ($case in $cases) {
+        $script:BuildPointerCase = $case.Clone()
+        foreach ($counter in @("SourceReads", "NativeCalls", "PackageChecks", "ReceiptCalls", "PointerPathCalls", "PointerCompletionCalls", "PointerWriterCalls")) { $script:BuildPointerCase[$counter] = 0 }
+        $script:BuildPointerCase.Provenance = $null
+        $script:BuildPointerCase.ReceiptDetails = $null
+        $result = $null
+        $problem = $null
+        try { $result = Invoke-CodexDesktopDev -Action Build @mockParameters -SkipLatestPackagePointer:$case.Skip | ConvertFrom-Json } catch { $problem = $_.Exception.Message }
+        if ($case.Status -eq "throws") {
+            Assert-CodexDevEqual "synthetic $($case.Fault) failure" $problem "Build failure was hidden."
+            Assert-CodexDevEqual 0 $script:BuildPointerCase.ReceiptCalls "Failed build/validation/provenance wrote a receipt."
+        } else {
+            Assert-CodexDevEqual $null $problem "Mocked build failed unexpectedly."
+            Assert-CodexDevEqual $case.Status $result.Status "Build disposition changed or masked failure."
+            Assert-CodexDevEqual 2 $script:BuildPointerCase.PackageChecks "Build omitted package validation."
+            Assert-CodexDevEqual 1 $script:BuildPointerCase.ReceiptCalls "Build omitted its receipt."
+            Assert-CodexDevEqual $case.Stable $script:BuildPointerCase.ReceiptDetails.SourceStable "Receipt source stability changed."
+            Assert-CodexDevEqual $case.Skip $script:BuildPointerCase.ReceiptDetails.SkipLatestPackagePointer "Receipt lost the pointer policy."
+            Assert-CodexDevEqual $case.Skip $result.LatestPackagePointerSkipped "Router did not forward the opt-out."
+            $expectedProvenance = if ($case.Stable) { "stable" } else { "source_changed_during_build" }
+            Assert-CodexDevEqual $expectedProvenance $script:BuildPointerCase.Provenance.Status "Provenance was weakened."
+            if ($case.Skip) {
+                Assert-CodexDevEqual $false $result.PointerAdvanced "Unselected result claimed pointer advancement."
+                Assert-CodexDevEqual $null $result.PointerError "Deliberate non-selection became a pointer error."
+                Assert-CodexDevEqual $null $result.LastPackagePointer "Unselected result returned a pointer path."
+                Assert-CodexDevEqual $null $result.Next "Unselected result suggested automatic deployment."
+            } else {
+                Assert-CodexDevEqual ($case.Stable -and $case.PointerMode -eq "advance") $result.PointerAdvanced "Default pointer advancement changed."
+                Assert-CodexDevEqual (Join-Path $mockRoot "last-package.json") $result.LastPackagePointer "Default pointer path changed."
+                $expectedPointerError = if ($case.PointerMode -eq "failure") { "synthetic pointer failure" } else { $null }
+                Assert-CodexDevEqual $expectedPointerError $result.PointerError "Default pointer failure detail changed."
+                $expectedNext = if ($case.Stable) {
+                    ".\codex-dev.ps1 -Action Deploy -PackageDirectory '$(Join-Path $mockRoot 'package')'"
+                } else { ".\codex-dev.ps1 -Action Build -CargoProfile dev-small" }
+                Assert-CodexDevEqual $expectedNext $result.Next "Default next-action hint changed."
+            }
+            if ($case.Fault -eq "receipt") { Assert-CodexDevEqual "synthetic receipt failure" $result.ReceiptError "Receipt failure detail was lost." }
+        }
+        Assert-CodexDevEqual $case.Writes $script:BuildPointerCase.PointerWriterCalls "Pointer writer call count changed."
+        if ($case.Skip) {
+            Assert-CodexDevEqual 0 $script:BuildPointerCase.PointerPathCalls "Skipped build resolved the task pointer path."
+            Assert-CodexDevEqual 0 $script:BuildPointerCase.PointerCompletionCalls "Skipped build called pointer completion."
+        }
+        Write-Output "Build pointer mock passed: $($case.Name)"
+    }
+    foreach ($action in @("Help", "Doctor", "Setup", "Just", "Deploy", "Verify", "Rollback", "SelfTest")) {
+        $problem = $null
+        try { $null = Invoke-CodexDesktopDev -Action $action @mockParameters -SkipLatestPackagePointer } catch { $problem = $_.Exception.Message }
+        Assert-CodexDevEqual "-SkipLatestPackagePointer is valid only for Build; no action was started." $problem "Opt-out was accepted outside Build."
+    }
+    $nativeCalls = $script:BuildPointerCase.NativeCalls
+    $problem = $null
+    try { $null = Invoke-CodexDesktopDev -Action Build @mockParameters -SkipLatestPackagePointer -WhatIf } catch { $problem = $_.Exception.Message }
+    Assert-CodexDevEqual "Build does not support -WhatIf; no build or package changes were started. Omit -WhatIf only when you intend to build." $problem "Build preview refusal changed."
+    Assert-CodexDevEqual $nativeCalls $script:BuildPointerCase.NativeCalls "Build preview started a build."
+    Write-Output "Build pointer router checks passed: eight non-Build actions and Build -WhatIf."
+} finally {
+    foreach ($name in $buildMockNames) { Set-Item -LiteralPath "Function:\$name" -Value $savedBuildMocks[$name] }
+    Remove-Item -LiteralPath Function:\Test-Path
+    $script:BuildPointerCase = $null
+}
+if ($BuildPointerOnly) {
+    Write-Output "windows_desktop_dev Build pointer mocks: PASS"
+    exit 0
+}
+
+$script:SelfTestRealUserSelectorBefore = [System.Environment]::GetEnvironmentVariable(
+    "CODEX_CLI_PATH",
+    [System.EnvironmentVariableTarget]::User
+)
+$script:SelfTestPersistentSelector = $null
+Set-CodexDevPersistentSelectorTestAdapter `
+    -Reader {
+        param($Name)
+        return $script:SelfTestPersistentSelector
+    } `
+    -Writer {
+        param($Name, $Value)
+        $script:SelfTestPersistentSelector = $Value
+    }
 
 function New-FakeCodexPackage {
     param(
@@ -114,7 +291,8 @@ try {
                 [string]$RustupHome,
                 [string]$PythonPath,
                 [string]$RipgrepPath,
-                [string]$RemoteControlAppServerVersion
+                [string]$RemoteControlAppServerVersion,
+                [switch]$SkipLatestPackagePointer
             )
 
             $script:SelfTestBuildCalls++

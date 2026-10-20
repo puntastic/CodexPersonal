@@ -147,12 +147,16 @@ function Invoke-CodexDesktopDev {
         [string]$PythonPath,
         [string]$RipgrepPath,
         [string]$RemoteControlAppServerVersion,
+        [switch]$SkipLatestPackagePointer,
         [string]$ConfigPath = (Get-CodexDevDefaultConfigPath),
         [string]$DeploymentRoot = (Get-CodexDevDefaultDeploymentRoot),
         [switch]$WhatIf,
         [switch]$Json
     )
 
+    if ($SkipLatestPackagePointer -and $Action -ne "Build") {
+        throw "-SkipLatestPackagePointer is valid only for Build; no action was started."
+    }
     if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
         throw "The Desktop development lane currently supports Windows only."
     }
@@ -165,6 +169,7 @@ CodexPersonal Windows Desktop lane
   .\codex-dev.ps1 -Action Setup
   .\codex-dev.ps1 -Action Just -JustArguments @('test','-p','codex-state')
   .\codex-dev.ps1 -Action Build -CargoProfile dev-small [-RemoteControlAppServerVersion <semver>]
+  .\codex-dev.ps1 -Action Build -CargoProfile dev-small -SkipLatestPackagePointer
   .\codex-dev.ps1 -Action Deploy [-PackageDirectory <package>]
   # Restart Codex Desktop, then:
   .\codex-dev.ps1 -Action Verify
@@ -174,6 +179,8 @@ CodexPersonal Windows Desktop lane
 Setup installs missing formatter and Bazel helpers into the ignored local tool cache.
 Build defaults to a fresh, ignored package directory, records its hashes and
 source provenance, and advances only this task's last-stable package pointer.
+Build -SkipLatestPackagePointer retains validation/provenance/receipts but leaves
+that convenience pointer untouched. It does not change deployment or permissions.
 Build does not support -WhatIf and refuses it before starting any build work.
 Deploy stages an immutable copy and transactionally aligns the User-scope
 CODEX_CLI_PATH next-launch selector, its existing config mirror, and deployment
@@ -229,6 +236,7 @@ Rollback selects that prior entrypoint; it does not delete packages or data.
                 PythonPath = $PythonPath
                 RipgrepPath = $RipgrepPath
                 RemoteControlAppServerVersion = $RemoteControlAppServerVersion
+                SkipLatestPackagePointer = $SkipLatestPackagePointer
             }
             Write-CodexDevResult -Json:$Json -Value (Invoke-CodexDevBuild @parameters)
         }

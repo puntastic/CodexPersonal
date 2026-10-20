@@ -24,6 +24,9 @@ source, staged, configured, and live state separately.
 .\codex-dev.ps1 -Action Build -CargoProfile dev-small -RemoteControlAppServerVersion 0.157.1
 
 .EXAMPLE
+.\codex-dev.ps1 -Action Build -CargoProfile dev-small -SkipLatestPackagePointer
+
+.EXAMPLE
 .\codex-dev.ps1 -Action Deploy -PackageDirectory .\codex-rs\target\desktop-dev\packages\example
 
 .EXAMPLE
@@ -50,6 +53,7 @@ param(
     [string]$PythonPath,
     [string]$RipgrepPath,
     [string]$RemoteControlAppServerVersion,
+    [switch]$SkipLatestPackagePointer,
     [string]$ConfigPath,
     [string]$DeploymentRoot,
     [switch]$WhatIf,
@@ -72,6 +76,7 @@ $parameters = @{
     JustArguments = $JustArguments
     WhatIf = $WhatIf
     Json = $Json
+    SkipLatestPackagePointer = $SkipLatestPackagePointer
 }
 foreach ($entry in @{
     PackageDirectory = $PackageDirectory
