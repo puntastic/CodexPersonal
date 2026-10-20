@@ -48,6 +48,8 @@ use super::support::create_file_system_context;
 use super::support::is_unsupported_restricted_token_host;
 use super::support::read_only_sandbox;
 use super::support::workspace_write_sandbox;
+#[cfg(windows)]
+use crate::windows_fixture_security::FixtureUserBaseline;
 
 pub(crate) fn io_error_with_phase(phase: &str, error: std::io::Error) -> anyhow::Error {
     let kind = error.kind();
@@ -238,6 +240,12 @@ async fn file_system_write_file_writes_bytes(
     let file_system = context.file_system;
 
     let tmp = TempDir::new().map_err(|error| io_error_with_phase("setup/tempdir", error))?;
+    #[cfg(windows)]
+    let baseline = if sandboxed {
+        Some(FixtureUserBaseline::establish(&tmp).context("phase=setup/ordinary-user-baseline")?)
+    } else {
+        None
+    };
     let root = tmp
         .path()
         .canonicalize()
@@ -271,6 +279,10 @@ async fn file_system_write_file_writes_bytes(
     let file_path = root.join("existing.txt");
     std::fs::write(&file_path, b"before")
         .map_err(|error| io_error_with_phase("setup/seed-existing-file", error))?;
+    #[cfg(windows)]
+    if let Some(baseline) = &baseline {
+        baseline.verify_inherited(&file_path)?;
+    }
     file_system
         .write_file(
             &PathUri::from_host_native_path(&file_path)?,
@@ -825,6 +837,12 @@ async fn file_system_remove_no_follow_removes_file_and_empty_directory(
         .context("phase=setup/filesystem-context")?;
     let file_system = context.file_system;
     let tmp = TempDir::new().map_err(|error| io_error_with_phase("setup/tempdir", error))?;
+    #[cfg(windows)]
+    let baseline = if sandboxed {
+        Some(FixtureUserBaseline::establish(&tmp).context("phase=setup/ordinary-user-baseline")?)
+    } else {
+        None
+    };
     let root = tmp
         .path()
         .canonicalize()
@@ -839,6 +857,10 @@ async fn file_system_remove_no_follow_removes_file_and_empty_directory(
     let file_path = root.join("remove-me.txt");
     std::fs::write(&file_path, b"remove")
         .map_err(|error| io_error_with_phase("setup/seed-removable-file", error))?;
+    #[cfg(windows)]
+    if let Some(baseline) = &baseline {
+        baseline.verify_inherited(&file_path)?;
+    }
     let result = file_system
         .remove(
             &PathUri::from_host_native_path(&file_path)?,
@@ -861,6 +883,10 @@ async fn file_system_remove_no_follow_removes_file_and_empty_directory(
     let directory_path = root.join("remove-me");
     std::fs::create_dir(&directory_path)
         .map_err(|error| io_error_with_phase("setup/seed-empty-directory", error))?;
+    #[cfg(windows)]
+    if let Some(baseline) = &baseline {
+        baseline.verify_inherited(&directory_path)?;
+    }
     file_system
         .remove(
             &PathUri::from_host_native_path(&directory_path)?,

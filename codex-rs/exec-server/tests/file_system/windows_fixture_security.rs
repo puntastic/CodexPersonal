@@ -1,5 +1,5 @@
-//! Test-owned Windows security observations and an empty-root baseline grant.
-//! Production implementation is unchanged; native fixture effects are VM-only.
+//! Test-owned Windows security observations and fresh-root baseline setup.
+//! Production implementation is unchanged; grants target owned empty fixture roots.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -16,6 +16,7 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::io::FromRawHandle;
 use std::os::windows::io::OwnedHandle;
 use std::path::Path;
+use std::path::PathBuf;
 use std::ptr;
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::ACCESS_ALLOWED_ACE;
@@ -369,4 +370,63 @@ pub(super) fn grant_baseline(root: &Path, caller: &CallerSid, before: &AclFacts)
     };
     ensure!(status == 0, "set fixture baseline ACL: {status}");
     Ok(())
+}
+
+/// Qualifies the ordinary caller-user side before sandbox behavior is tested.
+/// This does not grant sandbox capabilities or establish an isolation boundary.
+pub(super) struct FixtureUserBaseline {
+    root: PathBuf,
+    user: String,
+}
+
+impl FixtureUserBaseline {
+    pub(super) fn establish(directory: &tempfile::TempDir) -> Result<Self> {
+        let metadata = directory.path().symlink_metadata()?;
+        ensure!(
+            metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+            "fixture baseline requires an owned ordinary directory"
+        );
+        let root = directory.path().canonicalize()?;
+        let parent = std::env::temp_dir().canonicalize()?;
+        ensure!(
+            root.parent() == Some(parent.as_path()),
+            "fixture baseline root must be a direct child of the fixture temp directory"
+        );
+        ensure!(
+            std::fs::read_dir(&root)?.next().transpose()?.is_none(),
+            "fixture baseline must be established before children are created"
+        );
+        let caller = CallerSid::read()?;
+        let user = caller.string()?;
+        let before = read_facts(&root)?;
+        grant_baseline(&root, &caller, &before)?;
+        ensure!(
+            read_facts(&root)?.full_user_grant(&user, CHILDREN),
+            "fixture root lacks a qualifying OI|CI full-access allow ACE for the actual user"
+        );
+        Ok(Self { root, user })
+    }
+
+    pub(super) fn verify_inherited(&self, path: &Path) -> Result<()> {
+        let metadata = path.symlink_metadata()?;
+        ensure!(
+            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+            "fixture baseline readback must not follow a reparse point"
+        );
+        let canonical = path.canonicalize()?;
+        ensure!(
+            canonical != self.root && canonical.starts_with(&self.root),
+            "fixture baseline readback escaped the owned root"
+        );
+        let flags = if metadata.is_dir() {
+            INHERITED | CHILDREN
+        } else {
+            INHERITED
+        };
+        ensure!(
+            read_facts(&canonical)?.full_user_grant(&self.user, flags),
+            "fixture child lacks the inherited actual-user full-access allow ACE"
+        );
+        Ok(())
+    }
 }

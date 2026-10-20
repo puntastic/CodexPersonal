@@ -7,6 +7,8 @@ mod common;
 mod shared;
 #[path = "file_system/support.rs"]
 mod support;
+#[path = "file_system/windows_fixture_security.rs"]
+mod windows_fixture_security;
 #[path = "file_system/windows_mutation_discriminator.rs"]
 mod windows_mutation_discriminator;
 
@@ -50,6 +52,7 @@ use crate::support::FileSystemImplementation;
 use crate::support::create_file_system_context;
 use crate::support::is_unsupported_restricted_token_host;
 use crate::support::workspace_write_sandbox;
+use crate::windows_fixture_security::FixtureUserBaseline;
 
 fn create_directory_junction(target: &Path, alias: &Path) -> Result<()> {
     let output = Command::new("cmd")
@@ -101,15 +104,20 @@ async fn file_system_operations_can_reject_junctions_in_any_path_component(
         .context("phase=setup/filesystem-context")?;
     let tmp =
         tempfile::TempDir::new().map_err(|error| io_error_with_phase("setup/tempdir", error))?;
+    let baseline =
+        FixtureUserBaseline::establish(&tmp).context("phase=setup/ordinary-user-baseline")?;
     let real = tmp.path().join("real");
     std::fs::create_dir(&real)
         .map_err(|error| io_error_with_phase("setup/real-directory", error))?;
+    baseline.verify_inherited(&real)?;
     let existing = real.join("existing.txt");
     std::fs::write(&existing, "unchanged")
         .map_err(|error| io_error_with_phase("setup/seed-existing-file", error))?;
+    baseline.verify_inherited(&existing)?;
     let removable = real.join("removable.txt");
     std::fs::write(&removable, "keep")
         .map_err(|error| io_error_with_phase("setup/seed-removable-file", error))?;
+    baseline.verify_inherited(&removable)?;
     let directory_junction = tmp.path().join("directory-junction");
     create_directory_junction(&real, &directory_junction)
         .context("phase=setup/directory-junction")?;
@@ -604,9 +612,12 @@ async fn file_system_private_desktop_survives_helper_exits_and_separates_permiss
     let file_system = context.file_system;
     let tmp =
         tempfile::TempDir::new().map_err(|error| io_error_with_phase("setup/tempdir", error))?;
+    let baseline =
+        FixtureUserBaseline::establish(&tmp).context("phase=setup/ordinary-user-baseline")?;
     let path = tmp.path().join("contents.txt");
     std::fs::write(&path, b"initial")
         .map_err(|error| io_error_with_phase("setup/seed-desktop-test-file", error))?;
+    baseline.verify_inherited(&path)?;
     let uri = PathUri::from_host_native_path(&path)?;
     let sandbox = workspace_write_sandbox(tmp.path().to_path_buf());
     let before = process_private_desktops().context("phase=private-desktop/snapshot-before")?;

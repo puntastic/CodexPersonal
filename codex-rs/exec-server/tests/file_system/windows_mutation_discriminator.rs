@@ -1,24 +1,21 @@
 //! Disposable-only filesystem experiment and bounded reporting.
 //! Production implementation is unchanged; native fixture effects are VM-only.
 
-#[path = "windows_mutation_discriminator/security.rs"]
-mod security;
-
 use crate::support::FileSystemImplementation;
 use crate::support::create_file_system_context;
 use crate::support::workspace_write_sandbox;
+use crate::windows_fixture_security::AclFacts;
+use crate::windows_fixture_security::CHILDREN;
+use crate::windows_fixture_security::CallerSid;
+use crate::windows_fixture_security::INHERITED;
+use crate::windows_fixture_security::grant_baseline;
+use crate::windows_fixture_security::read_facts;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
 use codex_exec_server::RemoveOptions;
 use codex_exec_server::WriteFileOptions;
 use codex_utils_path_uri::PathUri;
-use security::AclFacts;
-use security::CHILDREN;
-use security::CallerSid;
-use security::INHERITED;
-use security::grant_baseline;
-use security::read_facts;
 use serde_json::Value;
 use serde_json::json;
 use std::io;
