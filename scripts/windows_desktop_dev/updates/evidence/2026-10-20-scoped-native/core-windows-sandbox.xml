@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="7" skipped="0" failures="0" errors="0" uuid="45196a76-7b99-4262-8372-3c6be9de8816" timestamp="2026-10-20T01:21:24.054+00:00" time="51.399">
+    <testsuite name="codex-core::windows_sandbox" tests="7" skipped="0" errors="0" failures="0">
+        <testcase name="windows_elevated_approved_git_pull_preserves_deny_read" classname="codex-core::windows_sandbox" timestamp="2026-10-20T01:21:24.055+00:00" time="28.320"/>
+        <testcase name="windows_elevated_does_not_create_missing_workspace_metadata" classname="codex-core::windows_sandbox" timestamp="2026-10-20T01:21:52.375+00:00" time="4.530"/>
+        <testcase name="windows_elevated_enforces_deny_read_and_protects_setup_marker" classname="codex-core::windows_sandbox" timestamp="2026-10-20T01:21:56.906+00:00" time="0.898"/>
+        <testcase name="windows_elevated_powershell_preserves_relative_paths" classname="codex-core::windows_sandbox" timestamp="2026-10-20T01:21:57.804+00:00" time="4.984"/>
+        <testcase name="windows_elevated_temp_only_core_and_direct_spawn_enforce_carveouts" classname="codex-core::windows_sandbox" timestamp="2026-10-20T01:22:02.788+00:00" time="2.765"/>
+        <testcase name="windows_elevated_unified_exec_enforces_large_recursive_deny_reads" classname="codex-core::windows_sandbox" timestamp="2026-10-20T01:22:05.553+00:00" time="7.271"/>
+        <testcase name="windows_sandbox_cli_preserves_managed_deny_reads_across_launches" classname="codex-core::windows_sandbox" timestamp="2026-10-20T01:22:12.824+00:00" time="2.630"/>
+    </testsuite>
+</testsuites>

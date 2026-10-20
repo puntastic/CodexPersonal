@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="1" skipped="0" failures="0" errors="0" uuid="879125da-07d7-41a2-bb49-df05963ea0c5" timestamp="2026-10-20T01:22:26.567+00:00" time="1.004">
+    <testsuite name="codex-windows-sandbox" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="unified_exec::tests::elevated_non_tty_cmd_forwards_env_output_and_exit" classname="codex-windows-sandbox" timestamp="2026-10-20T01:22:26.570+00:00" time="1.001"/>
+    </testsuite>
+</testsuites>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="1" skipped="0" failures="0" errors="0" uuid="2f5b107a-0999-4e93-a31b-6198f1584de2" timestamp="2026-10-20T01:22:23.344+00:00" time="0.991">
+    <testsuite name="codex-exec-server::exec_process" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="windows_sandbox::tmpdir_uses_command_environment_over_rpc::elevated" classname="codex-exec-server::exec_process" timestamp="2026-10-20T01:22:23.345+00:00" time="0.990"/>
+    </testsuite>
+</testsuites>

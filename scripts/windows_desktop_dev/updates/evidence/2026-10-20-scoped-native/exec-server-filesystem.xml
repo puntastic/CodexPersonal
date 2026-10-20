@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="2" skipped="0" failures="0" errors="0" uuid="39515e6a-703a-4b46-853f-96bc4259e91b" timestamp="2026-10-20T01:22:17.902+00:00" time="3.013">
+    <testsuite name="codex-exec-server::file_system_windows" tests="2" skipped="0" errors="0" failures="0">
+        <testcase name="file_system_elevated_relative_read_denial_uses_policy_cwd::local" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T01:22:17.903+00:00" time="1.320"/>
+        <testcase name="file_system_elevated_relative_read_denial_uses_policy_cwd::remote" classname="codex-exec-server::file_system_windows" timestamp="2026-10-20T01:22:19.223+00:00" time="1.692"/>
+    </testsuite>
+</testsuites>

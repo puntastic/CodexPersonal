@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "run_id": 39350468947,
+  "run_url": "https://github.com/puntastic/CodexPersonal/actions/runs/39350468947",
+  "workflow_sha": "1eac41fbac0c741dac4b7f57f5c18125dd97188e",
+  "source_sha": "937efb776e3a737995bdfbf2eab4ecc79d963371",
+  "classification": "Rust test failures; build, capture and report retention succeeded",
+  "rust_cases": {"selected": 24, "passed": 17, "failed": 7, "errors": 0, "selected_case_skips": 0, "retries": 0},
+  "groups": [
+    {"label": "filesystem-diagnostics", "tests": 10, "passed": 3, "failed": 7, "native_exit": 1},
+    {"label": "legacy-capture", "tests": 3, "passed": 3, "failed": 0, "native_exit": 0},
+    {"label": "core-windows-sandbox", "tests": 7, "passed": 7, "failed": 0, "native_exit": 0},
+    {"label": "exec-server-filesystem", "tests": 2, "passed": 2, "failed": 0, "native_exit": 0},
+    {"label": "exec-server-process", "tests": 1, "passed": 1, "failed": 0, "native_exit": 0},
+    {"label": "sandbox-library", "tests": 1, "passed": 1, "failed": 0, "native_exit": 0}
+  ],
+  "capture_selftest": {"python": "3.12.10", "tests": 12, "passed": 12, "seconds": 3.656, "native_exit": 0, "capture_phase": "capture-complete"},
+  "receipt_audit": {
+    "native_receipts": 14,
+    "all_root_exit_observed_and_capture_complete": true,
+    "exact_allowlist_inventory_selection_junit_identity_sets_match": true,
+    "verified_inventory_sha256_count": 6,
+    "verified_junit_sha256_count": 6,
+    "all_group_native_receipts_precede_junit_processing": true,
+    "all_six_groups_reached_completion": true,
+    "all_17_passes_have_retained_success_output": true,
+    "run_output_snapshots_truncated": false,
+    "unsupported_restricted_token_or_explicit_skipping_markers_observed": false,
+    "recovery_projections_retained": 28,
+    "projection_byte_cap": 131072
+  },
+  "failure_phases": [
+    {"phase": "write/sandboxed-existing-file", "count": 2, "cases": ["file_system_operations_can_reject_junctions_in_any_path_component::local", "file_system_operations_can_reject_junctions_in_any_path_component::remote"], "stderr_lines": [56, 75]},
+    {"phase": "private-desktop/initial-existing-write", "count": 1, "cases": ["file_system_private_desktop_survives_helper_exits_and_separates_permissions"], "stderr_lines": [94]},
+    {"phase": "remove/parent-seeded-file", "count": 2, "cases": ["shared::file_system_remove_no_follow_removes_file_and_empty_directory::local_sandboxed", "shared::file_system_remove_no_follow_removes_file_and_empty_directory::remote_sandboxed"], "stderr_lines": [116, 136]},
+    {"phase": "write/parent-seeded-file", "count": 2, "cases": ["shared::file_system_write_file_writes_bytes::local_sandboxed_no_follow", "shared::file_system_write_file_writes_bytes::remote_sandboxed_no_follow"], "stderr_lines": [156, 176]}
+  ],
+  "common_failure_observation": {"io_kind": "InvalidInput", "raw_os_error": null, "nested_message": "Access is denied. (os error 5)"},
+  "legacy_cancel_observation_ms": {"total": 1632, "pre_cancel": 1621, "post_cancel": 11},
+  "source_diagnosis": {
+    "functional_repair_established": false,
+    "source_lineage": "Inspected production paths match source937efb776e3a737995bdfbf2eab4ecc79d963371.",
+    "facts": [
+      "The private-desktop failure uses WriteFileOptions::default, which is follow_symlinks=true. Its failure precedes desktop-lifetime assertions.",
+      "The shared write matrix's local_follow and remote_follow variants are unsandboxed; only its no-follow variants are sandboxed.",
+      "The two failing shared write cases successfully created and verified note.txt through a helper before parent-seeding existing.txt and failing its overwrite.",
+      "No-follow write requests FILE_READ_ATTRIBUTES|FILE_WRITE_DATA|SYNCHRONIZE (0x00100082), then metadata validation, set_len(0), and write_all. It does not request READ_CONTROL.",
+      "No-follow remove first requests attributes/metadata, then DELETE|SYNCHRONIZE (0x00110000), then FileDispositionInfo. Current diagnostics do not distinguish these native stages.",
+      "Follow=true uses tokio::fs::write; Rust1.95's normal write open requests GENERIC_WRITE, which includes READ_CONTROL. Its observed existing-file failure counters a no-follow-only missing-access-bit explanation.",
+      "Each filesystem request creates a sandbox command and each legacy launch reapplies ACL preparation with a fresh restricted token. The shared cache owns the private desktop, not ACL preparation.",
+      "ACL preparation calls writable-root grants with OI|CI inheritance, but discards grant errors. Root-mask sufficiency can skip rewriting without checking inheritance flags or enumerating child ACLs.",
+      "Legacy restricting SIDs include root capabilities, logon SID and Everyone, without the explicit TokenUser addition used by the elevated constructor. The restricted token's default DACL grants its creating logon full access and OWNER RIGHTS only READ_CONTROL.",
+      "The token uses DISABLE_MAX_PRIVILEGE|LUA_TOKEN|WRITE_RESTRICTED and explicitly enables SeChangeNotifyPrivilege. An elevated parent seed write is not an ordinary-user/restricted-token write-access baseline.",
+      "PermissionDenied is flattened to invalid_request and then InvalidInput across the filesystem RPC mapping. raw_os_error=None at the test boundary therefore does not contradict the retained native OS5 message."
+    ],
+    "source_anchors": [
+      "codex-rs/exec-server/tests/file_system/shared.rs:222,245,270,840",
+      "codex-rs/exec-server/tests/file_system_windows.rs:605,612,625",
+      "codex-rs/file-system/src/lib.rs:74",
+      "codex-rs/exec-server/src/local_file_system.rs:622",
+      "codex-rs/exec-server/src/no_follow/windows.rs:201,256,318",
+      "codex-rs/exec-server/src/fs_sandbox.rs:84",
+      "codex-rs/windows-sandbox-rs/src/unified_exec/backends/legacy.rs:370",
+      "codex-rs/windows-sandbox-rs/src/spawn_prep.rs:277",
+      "codex-rs/windows-sandbox-rs/src/acl.rs:619,874",
+      "codex-rs/windows-sandbox-rs/src/token.rs:56,397,481,500",
+      "codex-rs/exec-server/src/server/file_system_handler.rs:360",
+      "codex-rs/exec-server/src/sandboxed_file_system.rs:480"
+    ],
+    "next_discriminator_proposed_only": [
+      "On a disposable VM only, use one local sandboxed fixture with parent-seeded and helper-created files under the same root/policy, comparing actual follow=true and follow=false writes.",
+      "Record bounded owner/group/ACE-mask/inheritance facts before and after preparation, plus the selected restricted token's relevant User/logon/capability SID and privilege facts. Record root-grant Result before its current discard.",
+      "Expose the first native failure stage and OS code before RPC conversion: open, metadata, truncate/write, or delete disposition. Do not use AccessCheck alone as an operation oracle.",
+      "Only if observed baseline/grant evidence supports it, compare a separate fresh fixture root with a verified inheritable ordinary-user full-access baseline established before seeding. This is a fixture discriminator, not authorization to weaken production restrictions."
+    ],
+    "repair_boundary": "No production token/access-mask/ACL repair follows yet. A fixture-baseline correction is conditional on observed missing baseline rights; ignored grant errors warrant observation, not an automatic policy change. Accepted legacy deletion behavior remains separate."
+  },
+  "limits": [
+    "No native operation was executed locally during this triage.",
+    "Executable hashes are recorded by CI but cannot be recomputed because binaries were not retained.",
+    "Complete capture does not establish descendant completion or final log completeness.",
+    "No explicit skip marker was observed in complete-at-snapshot run logs; this is not a universal audit of every possible silent early return.",
+    "The accepted legacy writable-root deletion limitation was not selected and remains separate.",
+    "Operation-level diagnostics do not identify the exact denying ACL, native call or token access-check stage."
+  ],
+  "evidence_sha256": {
+    "evidence/results.json": "e70e980ecdd3dd9c3d1a68cc39f7bd91fc2cffe49cc2c18b846b853fe9573c60",
+    "evidence/provenance.json": "1fd760da42d791c7f1faa4cf138a9308530059c0fe6850a93dd093c8f03a788a",
+    "evidence/selected-tests.json": "d68db31b1068ccb94ee5f50962420a21fe12723c3a9842ff8449cf93c866e7d6",
+    "evidence/phases.jsonl": "264e738fe189da31a241d300147a87e8c995591c362582af493ad51f4e390afd",
+    "evidence/filesystem-diagnostics-run-stderr-tail.txt": "9a7496f99724cb4f8745646eb3e161cae7493928e491ddd75aeb911aad159adb",
+    "evidence/legacy-capture-run-stderr-tail.txt": "541ea5c7220a76a1c83715e82235b562a581d5dc4f0b921b6fe9c2da382ff401"
+  }
+}
