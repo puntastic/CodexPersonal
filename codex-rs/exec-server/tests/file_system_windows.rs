@@ -7,6 +7,8 @@ mod common;
 mod shared;
 #[path = "file_system/support.rs"]
 mod support;
+#[path = "file_system/windows_mutation_discriminator.rs"]
+mod windows_mutation_discriminator;
 
 use std::collections::BTreeSet;
 use std::ffi::c_void;
