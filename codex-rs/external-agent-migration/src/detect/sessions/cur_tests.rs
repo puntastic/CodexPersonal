@@ -35,6 +35,33 @@ fn detects_cur_transcript_with_project_cwd() {
 }
 
 #[test]
+fn detects_cur_transcript_with_multiple_punctuated_ancestors() {
+    let root = TempDir::new().expect("tempdir");
+    let project_root = root
+        .path()
+        .join("cwspace-12345-1")
+        .join("test-tmp")
+        .join("my-project");
+    fs::create_dir_all(&project_root).expect("project root");
+    let external_agent_home = root.path().join(".external");
+    let transcript = write_transcript(
+        &external_agent_home,
+        &encode_project_path(&project_root),
+        "nested-session",
+        "first request",
+    );
+
+    assert_eq!(
+        detect_recent_cur_sessions(&external_agent_home, root.path()).expect("detect sessions"),
+        vec![ExternalAgentSessionMigration {
+            path: transcript,
+            cwd: project_root,
+            title: Some("first request".to_string()),
+        }]
+    );
+}
+
+#[test]
 fn detects_projectless_cur_transcript_without_embedded_metadata() {
     let root = TempDir::new().expect("tempdir");
     let external_agent_home = root.path().join(".cursor");
@@ -225,6 +252,19 @@ fn rejects_ambiguous_cur_project_with_punctuated_ancestor() {
 }
 
 #[test]
+fn resolves_cur_project_with_dead_end_punctuated_ancestor() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("a").join("b").join("c");
+    fs::create_dir_all(&project).expect("project root");
+    fs::create_dir_all(root.path().join("a-b")).expect("unrelated ancestor");
+
+    assert_eq!(
+        decode_cur_project_path(&encode_project_path(&project)),
+        Some(project)
+    );
+}
+
+#[test]
 fn rejects_ambiguous_cur_project_with_multiple_punctuated_ancestors() {
     for (first, second) in [
         (&["a-b", "c-d", "e"][..], &["a", "b", "c", "d-e"][..]),
@@ -261,6 +301,61 @@ fn parses_windows_cursor_fixture_project_directory() {
         Some(('C', "Users-fixture-Cursor"))
     );
     assert_eq!(decode_cur_windows_project_drive("1-Users-fixture"), None);
+}
+
+#[test]
+fn resolves_cur_project_with_native_root_encodings() {
+    #[cfg(windows)]
+    let (project, encodings) = (
+        PathBuf::from(r"D:\a\_temp\cwspace-12345-1\test-tmp\repo"),
+        [
+            "D--a-_temp-cwspace-12345-1-test-tmp-repo",
+            "D-a-_temp-cwspace-12345-1-test-tmp-repo",
+        ],
+    );
+    #[cfg(not(windows))]
+    let (project, encodings) = (
+        PathBuf::from("/tmp/cwspace-12345-1/test-tmp/repo"),
+        [
+            "tmp-cwspace-12345-1-test-tmp-repo",
+            "-tmp-cwspace-12345-1-test-tmp-repo",
+        ],
+    );
+
+    for encoded in encodings {
+        assert_eq!(
+            decode_cur_project_path_with_probe(encoded, |candidate| project.starts_with(candidate)),
+            Some(project.clone())
+        );
+    }
+}
+
+#[test]
+fn rejects_cur_project_when_probe_budget_expires_after_a_match() {
+    let root = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" });
+    let components: Vec<_> = (0..24).map(|index| format!("part{index}")).collect();
+    let mut project = root.clone();
+    for component in components.chunks(4) {
+        project.push(component.join("-"));
+    }
+    let unmerged = components.iter().fold(root, |path, part| path.join(part));
+    let incomplete_branch = unmerged.parent().expect("incomplete branch");
+    let mut probes = 0;
+    let mut saw_match = false;
+
+    assert_eq!(
+        decode_cur_project_path_with_probe(&encode_project_path(&unmerged), |candidate| {
+            probes += 1;
+            saw_match |= candidate == project.as_path();
+            project.starts_with(candidate) || incomplete_branch.starts_with(candidate)
+        }),
+        None
+    );
+    assert!(
+        saw_match,
+        "the unique-looking match must not bypass the remaining checks"
+    );
+    assert_eq!(probes, MAX_CUR_PROJECT_PATH_PROBES);
 }
 
 #[test]
