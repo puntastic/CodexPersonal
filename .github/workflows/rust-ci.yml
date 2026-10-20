@@ -1,7 +1,8 @@
 # THROWAWAY PURPOSE-BRANCH PILOT ONLY. Do not merge this replacement into main.
 # Reuses the existing workflow ID/path for dispatch with ref=codex/windows-isolated-tests-20261017.
 # Production code is checked out at SOURCE_SHA; the workflow revision is recorded separately.
-name: Windows scoped native and account qualification
+# Reviewed test-only source is pinned; native effects stay on this disposable VM.
+name: Windows filesystem mutation discriminator
 
 on:
   workflow_dispatch:
@@ -10,11 +11,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-scoped-native-account-qualification
+  group: windows-filesystem-mutation-discriminator
   cancel-in-progress: false
 
 jobs:
-  qualify-scoped-native-account-cases:
+  qualify-filesystem-mutation-discriminator:
     if: >-
       github.repository == 'puntastic/CodexPersonal' &&
       github.ref == 'refs/heads/codex/windows-isolated-tests-20261017' &&
@@ -25,8 +26,8 @@ jobs:
       run:
         shell: pwsh
     env:
-      # Reviewed capture helper and compiled diagnostic-only Rust changes.
-      SOURCE_SHA: 937efb776e3a737995bdfbf2eab4ecc79d963371
+      # Reviewed/formatted test-only diagnostic; native compilation is a job gate.
+      SOURCE_SHA: ed187364700f4c0e23aa2c2cf09d3bfdf2f07633
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: never
@@ -67,7 +68,7 @@ jobs:
           if ($env:SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Reviewed source SHA has not been pinned.' }
           $head = (& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch.' }
-          $root = Join-Path $env:RUNNER_TEMP "cwscoped-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwfsprobe-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $root) { throw 'Pilot output root must be new.' }
           foreach ($child in @('target', 'test-tmp', 'evidence')) {
             New-Item -ItemType Directory -Path (Join-Path $root $child) | Out-Null
@@ -87,7 +88,7 @@ jobs:
             powershell_fixture_sha256 = (Get-FileHash -LiteralPath $powerShell -Algorithm SHA256).Hash
             sandbox_accounts_initially_absent = $true
             cleanup_boundary = 'Native, account, desktop and test-path ACL effects occur only on this disposable Windows 2025 VM. No extra provisioning, PID killing, force cleanup or global uninstall; the VM is discarded.'
-            proof_boundary = 'Exactly 24 selected Rust cases: 9 native filesystem diagnostics plus one pure error check, 3 legacy capture cases, and the original 11 elevated/account cases. All serial, retries zero. The separate Python capture-helper self-tests are not part of this Rust population. No full workspace inventory/run, canonical package, installation, deployment, credentials or settings changes. Passes may include explicitly reported unsupported-token early returns and do not establish full path coverage.'
+            proof_boundary = 'Exactly 11 selected Rust cases in file_system_windows: the existing 9 native filesystem diagnostics plus one pure error check, followed by one explicitly ignored parent/helper baseline and follow-mode discriminator. Each inventory must match its exact expected ignored status. Both groups are serial, retries zero. Previously observed legacy/account groups are not rerun. The separate Python capture-helper self-tests are not part of this Rust population. No full workspace inventory/run, canonical package, installation or deployment. Passes may include explicitly reported unsupported-token early returns and do not establish full path coverage.'
             accepted_limitation = 'legacy_workspace_write_delete_is_limited_to_writable_roots is deliberately not selected. Its known boundary remains unresolved, not xfailed or converted into a passing security claim.'
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'provenance.json') -Encoding utf8
           @{
@@ -239,6 +240,13 @@ jobs:
           }
           function Get-SelectedCases([hashtable]$Inventory, [hashtable]$Plan) {
             if (-not $Inventory.ContainsKey('rust-suites')) { throw 'Unsupported nextest inventory.' }
+            if (-not $Plan.ContainsKey('expected_ignored') -or $Plan.expected_ignored -isnot [bool]) {
+              throw 'Plan must declare an exact boolean ignored expectation.'
+            }
+            $expectedRunIgnored = if ($Plan.expected_ignored) { 'only' } else { 'default' }
+            if (-not $Plan.ContainsKey('run_ignored') -or $Plan.run_ignored -cne $expectedRunIgnored) {
+              throw 'Plan ignored expectation and nextest run mode disagree.'
+            }
             $actual = @()
             foreach ($suite in $Inventory['rust-suites'].Values) {
               if ($suite['status'] -ne 'listed') { continue }
@@ -246,10 +254,10 @@ jobs:
                 if ($case.Value['filter-match']['status'] -ne 'matches') { continue }
                 if ($suite['package-name'] -cne $Plan.package -or $suite['binary-name'] -cne $Plan.binary -or
                     $suite['binary-id'] -isnot [string] -or [string]::IsNullOrWhiteSpace($suite['binary-id']) -or
-                    $case.Value['ignored'] -isnot [bool] -or $case.Value['ignored']) {
-                  throw 'Unexpected package/binary, unsupported inventory or ignored case selected.'
+                    $case.Value['ignored'] -isnot [bool] -or $case.Value['ignored'] -ne $Plan.expected_ignored) {
+                  throw 'Unexpected package/binary, unsupported inventory or ignored-status mismatch.'
                 }
-                $actual += @{ package = $suite['package-name']; binary = $suite['binary-name']; binary_id = $suite['binary-id']; test = $case.Key; binary_path = $suite['binary-path'] }
+                $actual += @{ package = $suite['package-name']; binary = $suite['binary-name']; binary_id = $suite['binary-id']; test = $case.Key; binary_path = $suite['binary-path']; ignored = $case.Value['ignored'] }
               }
             }
             if ($actual.Count -ne $Plan.names.Count -or
@@ -315,6 +323,7 @@ jobs:
           $plans = @(
             @{
               label = 'filesystem-diagnostics'; package = 'codex-exec-server'; binary = 'file_system_windows'; target = @('--test', 'file_system_windows')
+              expected_ignored = $false; run_ignored = 'default'
               names = @(
                 'file_system_operations_can_reject_junctions_in_any_path_component::local',
                 'file_system_operations_can_reject_junctions_in_any_path_component::remote',
@@ -329,41 +338,14 @@ jobs:
               )
             },
             @{
-              label = 'legacy-capture'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
+              label = 'filesystem-mutation-discriminator'; package = 'codex-exec-server'; binary = 'file_system_windows'; target = @('--test', 'file_system_windows')
+              expected_ignored = $true; run_ignored = 'only'
               names = @(
-                'unified_exec::tests::legacy_capture_cancellation_terminates_descendants_without_timeout',
-                'unified_exec::tests::legacy_non_tty_cmd_emits_output',
-                'unified_exec::tests::legacy_tty_job_terminates_and_preserves_descendants'
+                'windows_mutation_discriminator::parent_and_helper_files_compare_baselines_and_follow_modes'
               )
-            },
-            # Preserve the original eleven account cases and exact names from
-            # c92d4a63074b7a499041b3e6a5d3056a5df232b9:.github/workflows/rust-ci.yml.
-            @{
-              label = 'core-windows-sandbox'; package = 'codex-core'; binary = 'windows_sandbox'; target = @('--test', 'windows_sandbox')
-              names = @(
-                'windows_sandbox_cli_preserves_managed_deny_reads_across_launches',
-                'windows_elevated_temp_only_core_and_direct_spawn_enforce_carveouts',
-                'windows_elevated_does_not_create_missing_workspace_metadata',
-                'windows_elevated_enforces_deny_read_and_protects_setup_marker',
-                'windows_elevated_powershell_preserves_relative_paths',
-                'windows_elevated_unified_exec_enforces_large_recursive_deny_reads',
-                'windows_elevated_approved_git_pull_preserves_deny_read'
-              )
-            },
-            @{
-              label = 'exec-server-filesystem'; package = 'codex-exec-server'; binary = 'file_system_windows'; target = @('--test', 'file_system_windows')
-              names = @('file_system_elevated_relative_read_denial_uses_policy_cwd::local', 'file_system_elevated_relative_read_denial_uses_policy_cwd::remote')
-            },
-            @{
-              label = 'exec-server-process'; package = 'codex-exec-server'; binary = 'exec_process'; target = @('--test', 'exec_process')
-              names = @('windows_sandbox::tmpdir_uses_command_environment_over_rpc::elevated')
-            },
-            @{
-              label = 'sandbox-library'; package = 'codex-windows-sandbox'; binary = 'codex_windows_sandbox'; target = @('--lib')
-              names = @('unified_exec::tests::elevated_non_tty_cmd_forwards_env_output_and_exit')
             }
           )
-          if (($plans | ForEach-Object { $_.names.Count } | Measure-Object -Sum).Sum -ne 24) { throw 'Expected exactly 24 allowlisted cases.' }
+          if ($plans.Count -ne 2 -or ($plans | ForEach-Object { $_.names.Count } | Measure-Object -Sum).Sum -ne 11) { throw 'Expected exactly 11 allowlisted cases in two plans.' }
           $plans | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'expected-tests.json') -Encoding utf8
           $nextestVersion = @(& cargo nextest --version)
           if ($LASTEXITCODE -ne 0 -or $nextestVersion.Count -eq 0 -or $nextestVersion[0] -notmatch '^cargo-nextest 0\.9\.143(?:\s|$)') {
@@ -419,7 +401,7 @@ jobs:
             $plan.nextest_config_sha256 = (Get-FileHash -LiteralPath $nextestConfig -Algorithm SHA256).Hash
             $nextestConfigArg = "codex-windows-isolated:$nextestConfig"
             $filter = ($plan.names | ForEach-Object { "test(=$_)"} ) -join ' | '
-            $plan.arguments = @('--tool-config-file', $nextestConfigArg, '--profile', 'local', '--locked', '--cargo-profile', 'dev-small', '--run-ignored', 'default', '--ignore-default-filter', '-p', $plan.package) + $plan.target + @('-E', $filter)
+            $plan.arguments = @('--tool-config-file', $nextestConfigArg, '--profile', 'local', '--locked', '--cargo-profile', 'dev-small', '--run-ignored', $plan.run_ignored, '--ignore-default-filter', '-p', $plan.package) + $plan.target + @('-E', $filter)
             $inventoryStartedUtc = [DateTime]::UtcNow
             $listed = Invoke-Captured "list-$($plan.label)" (@($cargo, 'nextest', 'list') + $plan.arguments + @('--message-format', 'json'))
             $inventoryPath = Join-Path $listed.directory 'stdout.log'
@@ -436,7 +418,9 @@ jobs:
             Copy-Item -LiteralPath $inventoryPath -Destination (Join-Path $env:PILOT_EVIDENCE "$($plan.label)-inventory.json")
             $selected += $cases
           }
-          if ($selected.Count -ne 24) { throw 'Expected exactly 24 selected, nonignored tests.' }
+          if ($selected.Count -ne 11 -or @($selected | Where-Object { $_.ignored }).Count -ne 1) {
+            throw 'Expected exactly 11 selected tests: ten nonignored diagnostics and one explicitly ignored discriminator.'
+          }
           Assert-SameCases $selected $selected
           @{ source_sha = $env:SOURCE_SHA; plans = $plans; selected_tests = $selected } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'selected-tests.json') -Encoding utf8
           $binaryHashes = @{}
@@ -461,11 +445,12 @@ jobs:
           @{ source_sha = $env:SOURCE_SHA; helpers = $helpers; sha256_by_path = $binaryHashes } |
             ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $env:PILOT_EVIDENCE 'test-binary-hashes.json') -Encoding utf8
           $results = @()
-          # just test carries --no-fail-fast. Every group and case is serial;
-          # the original eleven shared-account cases remain last.
+          # just test carries --no-fail-fast. Both groups and every case are serial;
+          # only the exact discriminator plan opts into --run-ignored only.
           foreach ($plan in $plans) {
             $result = @{
               group = $plan.label; selected_tests = $plan.cases.Count; exit_code = $null
+              expected_ignored = $plan.expected_ignored; run_ignored = $plan.run_ignored
               wrapper_exit_code = $null; capture_complete = $false; native = $null
               receipt_valid = $false; outcome_passed = $false; report = $null; problems = @(); logs = @{}
             }
@@ -525,7 +510,7 @@ jobs:
       - name: Final resource observation
         if: always()
         run: |
-          $root = Join-Path $env:RUNNER_TEMP "cwscoped-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "cwfsprobe-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $evidence = Join-Path $root 'evidence'
           if (Test-Path -LiteralPath $evidence) {
             Get-PSDrive -PSProvider FileSystem | Select-Object Name, Free, Used |
@@ -569,13 +554,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: windows-scoped-native-account-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-filesystem-mutation-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/cwscoped-${{ github.run_id }}-${{ github.run_attempt }}/native-*/native-result.json
-            ${{ runner.temp }}/cwscoped-${{ github.run_id }}-${{ github.run_attempt }}/native-*/capture-phase.json
-            ${{ runner.temp }}/cwscoped-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
-            ${{ runner.temp }}/cwscoped-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
-            ${{ runner.temp }}/cwscoped-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
-            ${{ runner.temp }}/cwscoped-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
+            ${{ runner.temp }}/cwfsprobe-${{ github.run_id }}-${{ github.run_attempt }}/native-*/native-result.json
+            ${{ runner.temp }}/cwfsprobe-${{ github.run_id }}-${{ github.run_attempt }}/native-*/capture-phase.json
+            ${{ runner.temp }}/cwfsprobe-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.json
+            ${{ runner.temp }}/cwfsprobe-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.jsonl
+            ${{ runner.temp }}/cwfsprobe-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*.xml
+            ${{ runner.temp }}/cwfsprobe-${{ github.run_id }}-${{ github.run_attempt }}/evidence/*-tail.txt
           retention-days: 1
           if-no-files-found: warn
