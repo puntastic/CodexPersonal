@@ -9,6 +9,8 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "deployment_state.ps1")
 . (Join-Path $PSScriptRoot "deployment_transaction.ps1")
 . (Join-Path $PSScriptRoot "deployment.ps1")
+. (Join-Path $PSScriptRoot "deployment_admission.ps1")
+. (Join-Path $PSScriptRoot "admission_test_mocks.ps1")
 
 $script:TransactionTestRealUserSelectorBefore = [System.Environment]::GetEnvironmentVariable(
     "CODEX_CLI_PATH",
@@ -193,7 +195,7 @@ function New-TransactionTestFixture {
     $script:TransactionTestPersistentSelector = $oldEntrypoint
     [System.IO.File]::WriteAllText(
         $config,
-        "KEEP_ME = 'yes'`r`nCODEX_CLI_PATH = '$oldEntrypoint'`r`n",
+        "[mcp_servers.node_repl.env]`r`nKEEP_ME = 'yes'`r`nCODEX_CLI_PATH = '$oldEntrypoint'`r`n",
         [System.Text.UTF8Encoding]::new($false)
     )
     $package = New-TransactionTestPackage `
@@ -1522,9 +1524,9 @@ try {
             (Test-CodexDevPathEqual `
                 -Left $_.PackageDirectory `
                 -Right $rollbackFirst.Release.ReleasePath) -and
-            -not $_.SkipSmokeRequested
+            $_.SkipSmokeRequested
         }).Count -gt 0) `
-        "Managed Rollback did not request full package smoke before mutation."
+        "Managed Rollback did not validate package bytes; bounded compatibility admission replaces version smoke."
 
     $tamperedRollback = New-TransactionTestFixture `
         -Root (Join-Path $testRoot "tampered-rollback-candidate")

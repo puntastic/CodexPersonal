@@ -2,6 +2,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'workflow.ps1')
+. (Join-Path $PSScriptRoot 'admission_test_mocks.ps1')
+function Get-CodexDevAdmissionSnapshot { param($ConfigPath, $DeploymentRoot) return 'synthetic' }
+function Assert-CodexDevAdmissionSnapshot { param($Snapshot, $ConfigPath, $DeploymentRoot) }
 
 $root = 'C:\mock-codex-staging'
 $source = 'C:\mock-codex-candidate'

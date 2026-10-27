@@ -204,6 +204,7 @@ if ($BuildPointerOnly) {
     Write-Output "windows_desktop_dev Build pointer mocks: PASS"
     exit 0
 }
+. (Join-Path $PSScriptRoot 'admission_test_mocks.ps1')
 
 $script:SelfTestRealUserSelectorBefore = [System.Environment]::GetEnvironmentVariable(
     "CODEX_CLI_PATH",
@@ -450,6 +451,8 @@ try {
     New-FakeCodexPackage -Path $packageTwo -Marker "two"
     $infoOne = Get-CodexDevPackageInfo -PackageDirectory $packageOne -SkipSmoke
     $infoTwo = Get-CodexDevPackageInfo -PackageDirectory $packageTwo -SkipSmoke
+    Assert-CodexDevEqual 'bin/codex-code-mode-host.exe' $infoOne.Files[0].Path 'Package fingerprints require ordinal ordering on every supported shell.'
+    Assert-CodexDevEqual 'bin/codex.exe' $infoOne.Files[1].Path 'Dot/hyphen collation must not change package identity.'
     if ($infoOne.Fingerprint -eq $infoTwo.Fingerprint) {
         throw "Distinct packages received the same fingerprint."
     }

@@ -8,6 +8,9 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "deployment_selector.ps1")
 . (Join-Path $PSScriptRoot "deployment_state.ps1")
 . (Join-Path $PSScriptRoot "deployment_transaction.ps1")
+. (Join-Path $PSScriptRoot "inspection.ps1")
+. (Join-Path $PSScriptRoot "compatibility.ps1")
+. (Join-Path $PSScriptRoot "deployment_admission.ps1")
 . (Join-Path $PSScriptRoot "deployment.ps1")
 
 function Measure-CodexDevStorageRoot {
@@ -150,12 +153,18 @@ function Invoke-CodexDesktopDev {
         [switch]$SkipLatestPackagePointer,
         [string]$ConfigPath = (Get-CodexDevDefaultConfigPath),
         [string]$DeploymentRoot = (Get-CodexDevDefaultDeploymentRoot),
+        [string]$DesktopInstallLocation,
+        [string]$ScratchRoot,
         [switch]$WhatIf,
         [switch]$Json
     )
 
     if ($SkipLatestPackagePointer -and $Action -ne "Build") {
         throw "-SkipLatestPackagePointer is valid only for Build; no action was started."
+    }
+    if ((-not [string]::IsNullOrWhiteSpace($DesktopInstallLocation) -and $Action -notin @('Inspect', 'CheckCompatibility')) -or
+        (-not [string]::IsNullOrWhiteSpace($ScratchRoot) -and $Action -ne 'CheckCompatibility')) {
+        throw 'Explicit Desktop identity is for inspection/probing only; scratch override is for CheckCompatibility only.'
     }
     if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
         throw "The Desktop development lane currently supports Windows only."
@@ -165,6 +174,8 @@ function Invoke-CodexDesktopDev {
             Write-CodexDevResult -Json:$Json -Value @"
 CodexPersonal Windows Desktop lane
 
+  .\codex-dev.ps1 -Action Inspect [-Json]
+  .\codex-dev.ps1 -Action CheckCompatibility -PackageDirectory <package> [-PythonPath <python>]
   .\codex-dev.ps1 -Action Doctor
   .\codex-dev.ps1 -Action Setup
   .\codex-dev.ps1 -Action Just -JustArguments @('test','-p','codex-state')
@@ -186,7 +197,26 @@ Deploy stages an immutable copy and transactionally aligns the User-scope
 CODEX_CLI_PATH next-launch selector, its existing config mirror, and deployment
 state while recording the prior entrypoint and selected build.
 Rollback selects that prior entrypoint; it does not delete packages or data.
+Inspect is nonmutating and does not execute the reader or initialize tooling.
+CheckCompatibility runs bounded synthetic startup probes in an isolated home;
+it requires exact Desktop and history-reader qualifications, not version alone.
+Deploy/Rollback require that admission before changing a selection. Unknown
+contracts/readers stop there. WhatIf never executes a candidate.
 "@
+        }
+        "Inspect" {
+            Write-CodexDevResult -Json:$Json -Value (Get-CodexDevEnvironmentInspection `
+                -ConfigPath $ConfigPath -DeploymentRoot $DeploymentRoot -DesktopInstallLocation $DesktopInstallLocation)
+        }
+        "CheckCompatibility" {
+            if ($WhatIf) {
+                Write-CodexDevResult -Json:$Json -Value ([pscustomobject]@{ Status = 'planned'; Compatible = $false; ProofBoundary = 'No candidate executed; not a compatibility result.' })
+                return
+            }
+            if ([string]::IsNullOrWhiteSpace($PackageDirectory)) { throw 'CheckCompatibility requires an explicit package directory.' }
+            Write-CodexDevResult -Json:$Json -Value (Invoke-CodexDevCompatibilityCheck `
+                -PackageDirectory $PackageDirectory -PythonPath $PythonPath `
+                -DesktopInstallLocation $DesktopInstallLocation -ScratchRoot $ScratchRoot)
         }
         "Doctor" {
             $parameters = @{
@@ -247,6 +277,7 @@ Rollback selects that prior entrypoint; it does not delete packages or data.
                 ConfigPath = $ConfigPath
                 DeploymentRoot = $DeploymentRoot
                 WhatIf = $WhatIf
+                PythonPath = $PythonPath
             }
             Write-CodexDevResult -Json:$Json -Value (Install-CodexDevPackage @parameters)
         }
@@ -260,13 +291,18 @@ Rollback selects that prior entrypoint; it does not delete packages or data.
                 ConfigPath = $ConfigPath
                 DeploymentRoot = $DeploymentRoot
                 WhatIf = $WhatIf
+                PythonPath = $PythonPath
             }
             Write-CodexDevResult -Json:$Json -Value (Invoke-CodexDevRollback @parameters)
         }
         "SelfTest" {
-            $pwsh = Join-Path $PSHOME "pwsh.exe"
+            $pwsh = (Get-Process -Id $PID).Path
             foreach ($testName in @(
                 "environment_tests.ps1",
+                "deployment_config_binding_tests.ps1",
+                "inspection_tests.ps1",
+                "compatibility_bridge_tests.ps1",
+                "deployment_admission_tests.ps1",
                 "deployment_transaction_tests.ps1",
                 "staging_retention_tests.ps1",
                 "tests.ps1"
