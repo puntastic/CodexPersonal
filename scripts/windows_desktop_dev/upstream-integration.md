@@ -9,10 +9,37 @@ and only then select it for the next Desktop restart.
 
 ## Current update and last qualification
 
-The October 18 shared-runtime candidate is still undergoing qualification;
-see [its current isolation and repair checkpoint](updates/2026-10-18-qualification.md).
-The installed runtime remains the 0.161.0 lineage described below. Do not treat
-later source checkpoints as an installed or fully qualified replacement.
+The latest observed deployed source is the October 27 startup-policy repair,
+`d018eebe0dca9695899f160fc49dd3f67f1685de`, retaining the shared-runtime lineage
+and package version `0.163.0`. Its package fingerprint is
+`44f3a4bbd513aacae804b8b9b4c95844c399355273b105bc57dff99d41402f28`.
+After selection and restart, the expected executable loaded under Windows
+Desktop `26.1021.3705.0`, both startup handshakes succeeded, and Coordinator
+resumed. A subsequent resident check exercised ordinary scoped work. These are
+observed recovery results, not comprehensive runtime or history-integrity
+qualification. See the [October 27 recovery record](updates/2026-10-27-startup-policy.md)
+for exact identities, checks and remaining limits.
+
+The package has external build evidence but no native `codex-dev-build.json`;
+do not manufacture that provenance later. Recovery preserved an actually absent
+prior selector as `Previous=null`, so it is **not an ordinary rollback pair**.
+Retain the recovery journal, before-images and historical packages. The old
+custom binaries lack this Desktop startup contract; stock cannot read the
+custom reference-backed history. Do not replace the selected reader or relabel
+history as generic recovery advice.
+
+The cue-activation table remains commented and the inspected source default is
+disabled. Do not re-enable it as part of startup recovery. Source publication,
+later documentation commits and a package rebuild are separate transitions;
+the compiled identity above does not change when its receipt is updated.
+
+### Historical October qualification
+
+The [October 18 isolation checkpoint](updates/2026-10-18-qualification.md)
+records an earlier qualification stage, followed by the
+[October 20 qualification record](updates/2026-10-20-qualification.md).
+Their then-current or pending statements remain historical evidence, not the
+present installed-state declaration.
 
 The October 8 update completed source/package qualification and next-restart
 selection on October 9. It integrates stable `rust-v0.161.0`

@@ -138,15 +138,10 @@ impl ConfigRequestProcessor {
             .read_requirements()
             .await
             .map_err(map_error)?;
-        let requirements = map_requirements_to_api(
+        Ok(requirements_read_response(
             requirements,
             self.thread_manager.auth_manager().allowed_login_methods(),
-        );
-
-        Ok(ConfigRequirementsReadResponse {
-            supports_independent_speed_modes: Some(true),
-            requirements,
-        })
+        ))
     }
 
     pub(crate) async fn value_write(
@@ -426,6 +421,16 @@ async fn reload_user_config_inner(config_manager: &ConfigManager, thread_manager
                 tracing::warn!(%thread_id, "configuration kept changing during user reload; enterprise MCP disabled");
             }
         }
+    }
+}
+
+pub(crate) fn requirements_read_response(
+    requirements: Option<ConfigRequirementsToml>,
+    allowed_login_methods: Vec<ForcedLoginMethod>,
+) -> ConfigRequirementsReadResponse {
+    ConfigRequirementsReadResponse {
+        supports_independent_speed_modes: Some(true),
+        requirements: map_requirements_to_api(requirements, allowed_login_methods),
     }
 }
 

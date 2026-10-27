@@ -583,6 +583,7 @@ pub(crate) use apps_processor::AppsRequestProcessor;
 pub(crate) use catalog_processor::CatalogRequestProcessor;
 pub(crate) use command_exec_processor::CommandExecRequestProcessor;
 pub(crate) use config_processor::ConfigRequestProcessor;
+pub(crate) use config_processor::requirements_read_response;
 pub(crate) use diagnostics::read_server_diagnostics;
 pub(crate) use environment_processor::EnvironmentRequestProcessor;
 pub(crate) use feedback_processor::FeedbackRequestProcessor;
@@ -712,7 +713,7 @@ mod thread_lifecycle;
 mod thread_resume_redaction;
 mod thread_summary;
 
-use self::config_errors::*;
+pub(crate) use self::config_errors::config_load_error;
 use self::request_errors::*;
 use self::thread_goal_processor::api_thread_goal_from_state;
 use self::thread_lifecycle::*;
