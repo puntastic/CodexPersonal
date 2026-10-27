@@ -39,7 +39,7 @@ source, staged, configured, and live state separately.
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("Help", "Doctor", "Setup", "Just", "Build", "Deploy", "Verify", "Rollback", "SelfTest")]
+    [ValidateSet("Help", "Inspect", "CheckCompatibility", "Doctor", "Setup", "Just", "Build", "Deploy", "Verify", "Rollback", "SelfTest")]
     [string]$Action = "Help",
 
     [ValidateSet("dev-small", "release")]
@@ -56,6 +56,8 @@ param(
     [switch]$SkipLatestPackagePointer,
     [string]$ConfigPath,
     [string]$DeploymentRoot,
+    [string]$DesktopInstallLocation,
+    [string]$ScratchRoot,
     [switch]$WhatIf,
     [switch]$Json
 )
@@ -88,6 +90,8 @@ foreach ($entry in @{
     RemoteControlAppServerVersion = $RemoteControlAppServerVersion
     ConfigPath = $ConfigPath
     DeploymentRoot = $DeploymentRoot
+    DesktopInstallLocation = $DesktopInstallLocation
+    ScratchRoot = $ScratchRoot
 }.GetEnumerator()) {
     if (-not [string]::IsNullOrWhiteSpace([string]$entry.Value)) {
         $parameters[$entry.Key] = $entry.Value

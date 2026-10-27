@@ -16,14 +16,25 @@ The lane deliberately reuses repository owners:
 ## First contact
 
 ```powershell
+.\codex-dev.ps1 -Action Inspect
+# Development-toolchain diagnosis, when that is actually needed:
 .\codex-dev.ps1 -Action Doctor
 ```
+
+Inspect is the nonmutating environment check. It separates the registered
+Desktop, User selector, inherited selector, actual node_repl config binding,
+ledger and observed loaded child processes. It hashes selected files twice to
+expose changes during reading. It neither runs a CLI nor reads session/auth
+payloads, creates locks, initializes tooling, or calls remote services.
+Unavailable evidence is reported as unavailable, not converted into health.
 
 Doctor reports the bounded Git-visible source state, discovered
 Cargo/Rustup/Python/MSVC/Just/Bazel environment, separate build/format/deploy
 capabilities, deployment-state consistency, persistent User-scope selector,
 config mirror, inherited process-live startup snapshot, restart requirement,
-and free space. It does not install or change anything. If it reports
+and free space. **Doctor is not read-only:** environment initialization may
+refresh local shims and deployment inspection uses lock files. It does not
+install missing tools. If it reports
 `needs_tooling`, provision the repository-owned local
 helpers into the ignored tool cache:
 
@@ -155,12 +166,12 @@ Adapt the assertions to a different migration question.
 Deploy uses that task-scoped last-stable build unless `-PackageDirectory` is
 supplied. It:
 
-1. validates and smoke-runs the package with isolated `CODEX_HOME` and
-   `CODEX_SQLITE_HOME` directories;
+1. validates the full package and qualifies the exact Desktop/reader pairing
+   through bounded synthetic startup probes (see below);
 2. copies it into an immutable release under
    `%LOCALAPPDATA%\OpenAI\Codex\dev-overrides`;
 3. backs up `~/.codex/config.toml` when its mirror must change;
-4. aligns the existing config-mirror line and the User-scope environment
+4. aligns only `mcp_servers.node_repl.env.CODEX_CLI_PATH` and the User-scope environment
    `CODEX_CLI_PATH`; the User-scope value is the authoritative selector hydrated
    into the next Desktop process, whose startup reconciliation mirrors it back
    into config;
@@ -170,7 +181,8 @@ Deployment and rollback share an exclusive deployment-root lock. Before the
 selector/config/state seam, the lane writes a recoverable transaction record
 containing persistent-selector Before/After values, both state snapshots, exact
 config images, and the config backup when needed. A later Deploy or Rollback can
-finish an unambiguous interrupted transaction; ambiguous pending state or plane
+finish an unambiguous interrupted transaction **whose actual reader also passes
+compatibility admission**; ambiguous pending state or plane
 drift fails closed and is reported by Doctor and Verify. Pending is removed only
 after exact final readback of all three durable planes.
 This is a process/interpreter interruption guarantee, not a claim of durable
@@ -187,6 +199,70 @@ fail closed. Before the lane has state, a config-only mirror does not establish
 launcher provenance and is never recorded as `Previous`; rollback becomes
 available only after an authoritative User-scope selector or a managed selection
 has been recorded.
+
+## Compatibility admission, without touching live histories
+
+```powershell
+.\codex-dev.ps1 -Action CheckCompatibility -PackageDirectory <package> -PythonPath <python.exe> -Json
+```
+
+The standalone check does not select, restart or resume anything. It keeps a
+request and report in a new scratch folder, then uses three fresh file-only
+homes: strict startup with the custom cue table, actual local policy propagation,
+and a malformed-config error. The candidate receives literal arguments and a
+minimal environment. Output and root-process time are bounded. Machine-wide
+Codex config/requirements make this isolated route unavailable; it never
+overrides them. This is not a network sandbox or general process-tree jail.
+
+`compatibility_profiles.json` binds reviewed Desktop archive bytes and exact
+history-reader evidence. A version string is insufficient. A new Desktop or
+reader is **unqualified**, not declared broken: review its consumer contract and
+run appropriate reader/checkpoint tests, then add an evidence-backed entry.
+Never copy a previous fingerprint's qualification onto a new binary or replace
+`paginated_refs_v1` with an enum alias. Recorded history qualification is not
+rerun by these startup fixtures. Authenticated policy, actual thread resume,
+whole live-config acceptance and broader runtime health remain separate checks.
+
+Deploy/Rollback run admission automatically under their existing locks. They
+recheck exact package, registered Desktop, probe/registry, receipt and deployment
+state before committing. A copied package is acceptable only with identical
+validated contents. A pending transaction's actual target is checked too.
+An absent/pre-lane reader cannot quietly become a stock fallback. Existing
+transaction compensation still restores exact before-images on a failed write;
+that restoration is not a compatibility endorsement of the prior reader.
+
+`-WhatIf` does not execute candidates and reports compatibility as not probed.
+The internal legacy `-SkipSmoke` parameter does not bypass admission. Explicit
+`-DesktopInstallLocation` is diagnostic-only, never a way to qualify deployment
+against a different installed app. `CheckCompatibility` returns a typed report;
+automated callers must inspect `Compatible`, not only the PowerShell exit code.
+
+These checks protect the project deployment lane. They do **not** intercept a
+Store/Desktop auto-update, monitor in the background or guarantee launch after
+future external changes. Re-run Inspect and compatibility qualification after
+an app update; keep a usable recovery kit outside the application cache.
+
+## Recovery when GPT cannot open
+
+`new-recovery-kit.ps1` builds a new, checked folder from explicit package and
+executable fingerprints plus evidence paths. See
+[the kit's plain-language entry](recovery-start-here.md). Its default launcher
+only inspects; terminal fallback is an explicit printed command, never an
+automatic launch/resume. No execution-policy bypass is installed.
+
+The kit copies operator code/instructions, not credentials, config contents,
+session payloads, evidence bodies or binaries. Package availability and
+off-machine backup remain separate concerns. A null Previous entry is not
+ordinary Rollback. Preserve before-images and get a deliberate recovery appraisal.
+
+Focused safeguards tests: `deployment_config_binding_tests.ps1`,
+`inspection_tests.ps1`, `compatibility_bridge_tests.ps1`,
+`deployment_admission_tests.ps1`, and Python's `test_compatibility_probe.py`.
+PowerShell tests are in SelfTest. Run the Python suite with an existing Python:
+
+```powershell
+python -B -m unittest discover -s scripts/windows_desktop_dev -p test_compatibility_probe.py -v
+```
 
 Receipts are evidence, not the transaction owner. A completed setup, build, or
 selection is not undone or reported as unperformed merely because its receipt

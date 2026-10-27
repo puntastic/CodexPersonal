@@ -4,11 +4,13 @@ function Install-CodexDevPackage {
         [string]$PackageDirectory,
         [string]$ConfigPath,
         [string]$DeploymentRoot,
+        [string]$PythonPath,
         [switch]$SkipSmoke
     )
 
-    $skipPreflightSmoke = $SkipSmoke -or $WhatIfPreference
-    $package = Get-CodexDevPackageInfo -PackageDirectory $PackageDirectory -SkipSmoke:$skipPreflightSmoke
+    # The bounded compatibility probe replaces the unbounded version smoke.
+    # SkipSmoke is retained for source compatibility, never as an admission bypass.
+    $package = Get-CodexDevPackageInfo -PackageDirectory $PackageDirectory -SkipSmoke
     $config = [System.IO.Path]::GetFullPath($ConfigPath)
     $root = [System.IO.Path]::GetFullPath($DeploymentRoot)
     $selection = Get-CodexDevPackageSelection $package
@@ -81,12 +83,19 @@ function Install-CodexDevPackage {
                 "none"
             }
             ConfiguredPreviousSettlement = $configuredPreviousSettlement
+            Compatibility = 'not_probed; actual selection requires compatibility admission'
             Blockers = $planBlockers
         }
     }
 
+    $admissionReceipts = [System.Collections.Generic.List[object]]::new()
     $operation = Invoke-WithCodexDevDeploymentLock -DeploymentRoot $root -Body {
         Invoke-WithCodexDevConfigLock -ConfigPath $config -Body {
+        $admissionSnapshot = Get-CodexDevAdmissionSnapshot -ConfigPath $config -DeploymentRoot $root
+        $compatibility = Assert-CodexDevSelectionAdmission -Candidate $package -PythonPath $PythonPath
+        Assert-CodexDevRecoveryAdmission -ConfigPath $config -DeploymentRoot $root -PythonPath $PythonPath
+        Assert-CodexDevAdmissionSnapshot -Snapshot $admissionSnapshot -ConfigPath $config -DeploymentRoot $root
+        $admissionReceipts.Add($compatibility)
         $recovery = Repair-CodexDevInterruptedTransaction `
             -ConfigPath $config `
             -DeploymentRoot $root
@@ -129,7 +138,7 @@ function Install-CodexDevPackage {
                     Copy-Item -Destination $staging -Recurse -Force
                 $staged = Get-CodexDevPackageInfo `
                     -PackageDirectory $staging `
-                    -SkipSmoke:$SkipSmoke
+                    -SkipSmoke
                 if ($staged.Fingerprint -ne $package.Fingerprint) {
                     throw "Staged package fingerprint changed during copy."
                 }
@@ -153,12 +162,13 @@ function Install-CodexDevPackage {
         } else {
             $existing = Get-CodexDevPackageInfo `
                 -PackageDirectory $releasePath `
-                -SkipSmoke:$SkipSmoke
+                -SkipSmoke
             if ($existing.Fingerprint -ne $package.Fingerprint) {
                 throw "Existing release ID has a different package fingerprint: $releasePath"
             }
         }
 
+        $null = Assert-CodexDevCompatibilityBinding -Check $compatibility -PackageDirectory $releasePath
         $configTransition = Get-CodexCliConfigTransition `
             -ConfigPath $config `
             -Entrypoint $entrypoint
@@ -390,6 +400,7 @@ function Install-CodexDevPackage {
     if ($operation.Status -eq "already_selected" -and $null -eq $operation.Recovery) {
         return [pscustomobject]@{
             Status = $operation.Status
+            Compatibility = $admissionReceipts[0]
             Release = $operation.Release
             Previous = $operation.Previous
             ConfigPath = $config
@@ -423,12 +434,14 @@ function Install-CodexDevPackage {
             )
             Recovery = $operation.Recovery
             Selection = $selection
+            Compatibility = $admissionReceipts[0]
         })
     } catch {
         $receiptError = $_.Exception.Message
     }
     return [pscustomobject]@{
         Status = $operation.Status
+        Compatibility = $admissionReceipts[0]
         Release = $operation.Release
         Previous = $operation.Previous
         ConfigPath = $config
@@ -1144,7 +1157,8 @@ function Invoke-CodexDevRollback {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [string]$ConfigPath,
-        [string]$DeploymentRoot
+        [string]$DeploymentRoot,
+        [string]$PythonPath
     )
 
     $config = [System.IO.Path]::GetFullPath($ConfigPath)
@@ -1163,14 +1177,27 @@ function Invoke-CodexDevRollback {
         throw "Cannot roll back: $($rollbackPlan.Blockers -join ' ')"
     }
     if (-not $PSCmdlet.ShouldProcess($config, "Select previous Desktop override for the next restart")) {
+        $rollbackPlan | Add-Member -NotePropertyName Compatibility -NotePropertyValue 'not_probed; actual selection requires compatibility admission' -Force
         return $rollbackPlan
     }
 
+    $admissionReceipts = [System.Collections.Generic.List[object]]::new()
     $operation = Invoke-WithCodexDevDeploymentLock -DeploymentRoot $root -Body {
         Invoke-WithCodexDevConfigLock -ConfigPath $config -Body {
+        $admissionSnapshot = Get-CodexDevAdmissionSnapshot -ConfigPath $config -DeploymentRoot $root
+        # A pre-lock plan is only a preview. Rebind the target after acquiring
+        # both locks so a completed/newer transaction cannot lend its receipt.
+        $rollbackPlan = Get-CodexDevRollbackPlan -ConfigPath $config -DeploymentStatus (
+            Get-CodexDevDeploymentStatusUnlocked -ConfigPath $config -DeploymentRoot $root)
+        if ($rollbackPlan.Status -eq 'blocked') { throw "Cannot roll back: $($rollbackPlan.Blockers -join ' ')" }
+        $admissionCandidate = if ($rollbackPlan.RecoveryCompletesRequest) { $rollbackPlan.Current } else { $rollbackPlan.Previous }
+        $compatibility = Assert-CodexDevSelectionAdmission -Candidate $admissionCandidate -PythonPath $PythonPath
+        Assert-CodexDevRecoveryAdmission -ConfigPath $config -DeploymentRoot $root -PythonPath $PythonPath
+        Assert-CodexDevAdmissionSnapshot -Snapshot $admissionSnapshot -ConfigPath $config -DeploymentRoot $root
+        $admissionReceipts.Add($compatibility)
         if ($rollbackPlan.RecoveryCompletesRequest) {
             $recoveryCandidate = Get-CodexDevRollbackCandidateValidation `
-                -Candidate $rollbackPlan.Current
+                -Candidate $rollbackPlan.Current -SkipSmoke
             if (-not $recoveryCandidate.Valid) {
                 throw "Cannot complete interrupted Rollback: $($recoveryCandidate.Error)"
             }
@@ -1196,7 +1223,7 @@ function Invoke-CodexDevRollback {
         }
         if ($rollbackPlan.RecoveryDisposition -eq "settle_configured_previous") {
             $settlementCandidate = Get-CodexDevRollbackCandidateValidation `
-                -Candidate $rollbackPlan.Current
+                -Candidate $rollbackPlan.Current -SkipSmoke
             if (-not $settlementCandidate.Valid) {
                 throw "Cannot settle Rollback to configured Previous: $($settlementCandidate.Error)"
             }
@@ -1288,11 +1315,12 @@ function Invoke-CodexDevRollback {
             throw "Previous Desktop override no longer exists: $previousEntrypoint"
         }
         $candidateValidation = Get-CodexDevRollbackCandidateValidation `
-            -Candidate $previous
+            -Candidate $previous -SkipSmoke
         if (-not $candidateValidation.Valid) {
             throw "Cannot roll back: $($candidateValidation.Error)"
         }
 
+        $null = Assert-CodexDevCompatibilityBinding -Check $compatibility -PackageDirectory ([string](Get-CodexDevObjectProperty -Value $candidateValidation.Package -Name 'PackageRoot'))
         $configTransition = Get-CodexCliConfigTransition `
             -ConfigPath $config `
             -Entrypoint $previousEntrypoint
@@ -1351,6 +1379,7 @@ function Invoke-CodexDevRollback {
     $receiptError = $null
     try {
         $receipt = Write-CodexDevReceipt -Action "Rollback" -Details ([ordered]@{
+            Compatibility = $admissionReceipts[0]
             ConfigPath = $config
             ConfiguredBefore = $operation.ConfiguredBefore
             ConfiguredAfter = $operation.ConfiguredEntrypoint
@@ -1368,6 +1397,7 @@ function Invoke-CodexDevRollback {
     }
     return [pscustomobject]@{
         Status = $operation.Status
+        Compatibility = $admissionReceipts[0]
         PersistentEntrypoint = $operation.PersistentEntrypoint
         ConfiguredEntrypoint = $operation.ConfiguredEntrypoint
         ProcessLiveEntrypoint = $env:CODEX_CLI_PATH

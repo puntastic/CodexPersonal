@@ -118,7 +118,7 @@ function Assert-CodexDevPackageExecutableTargets {
     )
 
     foreach ($executable in @(Get-ChildItem -LiteralPath $PackageRoot -Recurse -File -Filter "*.exe")) {
-        $relativePath = [System.IO.Path]::GetRelativePath($PackageRoot, $executable.FullName)
+        $relativePath = Get-CodexDevPackageRelativePath $PackageRoot $executable.FullName
         $executablePath = $executable.FullName
         $actualTarget = Get-CodexDevWindowsExecutableTarget $executablePath
         if ($actualTarget -ne $ExpectedTarget) {
@@ -187,15 +187,18 @@ function Get-CodexDevPackageInfo {
     Assert-CodexDevPackageExecutableTargets -PackageRoot $packageRoot -ExpectedTarget $expectedTarget
 
     $provenancePath = Join-Path $packageRoot "codex-dev-build.json"
-    $artifactFiles = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File | Where-Object {
+    $artifactPaths = [string[]]@(Get-ChildItem -LiteralPath $packageRoot -Recurse -File | Where-Object {
         -not [string]::Equals(
             $_.FullName,
             $provenancePath,
             [System.StringComparison]::OrdinalIgnoreCase
         )
-    } | Sort-Object FullName)
-    $hashRows = foreach ($artifactFile in $artifactFiles) {
-        $relativePath = [System.IO.Path]::GetRelativePath($packageRoot, $artifactFile.FullName)
+    } | ForEach-Object { $_.FullName })
+    # Artifact identity must not depend on PS5/PS7 culture/collation differences.
+    [Array]::Sort($artifactPaths, [StringComparer]::Ordinal)
+    $hashRows = foreach ($artifactPath in $artifactPaths) {
+        $artifactFile = Get-Item -LiteralPath $artifactPath -ErrorAction Stop
+        $relativePath = Get-CodexDevPackageRelativePath $packageRoot $artifactFile.FullName
         [pscustomobject]@{
             Path = $relativePath.Replace("\", "/")
             Sha256 = (Get-FileHash -LiteralPath $artifactFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

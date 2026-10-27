@@ -9,6 +9,13 @@ and only then select it for the next Desktop restart.
 
 ## Current update and last qualification
 
+The operator lane now includes [the October 27 safeguards](updates/2026-10-27-safeguards.md):
+use `Inspect` for a nonmutating first check and `CheckCompatibility` before
+considering a reader/registered-Desktop pair qualified. Deploy/Rollback require
+that gate. Unknown versions/hashes require source/reader qualification, not an
+automatic stock fallback. This source/tooling addition does not change the
+deployed Rust binary identified below.
+
 The latest observed deployed source is the October 27 startup-policy repair,
 `d018eebe0dca9695899f160fc49dd3f67f1685de`, retaining the shared-runtime lineage
 and package version `0.163.0`. Its package fingerprint is

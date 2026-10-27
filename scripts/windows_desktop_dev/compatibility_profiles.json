@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "desktop_contracts": [
+    {
+      "id": "windows-desktop-26.1021.3705.0-startup-v1",
+      "package_version": "26.1021.3705.0",
+      "app_asar_sha256": "04862a659c6a90fc50514d8c0b8016709d97dece58839726c57495ed72f1d9f0",
+      "client_version": "26.1021.31345",
+      "basis": "Reviewed installed startup consumer and observed recovery; updates/2026-10-27-startup-policy.md. Unknown Desktop bytes require fresh contract review."
+    }
+  ],
+  "qualified_readers": [
+    {
+      "executable_sha256": "d73b93502e6b542f972766f2096566ffd6f1c75a23eeaa86a9f308d3648a2300",
+      "package_fingerprint": "44f3a4bbd513aacae804b8b9b4c95844c399355273b105bc57dff99d41402f28",
+      "source_commit": "d018eebe0dca9695899f160fc49dd3f67f1685de",
+      "history_formats": ["paginated_refs_v1"],
+      "evidence_kind": "external-qualified-build-and-observed-resume",
+      "basis": "79 recorded history/checkpoint checks and observed Coordinator resume, with test ordering and missing native provenance qualified in updates/2026-10-27-startup-policy.md. This entry is recorded evidence, not a new codec test."
+    },
+    {
+      "executable_sha256": "173d6595a8c2813bb351cf160184259dd6e4e06ab2ebc55a30e461f3d6a9ebf3",
+      "package_fingerprint": "9c274537f15ed80aaffd896e5e48e518afa2687e62e91c49d9e2ef9c8bf39d2e",
+      "source_commit": "3c9af802b8c8505fdd2d4e7c5828f0baec6b1667",
+      "history_formats": ["paginated_refs_v1"],
+      "evidence_kind": "historical-qualified-reader",
+      "basis": "Retained native provenance and prior working custom reader. This is NOT approval for the current Desktop; its startup contract must independently pass."
+    }
+  ]
+}

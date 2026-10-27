@@ -212,10 +212,22 @@ function Get-CodexDevSha256Text {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        return ([Convert]::ToHexString($sha.ComputeHash($bytes))).ToLowerInvariant()
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
     } finally {
         $sha.Dispose()
     }
+}
+
+function Get-CodexDevPackageRelativePath {
+    param([string]$Root, [string]$Path)
+    # Package enumeration needs only descendants, not arbitrary relative paths.
+    # This also works in the independent Windows PowerShell 5.1 recovery host.
+    $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $full = [IO.Path]::GetFullPath($Path)
+    if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Package file escaped its declared root.'
+    }
+    return $full.Substring($prefix.Length)
 }
 
 function Write-CodexDevJson {
