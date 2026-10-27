@@ -1,3 +1,25 @@
+# Desktop startup policy preflight
+
+`codex app-server --print-startup-config` loads the effective, non-project
+configuration and managed requirements, prints one JSON document, and exits
+without starting transports, thread storage, plugins, or model work. The response
+contains the compiled `appServerVersion` and the same `configRequirements` shape
+as `configRequirements/read`, including a present nullable `requirements` field.
+
+`--startup-client-info '{"name":"codex_desktop","title":"Codex Desktop","version":"..."}'`
+sets the requesting client identity before authentication and policy requests.
+`--startup-sign-out` explicitly signs out of the configured credential store
+before resolving cloud requirements; host-managed workload identity cannot be
+signed out. These options require `--print-startup-config`.
+
+Configuration failures produce a nonzero exit and `{ "error": { "code": ...,
+"message": ..., "data": ... } }`, with no success/default-policy substitution.
+Local failures use `data.reason: "configLoad"` and include a file location when
+available; cloud failures preserve the existing `cloudConfigBundle` reason,
+error code, status, and relogin action. Callers must parse the entire stdout as
+one document and must not treat an error or a missing policy response as an
+unrestricted policy.
+
 # Thread list exclusions
 
 `thread/list` accepts `excludedThreadIds`, an optional array of up to 100

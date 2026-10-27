@@ -573,6 +573,27 @@ struct AppServerCommand {
     #[command(subcommand)]
     subcommand: Option<AppServerSubcommand>,
 
+    /// Print the startup policy envelope and exit before starting the app server.
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with_all = ["listen", "stdio", "remote_control", "managed_daemon"]
+    )]
+    print_startup_config: bool,
+
+    /// Client identity used while resolving startup configuration.
+    #[arg(
+        long,
+        hide = true,
+        requires = "print_startup_config",
+        value_parser = |value: &str| serde_json::from_str::<codex_app_server_protocol::ClientInfo>(value)
+    )]
+    startup_client_info: Option<codex_app_server_protocol::ClientInfo>,
+
+    /// Sign out before reading startup policy for the signed-out state.
+    #[arg(long, hide = true, requires = "print_startup_config")]
+    startup_sign_out: bool,
+
     #[command(flatten)]
     code_mode_host: codex_app_server::AppServerCodeModeHostArgs,
 
@@ -1237,6 +1258,9 @@ async fn cli_main(
         Some(Subcommand::AppServer(app_server_cli)) => {
             let AppServerCommand {
                 subcommand,
+                print_startup_config,
+                startup_client_info,
+                startup_sign_out,
                 code_mode_host,
                 strict_config: app_server_strict_config,
                 listen,
@@ -1247,6 +1271,28 @@ async fn cli_main(
                 auth,
             } = app_server_cli;
             let strict_config = app_server_strict_config || root_strict_config;
+            if print_startup_config {
+                anyhow::ensure!(
+                    subcommand.is_none(),
+                    "--print-startup-config cannot be combined with an app-server subcommand"
+                );
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "app-server --print-startup-config",
+                )?;
+                codex_app_server::print_startup_config(
+                    arg0_paths.clone(),
+                    root_config_overrides,
+                    codex_app_server::StartupConfigOptions {
+                        client_info: startup_client_info,
+                        sign_out: startup_sign_out,
+                        strict_config,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             reject_strict_config_for_app_server_subcommand(strict_config, subcommand.as_ref())?;
             reject_remote_mode_for_app_server_subcommand(
                 root_remote.as_deref(),
@@ -5007,3 +5053,7 @@ enabled = true
 #[cfg(all(test, unix))]
 #[path = "daemon_update_tests.rs"]
 mod daemon_update_tests;
+
+#[cfg(test)]
+#[path = "startup_config_tests.rs"]
+mod startup_config_tests;
